@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "shopsystem_bc_launcher",
+  "project_id": "53d541df-a20b-4647-8639-ecfded13c9d3"
+}

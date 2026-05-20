@@ -1,0 +1,17 @@
+# Python build / cache artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+build/
+dist/
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+*.db
+.beads-credential-key
+
+# Inter-shop message runtime artifacts (per-message YAML; not source).
+/inbox/
+/outbox/
