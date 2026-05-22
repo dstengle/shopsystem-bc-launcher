@@ -35,9 +35,9 @@ Inbox and outbox state are stored in postgres; there are no inbox or outbox
 YAML files on the filesystem. All messaging operations go through the
 `shop-msg` CLI:
 
-- `shop-msg pending inbox --bc-root .` — list unprocessed messages (those
+- `shop-msg pending inbox --bc <name>` — list unprocessed messages (those
   the lead has sent that this BC has not yet responded to).
-- `shop-msg read inbox --bc-root . --work-id <id>` — read a specific
+- `shop-msg read inbox --bc <name> --work-id <id>` — read a specific
   inbox message.
 - `shop-msg respond ...` — write an outbox response (clarify, work_done,
   mechanism_observation). The CLI builds and validates the message; never
@@ -71,10 +71,10 @@ risks, deferred work) are filed as beads in this repo.
 At the start of every working session the router must run these two
 orientation commands and then arm the inbox watcher:
 
-1. **`shop-msg prime --bc-root .`** — orientation: DSN reachability,
+1. **`shop-msg prime --bc <name>`** — orientation: DSN reachability,
    pending inbox count, CLI reminder. Run at session start.
 2. **`bd prime`** — beads workflow context. Run at session start.
-3. **Arm the Monitor** on `shop-msg watch --bc-root .` — this is the
+3. **Arm the Monitor** on `shop-msg watch --bc <name>` — this is the
    postgres LISTEN/NOTIFY watcher that outputs one line per new inbox
    message, usable directly as a Claude Code Monitor pipeline.
    `shop-msg watch` handles DB-unreachable fail-fast itself; no

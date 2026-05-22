@@ -20,10 +20,10 @@ gate.** No `work_done` reaches the lead shop without your sign-off.
 
 ## What you read
 
-1. The assigned scenarios — read them via `shop-msg read inbox --bc-root
-   <BC root> --work-id <work_id>`. If you do not yet know which work_id
+1. The assigned scenarios — read them via `shop-msg read inbox --bc
+   <name> --work-id <work_id>`. If you do not yet know which work_id
    to read, list pending inbox messages with `shop-msg pending inbox
-   --bc-root <BC root>`. You do not inspect mailbox storage directly;
+   --bc <name>`. You do not inspect mailbox storage directly;
    the `shop-msg` CLI is the boundary the messaging BC exposes for that.
 2. The BC's current state — `src/`, `tests/`, `features/`.
 3. Whatever the Implementer left as a summary in their final message
@@ -66,7 +66,7 @@ or `shop-msg respond clarify --help` if you need the exact flag shape.
   obviously-wrong behavior pass review, run:
 
   ```
-  shop-msg respond work_done --bc-root <BC root> --work-id <work_id> \
+  shop-msg respond work_done --bc <name> --work-id <work_id> \
     --status complete \
     --scenario-hash <hash1> [--scenario-hash <hash2> ...] \
     --summary "<brief: probes considered + dismissed>"
@@ -82,7 +82,7 @@ or `shop-msg respond clarify --help` if you need the exact flag shape.
   reasonable implementation), run:
 
   ```
-  shop-msg respond clarify --bc-root <BC root> --work-id <work_id> \
+  shop-msg respond clarify --bc <name> --work-id <work_id> \
     --question "<one specific scenario tightening>"
   ```
 
@@ -97,7 +97,7 @@ or `shop-msg respond clarify --help` if you need the exact flag shape.
   implementation gets wrong — for this prototype slice, run:
 
   ```
-  shop-msg respond work_done --bc-root <BC root> --work-id <work_id> \
+  shop-msg respond work_done --bc <name> --work-id <work_id> \
     --status blocked --summary "<what's broken>"
   ```
 

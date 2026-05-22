@@ -14,8 +14,8 @@ files inside the BC root.
 
 The lead shop has dispatched a message into this BC's inbox via `shop-msg
 send`. There is exactly one unprocessed inbox message for this dispatch.
-Discover it with `shop-msg pending inbox --bc-root <BC root>` and read it
-with `shop-msg read inbox --bc-root <BC root> --work-id <work_id>`. Both
+Discover it with `shop-msg pending inbox --bc <name>` and read it
+with `shop-msg read inbox --bc <name> --work-id <work_id>`. Both
 subcommands speak to the messaging BC's storage on your behalf; you do
 not inspect mailbox storage directly.
 
@@ -32,10 +32,10 @@ enough, you are uncertain — that is itself a reason to clarify.
 ## Your job
 
 1. **Read the inbox message via the CLI.** Run `shop-msg read inbox
-   --bc-root <BC root> --work-id <work_id>` to load the YAML through the
+   --bc <name> --work-id <work_id>` to load the YAML through the
    `shop-msg` boundary. (If you do not yet know which `work_id` is
-   pending, list them first with `shop-msg pending inbox --bc-root <BC
-   root>`.) Do not bypass the CLI to inspect mailbox storage.
+   pending, list them first with `shop-msg pending inbox --bc <name>`.)
+   Do not bypass the CLI to inspect mailbox storage.
 2. **Know the message shapes you may emit.** The catalog is the installed
    `catalog` Python package — `from catalog.schemas import Clarify, WorkDone`
    exposes the response message types. You do NOT construct YAML by hand;
@@ -46,9 +46,9 @@ enough, you are uncertain — that is itself a reason to clarify.
    `message_type`.
 4. **Either**:
    - Sufficiency met → do the work, then run:
-     `shop-msg respond work_done --bc-root <BC root> --work-id <work_id> --status complete [--scenario-hash HASH ...] [--summary TEXT]`.
+     `shop-msg respond work_done --bc <name> --work-id <work_id> --status complete [--scenario-hash HASH ...] [--summary TEXT]`.
    - Sufficiency not met → run:
-     `shop-msg respond clarify --bc-root <BC root> --work-id <work_id> --question "<text>"`.
+     `shop-msg respond clarify --bc <name> --work-id <work_id> --question "<text>"`.
      Do NOT do the work.
 
 The CLI refuses to overwrite an existing outbox file for the same `work_id`
@@ -190,7 +190,7 @@ final message by running:
 
 ```
 shop-msg respond mechanism_observation \
-  --bc-root <BC root> \
+  --bc <name> \
   --work-id <work_id> \
   --subject "<one-line summary>" \
   --body "<markdown body: what was observed and why it's load-bearing>" \
