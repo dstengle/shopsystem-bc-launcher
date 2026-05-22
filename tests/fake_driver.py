@@ -102,7 +102,7 @@ class FakeDockerDriver:
         container_name: str,
         image: str,
         env: dict[str, str],
-        mounts: list[tuple[str, str, str]],
+        mounts: list[tuple[str, str, str, bool]],
         network: str | None,
         detach: bool,
     ) -> None:
@@ -111,8 +111,11 @@ class FakeDockerDriver:
             cmd.append("-d")
         for key, val in env.items():
             cmd += ["-e", f"{key}={val}"]
-        for mount_type, source, dest in mounts:
-            cmd += ["--mount", f"type={mount_type},source={source},target={dest}"]
+        for mount_type, source, dest, readonly in mounts:
+            spec = f"type={mount_type},source={source},target={dest}"
+            if readonly:
+                spec += ",readonly"
+            cmd += ["--mount", spec]
         if network:
             cmd += ["--network", network]
         cmd.append(image)
@@ -126,7 +129,7 @@ class FakeDockerDriver:
         # Convert mount tuples to ContainerMount objects and store
         mount_objs = [
             ContainerMount(type=t, source=s, destination=d)
-            for t, s, d in mounts
+            for t, s, d, _ro in mounts
         ]
         self._mounts[container_name] = mount_objs
 

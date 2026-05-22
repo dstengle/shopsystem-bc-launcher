@@ -48,7 +48,7 @@ class DockerDriver(Protocol):
         container_name: str,
         image: str,
         env: dict[str, str],
-        mounts: list[tuple[str, str, str]],  # (type, source, dest)
+        mounts: list[tuple[str, str, str, bool]],  # (type, source, dest, readonly)
         network: str | None,
         detach: bool,
     ) -> None:
@@ -111,7 +111,7 @@ class RealDockerDriver:
         container_name: str,
         image: str,
         env: dict[str, str],
-        mounts: list[tuple[str, str, str]],
+        mounts: list[tuple[str, str, str, bool]],
         network: str | None,
         detach: bool,
     ) -> None:
@@ -120,8 +120,11 @@ class RealDockerDriver:
             cmd.append("-d")
         for key, val in env.items():
             cmd += ["-e", f"{key}={val}"]
-        for mount_type, source, dest in mounts:
-            cmd += ["--mount", f"type={mount_type},source={source},target={dest}"]
+        for mount_type, source, dest, readonly in mounts:
+            spec = f"type={mount_type},source={source},target={dest}"
+            if readonly:
+                spec += ",readonly"
+            cmd += ["--mount", spec]
         if network:
             cmd += ["--network", network]
         cmd.append(image)

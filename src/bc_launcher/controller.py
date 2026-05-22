@@ -86,6 +86,7 @@ class BcContainerController:
         startup_prompt: str | None = None,
         network: str | None = None,
         manifest_path: Path | None = None,
+        credential_home: Path | None = None,
     ) -> CommandResult:
         """
         Start a Docker container for the named BC.
@@ -98,6 +99,19 @@ class BcContainerController:
            or ``Path("bc-manifest.yaml")`` in CWD), slugify it, and use that as the
            network name.  If the network does not yet exist, create it first.
         3. If neither source is available, return a non-zero error.
+
+        Credential propagation:
+        The following host paths are bind-mounted into the container so that
+        Claude and GitHub credentials are available to the agent:
+          - $HOME/.claude       → /home/vscode/.claude        (read-write)
+          - $HOME/.config/gh    → /home/vscode/.config/gh     (read-write)
+          - $HOME/.gitconfig    → /tmp/host-gitconfig          (read-only)
+        After container start, the controller copies:
+          - /tmp/host-gitconfig → /home/vscode/.gitconfig
+          - /home/vscode/.claude/.claude.json → /home/vscode/.claude.json
+        All three host paths must exist; if any is missing the launch fails fast.
+        ``credential_home`` overrides the home directory used for these paths
+        (useful in tests).
         """
         container = _container_name(bc_name)
 
@@ -129,6 +143,25 @@ class BcContainerController:
         if auto_create_network and not self._driver.network_exists(resolved_network):
             self._driver.network_create(resolved_network)
 
+        # --- Credential path resolution ---
+        home = credential_home if credential_home is not None else Path.home()
+        claude_dir = home / ".claude"
+        gh_config_dir = home / ".config" / "gh"
+        gitconfig_file = home / ".gitconfig"
+
+        # Fail fast if any default credential source is missing
+        for host_path, display_name in [
+            (claude_dir, "$HOME/.claude"),
+            (gh_config_dir, "$HOME/.config/gh"),
+            (gitconfig_file, "$HOME/.gitconfig"),
+        ]:
+            if not host_path.exists():
+                return CommandResult(
+                    exit_code=1,
+                    stdout="",
+                    stderr=f"credential source not found: {display_name}\n",
+                )
+
         # Build environment
         env: dict[str, str] = {}
         if shopmsg_dsn:
@@ -136,8 +169,14 @@ class BcContainerController:
         elif dsn := os.environ.get(SHOPMSG_DSN_ENV):
             env[SHOPMSG_DSN_ENV] = dsn
 
-        # Mounts: only the BC's own workspace mount + optional SHOPMSG socket
-        mounts: list[tuple[str, str, str]] = []
+        # Mounts: credential mounts + optional SHOPMSG socket
+        # Each entry: (type, source, dest, readonly)
+        mounts: list[tuple[str, str, str, bool]] = []
+
+        # Credential bind mounts
+        mounts.append(("bind", str(claude_dir), "/home/vscode/.claude", False))
+        mounts.append(("bind", str(gh_config_dir), "/home/vscode/.config/gh", False))
+        mounts.append(("bind", str(gitconfig_file), "/tmp/host-gitconfig", True))
 
         # SHOPMSG_DSN may be a postgres DSN (no socket mount needed) or a
         # unix socket path.  If the DSN value looks like a socket file, add a
@@ -146,7 +185,7 @@ class BcContainerController:
         if dsn_value.startswith("/") and not dsn_value.startswith("//"):
             # It's a host socket path — mount the containing directory
             socket_dir = os.path.dirname(dsn_value)
-            mounts.append(("bind", socket_dir, socket_dir))
+            mounts.append(("bind", socket_dir, socket_dir, False))
 
         self._driver.run(
             container_name=container,
@@ -158,6 +197,20 @@ class BcContainerController:
         )
 
         out_lines: list[str] = [f"Started container {container}\n"]
+
+        # Copy staged gitconfig into container user's home
+        self._driver.exec_run(
+            container,
+            ["cp", "/tmp/host-gitconfig", "/home/vscode/.gitconfig"],
+        )
+        out_lines.append("Copied host gitconfig into container\n")
+
+        # Copy .claude.json from mounted ~/.claude into container user's home root
+        self._driver.exec_run(
+            container,
+            ["cp", "/home/vscode/.claude/.claude.json", "/home/vscode/.claude.json"],
+        )
+        out_lines.append("Copied .claude.json into container home\n")
 
         # Clone repository if URL provided
         if repo_url:
