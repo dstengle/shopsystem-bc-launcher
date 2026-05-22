@@ -205,15 +205,26 @@ def candidate_sibling_mount(ctx, tmp_path):
 
 
 @given(parsers.parse('bc-container launch is run with BC name "{bc_name}"'))
-def launch_run_as_given(bc_name, ctx, fake_driver, controller):
+def launch_run_as_given(bc_name, ctx, fake_driver, controller, tmp_path):
     """Used in the isolation scenario where launch is part of the setup."""
     # Configure mounts that bc-container launch would produce
     container_name = f"bc-{bc_name}"
     repo_url = f"https://github.com/shopsystem/{bc_name}.git"
+    manifest_path = ctx.get("launch_manifest_path")
+    if manifest_path is None:
+        default_manifest = tmp_path / "bc-manifest.yaml"
+        if not default_manifest.exists():
+            import yaml as _yaml
+            default_manifest.write_text(_yaml.dump({
+                "product": "shopsystem product",
+                "bcs": [{"name": bc_name, "remote": repo_url, "role": "bc"}]
+            }))
+        manifest_path = default_manifest
     result = controller.launch(
         bc_name=bc_name,
         repo_url=repo_url,
         shopmsg_dsn=None,
+        manifest_path=manifest_path,
     )
     ctx["launch_result"] = result
     ctx["container_name"] = container_name
@@ -232,30 +243,65 @@ def verify_container_running_given(container_name, ctx, fake_driver):
 # ---------------------------------------------------------------------------
 
 @when(parsers.parse('I run bc-container launch with BC name "{bc_name}" and a valid repo URL'))
-def run_launch_with_repo_url(bc_name, ctx, fake_driver, controller):
+def run_launch_with_repo_url(bc_name, ctx, fake_driver, controller, tmp_path):
     repo_url = f"https://github.com/shopsystem/{bc_name}.git"
-    result = controller.launch(bc_name=bc_name, repo_url=repo_url)
+    manifest_path = ctx.get("launch_manifest_path")
+    if manifest_path is None and "launch_no_manifest" not in ctx:
+        default_manifest = tmp_path / "bc-manifest.yaml"
+        if not default_manifest.exists():
+            import yaml as _yaml
+            default_manifest.write_text(_yaml.dump({
+                "product": "shopsystem product",
+                "bcs": [{"name": bc_name, "remote": repo_url, "role": "bc"}]
+            }))
+        manifest_path = default_manifest
+    result = controller.launch(bc_name=bc_name, repo_url=repo_url,
+                               manifest_path=manifest_path)
     ctx["result"] = result
     ctx["container_name"] = f"bc-{bc_name}"
     ctx["bc_name"] = bc_name
 
 
 @when(parsers.parse('I run bc-container launch with BC name "{bc_name}"'))
-def run_launch(bc_name, ctx, fake_driver, controller):
+def run_launch(bc_name, ctx, fake_driver, controller, tmp_path):
     repo_url = ctx.get("repo_url", f"https://github.com/shopsystem/{bc_name}.git")
-    result = controller.launch(bc_name=bc_name, repo_url=repo_url)
+    manifest_path = ctx.get("launch_manifest_path")
+    if manifest_path is None and "launch_no_manifest" not in ctx:
+        # Provide a default manifest for scenarios that don't set one up explicitly
+        default_manifest = tmp_path / "bc-manifest.yaml"
+        if not default_manifest.exists():
+            import yaml as _yaml
+            default_manifest.write_text(_yaml.dump({
+                "product": "shopsystem product",
+                "bcs": [{"name": bc_name, "remote": f"https://github.com/shopsystem/{bc_name}.git", "role": "bc"}]
+            }))
+        manifest_path = default_manifest
+    result = controller.launch(bc_name=bc_name, repo_url=repo_url,
+                               manifest_path=manifest_path)
     ctx["result"] = result
+    ctx.setdefault("all_results", []).append(result)
     ctx["container_name"] = f"bc-{bc_name}"
     ctx["bc_name"] = bc_name
 
 
 @when(parsers.parse('I run bc-container launch with BC name "{bc_name}" and startup prompt "{prompt}"'))
-def run_launch_with_startup_prompt(bc_name, prompt, ctx, fake_driver, controller):
+def run_launch_with_startup_prompt(bc_name, prompt, ctx, fake_driver, controller, tmp_path):
     repo_url = ctx.get("repo_url", f"https://github.com/shopsystem/{bc_name}.git")
+    manifest_path = ctx.get("launch_manifest_path")
+    if manifest_path is None and "launch_no_manifest" not in ctx:
+        default_manifest = tmp_path / "bc-manifest.yaml"
+        if not default_manifest.exists():
+            import yaml as _yaml
+            default_manifest.write_text(_yaml.dump({
+                "product": "shopsystem product",
+                "bcs": [{"name": bc_name, "remote": repo_url, "role": "bc"}]
+            }))
+        manifest_path = default_manifest
     result = controller.launch(
         bc_name=bc_name,
         repo_url=repo_url,
         startup_prompt=prompt,
+        manifest_path=manifest_path,
     )
     ctx["result"] = result
     ctx["container_name"] = f"bc-{bc_name}"
@@ -558,10 +604,11 @@ def assert_docker_run_includes_flag(container_name, flag, ctx, fake_driver):
     Assert that the docker run command issued for the named container contains
     the specified flag (e.g. '-e SHOPMSG_DSN=postgresql://...').
 
-    Uses last_run_command() which captures only the docker run invocation,
-    not subsequent exec_run calls that would otherwise overwrite last_command().
+    Checks per-container run command first; falls back to last_run_command().
     """
-    run_cmd = fake_driver.last_run_command()
+    run_cmd = fake_driver.run_command_for_container(container_name)
+    if not run_cmd:
+        run_cmd = fake_driver.last_run_command()
     assert run_cmd, "FakeDockerDriver recorded no docker run command"
     # Join tokens into a string for substring matching; '-e KEY=VALUE' appears
     # as two adjacent tokens that join to '-e KEY=VALUE'.
@@ -1218,6 +1265,14 @@ def assert_role_labels_are_bc(ctx):
 
 @then("the command exits non-zero")
 def assert_command_exits_nonzero(ctx):
+    # Check CommandResult first (covers bc-container launch/stop/etc)
+    result = ctx.get("result")
+    if result is not None and hasattr(result, "exit_code"):
+        assert result.exit_code != 0, (
+            f"Expected non-zero exit code, got {result.exit_code}"
+        )
+        return
+    # Manifest-specific bool check
     exit_code = ctx.get("manifest_ok")
     if exit_code is not None:
         # manifest_ok is a bool: False means non-zero exit
@@ -1507,3 +1562,174 @@ def assert_each_url_is_github_remote(ctx):
         assert GITHUB_URL_RE.match(url), (
             f"URL {url!r} is not a valid GitHub remote URL"
         )
+
+
+# ===========================================================================
+# Network naming scenario step definitions (lead-e6j)
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+# Network Given steps
+# ---------------------------------------------------------------------------
+
+@given('a bc-manifest.yaml exists containing:')
+def manifest_with_docstring(docstring, ctx, tmp_path):
+    """Create a bc-manifest.yaml from the step's docstring content."""
+    manifest_path = tmp_path / "bc-manifest.yaml"
+    manifest_path.write_text(docstring)
+    ctx["launch_manifest_path"] = manifest_path
+
+
+@given(parsers.parse('a bc-manifest.yaml exists with product field "{product}"'))
+def manifest_with_product_field(product, ctx, tmp_path):
+    """Create a bc-manifest.yaml with the given product field."""
+    import yaml as _yaml
+    manifest_path = tmp_path / "bc-manifest.yaml"
+    manifest_path.write_text(_yaml.dump({
+        "product": product,
+        "bcs": [
+            {"name": "shopsystem-messaging",
+             "remote": "https://github.com/dstengle/shopsystem-messaging.git",
+             "role": "bc"},
+        ]
+    }))
+    ctx["launch_manifest_path"] = manifest_path
+    ctx["manifest_product"] = product
+
+
+@given("no bc-manifest.yaml exists in the working directory")
+def no_manifest_in_cwd(ctx):
+    """Signal that no manifest should be used."""
+    ctx["launch_no_manifest"] = True
+    ctx["launch_manifest_path"] = None
+
+
+@given("no explicit \"--network\" flag is provided")
+def no_explicit_network_flag(ctx):
+    """Record that no explicit network flag will be passed."""
+    ctx["explicit_network"] = None
+
+
+@given(parsers.parse('no Docker network named "{network_name}" exists'))
+def no_docker_network(network_name, ctx, fake_driver):
+    """Ensure the named network does not exist in the fake driver."""
+    fake_driver.set_network(network_name, exists=False)
+
+
+@given(parsers.parse('a Docker network named "{network_name}" already exists'))
+def docker_network_exists(network_name, ctx, fake_driver):
+    """Pre-create the named network in the fake driver."""
+    fake_driver.set_network(network_name, exists=True)
+
+
+# ---------------------------------------------------------------------------
+# Network When steps
+# ---------------------------------------------------------------------------
+
+@when(parsers.parse('I run bc-container launch with BC name "{bc_name}" and flag "--network {network_name}"'))
+def run_launch_with_explicit_network(bc_name, network_name, ctx, fake_driver, controller):
+    """Launch with an explicit --network flag."""
+    repo_url = ctx.get("repo_url", f"https://github.com/shopsystem/{bc_name}.git")
+    result = controller.launch(
+        bc_name=bc_name,
+        repo_url=repo_url,
+        network=network_name,
+        manifest_path=ctx.get("launch_manifest_path"),
+    )
+    ctx["result"] = result
+    ctx.setdefault("all_results", []).append(result)
+    ctx["container_name"] = f"bc-{bc_name}"
+    ctx["bc_name"] = bc_name
+
+
+# ---------------------------------------------------------------------------
+# Network Then steps
+# ---------------------------------------------------------------------------
+
+@then(parsers.parse('stderr includes the text "{text}"'))
+def assert_stderr_includes_text(text, ctx):
+    result = ctx.get("result")
+    assert result is not None, "No result in ctx"
+    stderr = result.stderr if hasattr(result, "stderr") else ""
+    assert text in stderr, (
+        f"Expected {text!r} in stderr, got: {stderr!r}"
+    )
+
+
+@then(parsers.parse('the FakeDockerDriver records that "docker network create {network_name}" was called before "docker run"'))
+def assert_network_create_before_run(network_name, ctx, fake_driver):
+    """Assert network_create occurred before docker run in the operation log."""
+    log = fake_driver.operation_log
+    network_create_idx = None
+    run_idx = None
+    for i, (op, name) in enumerate(log):
+        if op == "network_create" and name == network_name and network_create_idx is None:
+            network_create_idx = i
+        if op == "run" and run_idx is None:
+            run_idx = i
+    assert network_create_idx is not None, (
+        f"Expected 'docker network create {network_name}' in operation log, got: {log!r}"
+    )
+    assert run_idx is not None, (
+        f"Expected 'docker run' in operation log, got: {log!r}"
+    )
+    assert network_create_idx < run_idx, (
+        f"Expected network create (idx={network_create_idx}) before docker run (idx={run_idx}). "
+        f"Log: {log!r}"
+    )
+
+
+@then(parsers.parse('a Docker network named "{network_name}" exists'))
+def assert_docker_network_exists(network_name, ctx, fake_driver):
+    assert fake_driver.network_exists(network_name), (
+        f"Expected Docker network {network_name!r} to exist"
+    )
+
+
+@then(parsers.parse('the FakeDockerDriver records that "docker network create {network_name}" was NOT called'))
+def assert_network_create_not_called(network_name, ctx, fake_driver):
+    called = [n for n in fake_driver.network_create_calls if n == network_name]
+    assert not called, (
+        f"Expected 'docker network create {network_name}' NOT to be called, "
+        f"but it was called {len(called)} time(s)"
+    )
+
+
+@then(parsers.parse('the FakeDockerDriver records that "docker network create" was NOT called'))
+def assert_no_network_create_called(ctx, fake_driver):
+    assert not fake_driver.network_create_calls, (
+        f"Expected no 'docker network create' calls, "
+        f"but got: {fake_driver.network_create_calls!r}"
+    )
+
+
+@then(parsers.parse('the FakeDockerDriver records that the docker run command does NOT include "{flag}"'))
+def assert_docker_run_does_not_include_flag(flag, ctx, fake_driver):
+    run_cmd = fake_driver.last_run_command()
+    assert run_cmd, "FakeDockerDriver recorded no docker run command"
+    cmd_str = " ".join(run_cmd)
+    assert flag not in cmd_str, (
+        f"Expected flag {flag!r} NOT in docker run command.\n"
+        f"Recorded run command: {cmd_str!r}"
+    )
+
+
+@then("the command exits zero for both launches")
+def assert_both_launches_exit_zero(ctx):
+    all_results = ctx.get("all_results", [])
+    assert len(all_results) == 2, (
+        f"Expected results for 2 launches, got {len(all_results)}"
+    )
+    for i, result in enumerate(all_results):
+        assert result.exit_code == 0, (
+            f"Launch {i + 1} exited {result.exit_code} (stderr: {result.stderr!r})"
+        )
+
+
+@then(parsers.parse('the FakeDockerDriver records that "docker network create {network_name}" was called exactly once across both launches'))
+def assert_network_create_called_exactly_once(network_name, ctx, fake_driver):
+    calls = [n for n in fake_driver.network_create_calls if n == network_name]
+    assert len(calls) == 1, (
+        f"Expected 'docker network create {network_name}' to be called exactly once, "
+        f"but it was called {len(calls)} time(s). All calls: {fake_driver.network_create_calls!r}"
+    )

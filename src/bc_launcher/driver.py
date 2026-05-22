@@ -79,6 +79,14 @@ class DockerDriver(Protocol):
         """Return the most recently built shell command (for test assertions)."""
         ...
 
+    def network_exists(self, network_name: str) -> bool:
+        """Return True if the named Docker network exists."""
+        ...
+
+    def network_create(self, network_name: str) -> None:
+        """Create a Docker network with the given name."""
+        ...
+
 
 # ---------------------------------------------------------------------------
 # Real implementation (shells out to docker CLI)
@@ -174,3 +182,16 @@ class RealDockerDriver:
 
     def last_command(self) -> list[str]:
         return self._last_command
+
+    def network_exists(self, network_name: str) -> bool:
+        result = subprocess.run(
+            ["docker", "network", "ls", "--filter", f"name=^{network_name}$",
+             "--format", "{{.Name}}"],
+            capture_output=True, text=True, check=False,
+        )
+        return network_name in result.stdout.split()
+
+    def network_create(self, network_name: str) -> None:
+        cmd = ["docker", "network", "create", network_name]
+        self._last_command = cmd
+        subprocess.run(cmd, check=True)

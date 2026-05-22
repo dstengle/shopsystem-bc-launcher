@@ -7,8 +7,10 @@ layer fully testable without a live Docker daemon.
 from __future__ import annotations
 
 import os
+import re
 import sys
 from dataclasses import dataclass
+from pathlib import Path
 
 from bc_launcher.driver import ContainerMount, DockerDriver
 
@@ -25,6 +27,26 @@ SHOPMSG_DSN_ENV = "SHOPMSG_DSN"
 
 def _container_name(bc_name: str) -> str:
     return f"bc-{bc_name}"
+
+
+def _slugify(text: str) -> str:
+    """Lowercase and replace runs of spaces with hyphens."""
+    return re.sub(r"\s+", "-", text.strip().lower())
+
+
+def _read_product_from_manifest(manifest_path: Path) -> str | None:
+    """Read the 'product' field from a bc-manifest.yaml file.
+
+    Returns None if the file does not exist or has no 'product' key.
+    Raises yaml.YAMLError on parse failure.
+    """
+    import yaml
+    if not manifest_path.exists():
+        return None
+    data = yaml.safe_load(manifest_path.read_text())
+    if isinstance(data, dict):
+        return data.get("product")
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -63,11 +85,19 @@ class BcContainerController:
         shopmsg_dsn: str | None = None,
         startup_prompt: str | None = None,
         network: str | None = None,
+        manifest_path: Path | None = None,
     ) -> CommandResult:
         """
         Start a Docker container for the named BC.
 
         Idempotent: if the container is already running, report and exit 0.
+
+        Network resolution (in priority order):
+        1. If ``network`` is provided explicitly, use it as-is (no auto-create).
+        2. Otherwise, read ``product:`` from bc-manifest.yaml (at ``manifest_path``
+           or ``Path("bc-manifest.yaml")`` in CWD), slugify it, and use that as the
+           network name.  If the network does not yet exist, create it first.
+        3. If neither source is available, return a non-zero error.
         """
         container = _container_name(bc_name)
 
@@ -76,6 +106,28 @@ class BcContainerController:
                 exit_code=0,
                 stdout=f"{container} is already running\n",
             )
+
+        # --- Network resolution ---
+        resolved_network: str | None = network
+        auto_create_network = False
+
+        if resolved_network is None:
+            # Try to derive from manifest
+            effective_manifest = manifest_path or Path("bc-manifest.yaml")
+            product = _read_product_from_manifest(effective_manifest)
+            if product:
+                resolved_network = _slugify(product)
+                auto_create_network = True
+            else:
+                return CommandResult(
+                    exit_code=1,
+                    stdout="",
+                    stderr="no network: bc-manifest.yaml not found and --network not provided\n",
+                )
+
+        # Create the derived network if it does not yet exist (only for auto-derived, not explicit)
+        if auto_create_network and not self._driver.network_exists(resolved_network):
+            self._driver.network_create(resolved_network)
 
         # Build environment
         env: dict[str, str] = {}
@@ -101,7 +153,7 @@ class BcContainerController:
             image=BC_IMAGE,
             env=env,
             mounts=mounts,
-            network=network,
+            network=resolved_network,
             detach=True,
         )
 

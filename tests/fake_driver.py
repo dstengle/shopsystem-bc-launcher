@@ -54,7 +54,26 @@ class FakeDockerDriver:
         # All known containers (includes stopped), used by list_bc_containers
         self._all_containers: dict[str, bool] = {}  # name -> running
 
+        # Docker networks: name -> exists bool
+        self._networks: set[str] = set()
+
+        # Ordered log of top-level operations for before/after assertions
+        # Each entry is a tuple: ("network_create", network_name) or ("run", container_name)
+        self.operation_log: list[tuple[str, str]] = []
+
+        # Recorded network create calls
+        self.network_create_calls: list[str] = []
+
+        # Per-container run commands indexed by container name (for multi-launch scenarios)
+        self._run_commands_by_container: dict[str, list[str]] = {}
+
     # --- Setup helpers (called by step definitions) ---
+
+    def set_network(self, network_name: str, exists: bool = True) -> None:
+        if exists:
+            self._networks.add(network_name)
+        else:
+            self._networks.discard(network_name)
 
     def set_running(self, container_name: str, running: bool = True) -> None:
         if running:
@@ -99,6 +118,8 @@ class FakeDockerDriver:
         cmd.append(image)
         self._last_command = cmd
         self._last_run_command = cmd
+        self._run_commands_by_container[container_name] = list(cmd)
+        self.operation_log.append(("run", container_name))
         # Mark as running and record configured mounts
         self._running.add(container_name)
         self._all_containers[container_name] = True
@@ -108,6 +129,14 @@ class FakeDockerDriver:
             for t, s, d in mounts
         ]
         self._mounts[container_name] = mount_objs
+
+    def network_exists(self, network_name: str) -> bool:
+        return network_name in self._networks
+
+    def network_create(self, network_name: str) -> None:
+        self._networks.add(network_name)
+        self.network_create_calls.append(network_name)
+        self.operation_log.append(("network_create", network_name))
 
     def exec_run(
         self, container_name: str, command: list[str]
@@ -172,3 +201,7 @@ class FakeDockerDriver:
     def last_run_command(self) -> list[str]:
         """Return the last docker run command (excludes exec_run / exec_interactive calls)."""
         return self._last_run_command
+
+    def run_command_for_container(self, container_name: str) -> list[str]:
+        """Return the docker run command recorded for a specific container."""
+        return self._run_commands_by_container.get(container_name, [])
