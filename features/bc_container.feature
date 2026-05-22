@@ -140,6 +140,25 @@ Feature: bc-container commands
     Then the command exits zero
     And stdout includes the top-level subcommand names launch, attach, inject, monitor, stop, status, and list
 
+  @scenario_hash:bb070f75d28648ae @bc:shopsystem-bc-launcher
+  Scenario: shop-msg sent from the host is receivable by the BC agent inside the container
+    Given the shopsystem-bc-launcher BC is installed
+    And a Docker container named "bc-shopsystem-messaging" is running on the shared Docker network
+    And the container has SHOPMSG_DSN set to the shared PostgreSQL instance
+    When I run shop-msg send assign_scenarios on the host with work-id "lead-500" targeting the "shopsystem-messaging" BC
+    Then the command exits zero
+    And running shop-msg pending inside the container reports work-id "lead-500" as pending
+
+  @scenario_hash:8ad37d1af8751f8c @bc:shopsystem-bc-launcher
+  Scenario: shop-msg response written inside the BC container is readable from the host
+    Given the shopsystem-bc-launcher BC is installed
+    And a Docker container named "bc-shopsystem-messaging" is running on the shared Docker network
+    And the container has SHOPMSG_DSN set to the shared PostgreSQL instance
+    And an inbox message with work-id "lead-500" exists in the shared PostgreSQL backend
+    When shop-msg respond work_done is run inside the container with work-id "lead-500"
+    Then running shop-msg read outbox on the host with work-id "lead-500" exits zero
+    And stdout includes message_type "work_done"
+
   @scenario_hash:d51650643f09e4f1 @bc:shopsystem-bc-launcher
   Scenario: The BC container does not have access to sibling BC source trees or the lead shop workspace
     Given the shopsystem-bc-launcher BC is installed
