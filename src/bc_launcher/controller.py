@@ -197,6 +197,7 @@ class BcContainerController:
         )
 
         out_lines: list[str] = [f"Started container {container}\n"]
+        err_lines: list[str] = []
 
         # Copy staged gitconfig into container user's home
         self._driver.exec_run(
@@ -205,12 +206,20 @@ class BcContainerController:
         )
         out_lines.append("Copied host gitconfig into container\n")
 
-        # Copy .claude.json from mounted ~/.claude into container user's home root
-        self._driver.exec_run(
-            container,
-            ["cp", "/home/vscode/.claude/.claude.json", "/home/vscode/.claude.json"],
-        )
-        out_lines.append("Copied .claude.json into container home\n")
+        # Copy .claude.json from mounted ~/.claude into container user's home root,
+        # but only if the host file exists.  Missing .claude.json is non-fatal:
+        # warn to stderr and proceed (brief 007 minimum-friction posture).
+        claude_json_file = home / ".claude" / ".claude.json"
+        if claude_json_file.exists():
+            self._driver.exec_run(
+                container,
+                ["cp", "/home/vscode/.claude/.claude.json", "/home/vscode/.claude.json"],
+            )
+            out_lines.append("Copied .claude.json into container home\n")
+        else:
+            err_lines.append(
+                f"warning: .claude.json not found; skipping copy into container\n"
+            )
 
         # Clone repository if URL provided
         if repo_url:
@@ -249,7 +258,7 @@ class BcContainerController:
             )
             out_lines.append(f"Injected startup prompt: {startup_prompt!r}\n")
 
-        return CommandResult(exit_code=0, stdout="".join(out_lines))
+        return CommandResult(exit_code=0, stdout="".join(out_lines), stderr="".join(err_lines))
 
     # ------------------------------------------------------------------
     # attach

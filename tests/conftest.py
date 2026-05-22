@@ -267,6 +267,25 @@ def host_file_exists(host_path, ctx, tmp_path):
         target.write_text("")
 
 
+@given(parsers.parse('the host file "{host_path}" does not exist'))
+def host_file_does_not_exist(host_path, ctx, tmp_path):
+    """
+    Ensure the named host file does NOT exist under the fake home.
+
+    The parent directory is preserved (or created) so that the .claude directory
+    itself can still exist while its .claude.json child is absent.
+    """
+    credential_home = ctx.setdefault("credential_home", tmp_path / "fake_home")
+    assert host_path.startswith("$HOME/"), (
+        f"host_file_does_not_exist step only handles $HOME/... paths, got: {host_path!r}"
+    )
+    rel = host_path[len("$HOME/"):]
+    target = credential_home / rel
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if target.exists():
+        target.unlink()
+
+
 # ---------------------------------------------------------------------------
 # Compound Given steps for scenarios that chain setup across steps
 # ---------------------------------------------------------------------------
@@ -2027,6 +2046,52 @@ def assert_no_network_create_called(ctx, fake_driver):
     assert not fake_driver.network_create_calls, (
         f"Expected no 'docker network create' calls, "
         f"but got: {fake_driver.network_create_calls!r}"
+    )
+
+
+@then(parsers.parse('the FakeDockerDriver records that a docker run was issued for "{container_name}"'))
+def assert_docker_run_was_issued(container_name, ctx, fake_driver):
+    """Assert that a docker run was recorded for the named container."""
+    run_cmd = fake_driver.run_command_for_container(container_name)
+    assert run_cmd, (
+        f"Expected a docker run command for {container_name!r}, but none was recorded.\n"
+        f"All run commands: {fake_driver._run_commands_by_container!r}"
+    )
+
+
+@then(parsers.parse('the FakeDockerDriver records that no exec_run was issued against "{container_name}" copying any path ending in "{path_suffix}" to "{dest}"'))
+def assert_no_exec_cp_with_suffix(container_name, path_suffix, dest, ctx, fake_driver):
+    """
+    Assert that no exec_run cp command was issued where the source ends with path_suffix
+    and the destination is dest.
+    """
+    matching_calls = [
+        c for c in fake_driver.exec_calls
+        if c.container == container_name
+        and len(c.command) == 3
+        and c.command[0] == "cp"
+        and c.command[1].endswith(path_suffix)
+        and c.command[2] == dest
+    ]
+    assert not matching_calls, (
+        f"Expected no exec_run('cp <path ending in {path_suffix!r}> {dest}') "
+        f"against {container_name!r}, but found: {[c.command for c in matching_calls]!r}"
+    )
+
+
+@then(parsers.parse('the FakeDockerDriver records that a tmux new-session exec_run was issued against "{container_name}"'))
+def assert_tmux_new_session_issued(container_name, ctx, fake_driver):
+    """Assert that a tmux new-session exec_run was recorded against the container."""
+    tmux_calls = [
+        c for c in fake_driver.exec_calls
+        if c.container == container_name
+        and len(c.command) >= 3
+        and c.command[:3] == ["tmux", "new-session", "-d"]
+    ]
+    assert tmux_calls, (
+        f"Expected a 'tmux new-session -d' exec_run against {container_name!r}, "
+        f"but none was recorded.\n"
+        f"Recorded exec calls: {[(c.container, c.command) for c in fake_driver.exec_calls]!r}"
     )
 
 
