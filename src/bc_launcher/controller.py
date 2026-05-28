@@ -21,7 +21,7 @@ from bc_launcher.driver import ContainerMount, DockerDriver
 
 CONTAINER_WORKSPACE = "/workspace"
 AGENT_TMUX_SESSION = "agent"
-BC_IMAGE = "ghcr.io/shopsystem/bc-base:latest"
+BC_IMAGE = "ghcr.io/dstengle/shopsystem-bc-base:latest"
 SHOPMSG_DSN_ENV = "SHOPMSG_DSN"
 
 
@@ -32,6 +32,73 @@ def _container_name(bc_name: str) -> str:
 def _slugify(text: str) -> str:
     """Lowercase and replace runs of spaces with hyphens."""
     return re.sub(r"\s+", "-", text.strip().lower())
+
+
+def _resolve_host_path(devcontainer_path: Path) -> Path:
+    """
+    If running inside a devcontainer where ``devcontainer_path`` lies on a bind
+    mount, return the corresponding host-visible source path.  Falls back to
+    ``devcontainer_path`` if no covering bind mount is found (i.e., not inside
+    a bind-mounted devcontainer).
+
+    Needed because mount sources passed to ``docker run`` are interpreted by
+    the host docker daemon — bind-mount sources like ``/home/vscode/.claude``
+    that are valid inside the launching container may not exist on the host.
+
+    Resolution order:
+      1. If ``BCLAUNCHER_HOST_HOME`` env var is set and the path is under the
+         current ``Path.home()``, substitute the env var for the home prefix.
+         This handles devcontainers whose home is bind-mounted from a host
+         user home that we know explicitly.
+      2. Otherwise walk ``/proc/self/mountinfo`` for the longest mount-point
+         prefix that covers the path, and substitute the source root.
+      3. Otherwise return the path unchanged.
+    """
+    try:
+        target = str(devcontainer_path.resolve())
+    except OSError:
+        target = str(devcontainer_path)
+    host_home = os.environ.get("BCLAUNCHER_HOST_HOME")
+    if host_home:
+        home_str = str(Path.home())
+        if target == home_str:
+            return Path(host_home)
+        if target.startswith(home_str + "/"):
+            return Path(host_home + target[len(home_str):])
+    best_mount_point: str | None = None
+    best_source_root: str | None = None
+    try:
+        with open("/proc/self/mountinfo", encoding="utf-8") as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) < 5:
+                    continue
+                source_root = parts[3]
+                mount_point = parts[4]
+                if target == mount_point or target.startswith(mount_point + "/"):
+                    if best_mount_point is None or len(mount_point) > len(best_mount_point):
+                        best_mount_point = mount_point
+                        best_source_root = source_root
+    except OSError:
+        return devcontainer_path
+    if best_mount_point is None or best_source_root is None:
+        return devcontainer_path
+    if target == best_mount_point:
+        resolved = best_source_root
+    else:
+        suffix = target[len(best_mount_point):]
+        resolved = best_source_root + suffix
+    # mountinfo source roots may be dataset-relative (start with "/<user>/...")
+    # rather than absolute host paths.  When BCLAUNCHER_HOST_HOME is set, apply
+    # the same home-prefix substitution to the mountinfo result so it lands at
+    # an absolute host path.
+    if host_home:
+        user_leaf = "/" + Path(host_home).name
+        if resolved == user_leaf:
+            return Path(host_home)
+        if resolved.startswith(user_leaf + "/"):
+            return Path(host_home + resolved[len(user_leaf):])
+    return Path(resolved)
 
 
 def _read_product_from_manifest(manifest_path: Path) -> str | None:
@@ -147,7 +214,14 @@ class BcContainerController:
         home = credential_home if credential_home is not None else Path.home()
         claude_dir = home / ".claude"
         gh_config_dir = home / ".config" / "gh"
-        gitconfig_file = home / ".gitconfig"
+        # shopsystem-devcontainer bind-mounts the host's gitconfig at
+        # /tmp/host-gitconfig; prefer that when present so we have a path the
+        # host docker daemon can resolve via /proc/self/mountinfo translation.
+        _staged_gitconfig = Path("/tmp/host-gitconfig")
+        if credential_home is None and _staged_gitconfig.is_file():
+            gitconfig_file = _staged_gitconfig
+        else:
+            gitconfig_file = home / ".gitconfig"
 
         # Fail fast if any default credential source is missing
         for host_path, display_name in [
@@ -164,6 +238,10 @@ class BcContainerController:
 
         # Build environment
         env: dict[str, str] = {}
+        # The BC image runs as root by default, but credentials live under
+        # /home/vscode/.  Point HOME at vscode's home so gh / git find their
+        # configs without permission games.
+        env["HOME"] = "/home/vscode"
         if shopmsg_dsn:
             env[SHOPMSG_DSN_ENV] = shopmsg_dsn
         elif dsn := os.environ.get(SHOPMSG_DSN_ENV):
@@ -173,10 +251,11 @@ class BcContainerController:
         # Each entry: (type, source, dest, readonly)
         mounts: list[tuple[str, str, str, bool]] = []
 
-        # Credential bind mounts
-        mounts.append(("bind", str(claude_dir), "/home/vscode/.claude", False))
-        mounts.append(("bind", str(gh_config_dir), "/home/vscode/.config/gh", False))
-        mounts.append(("bind", str(gitconfig_file), "/tmp/host-gitconfig", True))
+        # Credential bind mounts — translate to host paths when running inside
+        # a devcontainer (the host docker daemon needs host-visible sources).
+        mounts.append(("bind", str(_resolve_host_path(claude_dir)), "/home/vscode/.claude", False))
+        mounts.append(("bind", str(_resolve_host_path(gh_config_dir)), "/home/vscode/.config/gh", False))
+        mounts.append(("bind", str(_resolve_host_path(gitconfig_file)), "/tmp/host-gitconfig", True))
 
         # SHOPMSG_DSN may be a postgres DSN (no socket mount needed) or a
         # unix socket path.  If the DSN value looks like a socket file, add a

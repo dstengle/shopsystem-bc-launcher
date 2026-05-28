@@ -128,6 +128,7 @@ class RealDockerDriver:
         if network:
             cmd += ["--network", network]
         cmd.append(image)
+        cmd += ["sleep", "infinity"]
         self._last_command = cmd
         subprocess.run(cmd, check=True)
 
