@@ -6,6 +6,7 @@ Subcommands: launch, attach, inject, monitor, stop, status, list, manifest
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -52,6 +53,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_launch.add_argument("--repo-url", help="Git repo URL to clone inside the container")
     p_launch.add_argument("--shopmsg-dsn", help="SHOPMSG_DSN value for the container")
     p_launch.add_argument("--network", help="Docker network to attach")
+    p_launch.add_argument(
+        "--debug",
+        action="store_true",
+        help=(
+            "Surface full Python tracebacks for launch-path errors that "
+            "would otherwise be translated to a clean stderr line "
+            "(e.g. malformed bc-manifest.yaml fields).  Equivalent to "
+            "setting BCLAUNCHER_DEBUG=1 in the environment."
+        ),
+    )
     p_launch.add_argument(
         "--startup-prompt",
         default=None,
@@ -176,12 +187,16 @@ def main(argv: list[str] | None = None) -> int:
             )
         else:
             startup_prompt = explicit_prompt
+        debug = bool(getattr(args, "debug", False)) or bool(
+            os.environ.get("BCLAUNCHER_DEBUG")
+        )
         result = controller.launch(
             bc_name=args.bc_name,
             repo_url=getattr(args, "repo_url", None),
             shopmsg_dsn=getattr(args, "shopmsg_dsn", None),
             startup_prompt=startup_prompt,
             network=getattr(args, "network", None),
+            debug=debug,
         )
         sys.stdout.write(result.stdout)
         if result.stderr:

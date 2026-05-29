@@ -148,19 +148,73 @@ def _resolve_host_path(devcontainer_path: Path) -> Path:
     return Path(resolved)
 
 
+class ManifestProductTypeError(Exception):
+    """Raised when a bc-manifest.yaml file's `product:` field is not a string.
+
+    Carries enough structured context that the CLI can format a single-line
+    error message naming the field, file path, expected type, and observed
+    type — without exposing the underlying ``AttributeError`` that would
+    otherwise surface from ``_slugify`` downstream.
+
+    Per lead-393: the launch path must convert this into a non-zero exit
+    with a clean stderr message; a Python traceback is only acceptable when
+    the operator opts in via ``--debug`` (or ``BCLAUNCHER_DEBUG=1``).
+    """
+
+    def __init__(
+        self,
+        manifest_path: Path,
+        observed_type: str,
+        *,
+        field: str = "product",
+        expected_type: str = "string",
+    ) -> None:
+        self.manifest_path = manifest_path
+        self.field = field
+        self.expected_type = expected_type
+        self.observed_type = observed_type
+        super().__init__(self.format_message())
+
+    def format_message(self) -> str:
+        """Single-line stderr-ready message naming field, file, types."""
+        return (
+            f"bc-manifest.yaml: field {self.field!r} in {self.manifest_path} "
+            f"has wrong type: expected {self.expected_type}, "
+            f"got {self.observed_type}"
+        )
+
+
 def _read_product_from_manifest(manifest_path: Path) -> str | None:
     """Read the 'product' field from a bc-manifest.yaml file.
 
     Returns None if the file does not exist or has no 'product' key.
     Raises yaml.YAMLError on parse failure.
+    Raises ManifestProductTypeError if 'product' is present but not a string.
     """
     import yaml
     if not manifest_path.exists():
         return None
     data = yaml.safe_load(manifest_path.read_text())
-    if isinstance(data, dict):
-        return data.get("product")
-    return None
+    if not isinstance(data, dict):
+        return None
+    if "product" not in data:
+        return None
+    product = data["product"]
+    if product is None:
+        # `product: null` (explicitly null) is just as broken as `product: 42`
+        # for the downstream slugify call — name the field rather than silently
+        # falling through to the "no network" branch, which would otherwise
+        # hide the malformed-field root cause behind an unrelated error.
+        raise ManifestProductTypeError(
+            manifest_path=manifest_path,
+            observed_type="null",
+        )
+    if not isinstance(product, str):
+        raise ManifestProductTypeError(
+            manifest_path=manifest_path,
+            observed_type=type(product).__name__,
+        )
+    return product
 
 
 # ---------------------------------------------------------------------------
@@ -201,6 +255,7 @@ class BcContainerController:
         network: str | None = None,
         manifest_path: Path | None = None,
         credential_home: Path | None = None,
+        debug: bool = False,
     ) -> CommandResult:
         """
         Start a Docker container for the named BC.
@@ -242,7 +297,22 @@ class BcContainerController:
         if resolved_network is None:
             # Try to derive from manifest
             effective_manifest = manifest_path or Path("bc-manifest.yaml")
-            product = _read_product_from_manifest(effective_manifest)
+            try:
+                product = _read_product_from_manifest(effective_manifest)
+            except ManifestProductTypeError as exc:
+                # lead-393: a non-string `product:` (int / bool / null / list /
+                # dict) must surface as a clean single-line stderr message
+                # naming the field, file path, expected type, observed type —
+                # NOT as the AttributeError that ``_slugify`` would raise on
+                # the next line.  In debug mode the operator opts back into
+                # the full traceback by letting the exception propagate.
+                if debug:
+                    raise
+                return CommandResult(
+                    exit_code=1,
+                    stdout="",
+                    stderr=exc.format_message() + "\n",
+                )
             if product:
                 resolved_network = _slugify(product)
                 auto_create_network = True
