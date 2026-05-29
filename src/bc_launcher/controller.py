@@ -28,15 +28,39 @@ SHOPMSG_DSN_ENV = "SHOPMSG_DSN"
 # the agent tmux session.  The default tmux session command is bash, so a
 # naïve send-keys of the startup prompt lands in bash and fails as
 # "-bash: <first-word>: command not found".  The launch sequence is:
-#   1. send-keys 'claude' Enter           — start Claude Code
-#   2. wait for CLAUDE_READY_MARKER       — Claude Code banner appeared
+#   1. send-keys 'claude --dangerously-skip-permissions' Enter
+#                                         — start Claude Code with
+#                                           in-container permission bypass
+#                                           (the BC container is the
+#                                           isolation boundary)
+#   2. wait for CLAUDE_READY_MARKER       — workspace-trust banner appeared
+#                                           (PRE-trust: this is the line
+#                                           Claude Code prints BEFORE the
+#                                           trust prompt clears, so it
+#                                           confirms the agent has reached
+#                                           interactive UI without
+#                                           presupposing trust was accepted)
 #   3. send-keys Enter                    — accept workspace-trust default
+#                                           (empirically verified that
+#                                           --dangerously-skip-permissions
+#                                           does NOT bypass workspace trust,
+#                                           so this step is still required)
 #   4. wait for CLAUDE_INPUT_READY_MARKER — main input prompt is live
+#                                           (POST-trust: "bypass permissions
+#                                           on" appears only once the trust
+#                                           prompt has cleared and the
+#                                           main input UI is live — chosen
+#                                           in preference to the bare "❯"
+#                                           glyph because the PRE-trust
+#                                           pane also contains "❯" as the
+#                                           trust-prompt selector arrow,
+#                                           which would otherwise cause
+#                                           step 4 to succeed trivially)
 #   5. send-keys <startup_prompt> Enter   — prompt lands inside Claude Code
 # On any wait timeout, the launcher emits a stderr warning naming the
 # step that did not confirm.
-CLAUDE_READY_MARKER = "Claude Code v"
-CLAUDE_INPUT_READY_MARKER = "❯"  # the "❯" input prompt indicator
+CLAUDE_READY_MARKER = "Accessing workspace:"
+CLAUDE_INPUT_READY_MARKER = "bypass permissions on"
 CLAUDE_READINESS_TIMEOUT_SECONDS = 60.0
 
 
@@ -353,13 +377,22 @@ class BcContainerController:
         # the tmux session with its default bash command — preserving the
         # legacy escape hatch.
         if startup_prompt:
-            # Step 1: start Claude Code
+            # Step 1: start Claude Code with --dangerously-skip-permissions.
+            # The BC container is the isolation boundary the permission
+            # prompts are meant to substitute for; bypassing them inside
+            # this container prevents the agent from hanging on permission
+            # gates that have no operator at the other end.
             self._driver.exec_run(
                 container,
                 ["tmux", "send-keys", "-t", AGENT_TMUX_SESSION,
-                 "claude", "Enter"],
+                 "claude --dangerously-skip-permissions", "Enter"],
             )
-            # Step 2: wait for Claude Code banner
+            # Step 2: wait for the PRE-trust workspace-trust banner.
+            # CLAUDE_READY_MARKER is "Accessing workspace:" — the first
+            # claude-output line that appears after invocation, BEFORE
+            # trust is accepted.  (The earlier "Claude Code v" marker was
+            # the POST-trust banner and produced the chicken-and-egg
+            # deadlock that this fix addresses.)
             ready = self._driver.wait_for_pane_marker(
                 container,
                 AGENT_TMUX_SESSION,
@@ -378,12 +411,23 @@ class BcContainerController:
                     stdout="".join(out_lines),
                     stderr="".join(err_lines),
                 )
-            # Step 3: accept workspace-trust prompt (default "Yes, I trust")
+            # Step 3: accept workspace-trust prompt (default "Yes, I trust").
+            # Empirically verified (2026-05-29) that
+            # --dangerously-skip-permissions does NOT bypass workspace trust:
+            # `claude --dangerously-skip-permissions` in a fresh directory
+            # still presents the "Quick safety check" / "Yes, I trust this
+            # folder" prompt.  So this Enter is still required to advance
+            # to the main input UI; it now correctly fires AFTER a PRE-trust
+            # marker (step 2) rather than after a POST-trust banner.
             self._driver.exec_run(
                 container,
                 ["tmux", "send-keys", "-t", AGENT_TMUX_SESSION, "Enter"],
             )
-            # Step 4: wait for main input to be ready
+            # Step 4: wait for the POST-trust input-ready marker.
+            # CLAUDE_INPUT_READY_MARKER is "bypass permissions on" — only
+            # present once the trust prompt has cleared AND
+            # --dangerously-skip-permissions is active, which is the exact
+            # state in which the user prompt can be safely injected.
             input_ready = self._driver.wait_for_pane_marker(
                 container,
                 AGENT_TMUX_SESSION,
