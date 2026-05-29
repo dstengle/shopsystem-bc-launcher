@@ -14,6 +14,31 @@ from bc_launcher.driver import RealDockerDriver
 from bc_launcher.manifest import ManifestController, RealGitDriver, RealGitHubDriver
 
 
+# Default --startup-prompt for `bc-container launch`.
+#
+# When the operator omits --startup-prompt, this template (with {bc_name}
+# substituted) is injected into the BC's tmux session as the first user
+# prompt.  Claude Code does not execute SessionStart hook output as an
+# imperative; a synthetic first user prompt is the only mechanism that
+# directs the BC agent to act before a human types.
+#
+# Load-bearing properties (per lead-9sq):
+#   (a) directs the agent to arm Monitor on `shop-msg watch --bc <bc_name>`
+#   (b) directs the agent to drain pending inbox via
+#       `shop-msg pending inbox --bc <bc_name>`
+#   (c) ends with "await user direction" so the agent does not synthesize
+#       follow-on work.
+#
+# An explicit --startup-prompt 'foo' on the command line is a TOTAL
+# override: the template default is not used and no substitution occurs.
+DEFAULT_STARTUP_PROMPT_TEMPLATE = (
+    "Run your session-start sequence per /workspace/CLAUDE.md: "
+    "arm Monitor on shop-msg watch --bc {bc_name}, "
+    "then drain pending inbox via shop-msg pending inbox --bc {bc_name}, "
+    "then await user direction."
+)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="bc-container",
@@ -27,7 +52,20 @@ def build_parser() -> argparse.ArgumentParser:
     p_launch.add_argument("--repo-url", help="Git repo URL to clone inside the container")
     p_launch.add_argument("--shopmsg-dsn", help="SHOPMSG_DSN value for the container")
     p_launch.add_argument("--network", help="Docker network to attach")
-    p_launch.add_argument("--startup-prompt", help="Text to inject into tmux after start")
+    p_launch.add_argument(
+        "--startup-prompt",
+        default=None,
+        help=(
+            "Text to inject into tmux after start. "
+            "If omitted, a session-start imperative is injected that "
+            "directs the BC agent to arm Monitor on "
+            "'shop-msg watch --bc <bc_name>', drain pending inbox via "
+            "'shop-msg pending inbox --bc <bc_name>', and then await "
+            "user direction. An explicit value is a total override "
+            "(no concatenation, no substitution). "
+            "Default template: " + DEFAULT_STARTUP_PROMPT_TEMPLATE
+        ),
+    )
 
     # attach
     p_attach = sub.add_parser("attach", help="Attach to the BC container tmux session")
@@ -128,11 +166,21 @@ def main(argv: list[str] | None = None) -> int:
     controller = BcContainerController(RealDockerDriver())
 
     if args.subcommand == "launch":
+        # Resolve --startup-prompt: explicit value is a total override;
+        # omission produces the default session-start imperative with the
+        # BC name substituted into the template.
+        explicit_prompt = getattr(args, "startup_prompt", None)
+        if explicit_prompt is None:
+            startup_prompt = DEFAULT_STARTUP_PROMPT_TEMPLATE.format(
+                bc_name=args.bc_name
+            )
+        else:
+            startup_prompt = explicit_prompt
         result = controller.launch(
             bc_name=args.bc_name,
             repo_url=getattr(args, "repo_url", None),
             shopmsg_dsn=getattr(args, "shopmsg_dsn", None),
-            startup_prompt=getattr(args, "startup_prompt", None),
+            startup_prompt=startup_prompt,
             network=getattr(args, "network", None),
         )
         sys.stdout.write(result.stdout)
