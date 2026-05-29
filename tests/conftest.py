@@ -736,12 +736,15 @@ def assert_docker_run_includes_flag(container_name, flag, ctx, fake_driver):
     Assert that the docker run command issued for the named container contains
     the specified flag (e.g. '-e SHOPMSG_DSN=postgresql://...').
 
-    Checks per-container run command first; falls back to last_run_command().
+    Binds the assertion to the named container: looks up the run command via
+    `run_command_for_container(container_name)` and fails fast (with a message
+    naming the container) when no docker run was recorded for that name.
+    Matches the peer bind-mount / credential-mount step shape (lines 1716+);
+    no fallback to `last_run_command()`, which would silently substitute the
+    global last run in multi-container scenarios.
     """
     run_cmd = fake_driver.run_command_for_container(container_name)
-    if not run_cmd:
-        run_cmd = fake_driver.last_run_command()
-    assert run_cmd, "FakeDockerDriver recorded no docker run command"
+    assert run_cmd, f"FakeDockerDriver recorded no docker run command for {container_name!r}"
     # Join tokens into a string for substring matching; '-e KEY=VALUE' appears
     # as two adjacent tokens that join to '-e KEY=VALUE'.
     cmd_str = " ".join(run_cmd)
