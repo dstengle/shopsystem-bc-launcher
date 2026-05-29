@@ -56,12 +56,35 @@ class DockerDriver(Protocol):
         """Start a new container."""
         ...
 
-    def exec_run(self, container_name: str, command: list[str]) -> subprocess.CompletedProcess:
-        """Execute a command inside a running container."""
+    def exec_run(
+        self,
+        container_name: str,
+        command: list[str],
+        user: str | None = None,
+    ) -> subprocess.CompletedProcess:
+        """Execute a command inside a running container.
+
+        If ``user`` is provided, run the command as that container user
+        (``docker exec -u <user>``).  This is required for tmux client
+        operations against an agent session owned by a non-root user:
+        tmux refuses cross-user attach, so every send-keys / capture-pane
+        / has-session call against a vscode-owned tmux session must also
+        run as vscode.
+        """
         ...
 
-    def exec_interactive(self, container_name: str, command: list[str]) -> None:
-        """Execute an interactive command inside a running container (replaces process)."""
+    def exec_interactive(
+        self,
+        container_name: str,
+        command: list[str],
+        user: str | None = None,
+    ) -> None:
+        """Execute an interactive command inside a running container (replaces process).
+
+        ``user`` has the same semantics as in ``exec_run``: required for
+        ``tmux attach-session`` against an agent session owned by a
+        non-root container user.
+        """
         ...
 
     def stop(self, container_name: str) -> None:
@@ -152,14 +175,30 @@ class RealDockerDriver:
         self._last_command = cmd
         subprocess.run(cmd, check=True)
 
-    def exec_run(self, container_name: str, command: list[str]) -> subprocess.CompletedProcess:
-        cmd = ["docker", "exec", container_name] + command
+    def exec_run(
+        self,
+        container_name: str,
+        command: list[str],
+        user: str | None = None,
+    ) -> subprocess.CompletedProcess:
+        cmd = ["docker", "exec"]
+        if user is not None:
+            cmd += ["-u", user]
+        cmd += [container_name] + command
         self._last_command = cmd
         return subprocess.run(cmd, capture_output=True, text=True, check=False)
 
-    def exec_interactive(self, container_name: str, command: list[str]) -> None:
+    def exec_interactive(
+        self,
+        container_name: str,
+        command: list[str],
+        user: str | None = None,
+    ) -> None:
         import os
-        cmd = ["docker", "exec", "-it", container_name] + command
+        cmd = ["docker", "exec", "-it"]
+        if user is not None:
+            cmd += ["-u", user]
+        cmd += [container_name] + command
         self._last_command = cmd
         os.execvp("docker", cmd)
 
@@ -230,8 +269,12 @@ class RealDockerDriver:
     ) -> bool:
         """Poll tmux capture-pane until marker is observed or timeout elapses."""
         deadline = time.monotonic() + timeout_seconds
+        # The agent tmux session is owned by vscode (see
+        # controller.AGENT_CONTAINER_USER); capture-pane against a
+        # vscode-owned tmux server must run as vscode or tmux refuses the
+        # cross-user connection.
         capture_cmd = [
-            "docker", "exec", container_name,
+            "docker", "exec", "-u", "vscode", container_name,
             "tmux", "capture-pane", "-p", "-t", tmux_session,
         ]
         while True:

@@ -21,6 +21,14 @@ from bc_launcher.driver import ContainerMount, DockerDriver
 
 CONTAINER_WORKSPACE = "/workspace"
 AGENT_TMUX_SESSION = "agent"
+# The container user that owns the agent tmux session and all of its
+# clients (send-keys, capture-pane, has-session, attach-session).  The
+# BC image's default USER is root; Claude Code refuses
+# --dangerously-skip-permissions when EUID==0 for security reasons, so
+# the agent must run as a non-root user.  vscode is the unprivileged
+# user already provisioned in the BC base image with HOME=/home/vscode
+# (the same home into which credential mounts and cp steps land).
+AGENT_CONTAINER_USER = "vscode"
 BC_IMAGE = "ghcr.io/dstengle/shopsystem-bc-base:latest"
 SHOPMSG_DSN_ENV = "SHOPMSG_DSN"
 
@@ -317,21 +325,28 @@ class BcContainerController:
         out_lines: list[str] = [f"Started container {container}\n"]
         err_lines: list[str] = []
 
-        # Copy staged gitconfig into container user's home
+        # Copy staged gitconfig into container user's home.
+        # Run as vscode so the destination file is owned by vscode — root-owned
+        # files under /home/vscode/ break vscode's gh / git credential reads
+        # (lead-d64 reproduction: `stat -c '%U' /home/vscode/.gitconfig` returned
+        # `root`, causing tooling that reads ~/.gitconfig to bypass it).
         self._driver.exec_run(
             container,
             ["cp", "/tmp/host-gitconfig", "/home/vscode/.gitconfig"],
+            user=AGENT_CONTAINER_USER,
         )
         out_lines.append("Copied host gitconfig into container\n")
 
         # Copy .claude.json from mounted ~/.claude into container user's home root,
         # but only if the host file exists.  Missing .claude.json is non-fatal:
         # warn to stderr and proceed (brief 007 minimum-friction posture).
+        # Same vscode-ownership requirement as the gitconfig copy above.
         claude_json_file = home / ".claude" / ".claude.json"
         if claude_json_file.exists():
             self._driver.exec_run(
                 container,
                 ["cp", "/home/vscode/.claude/.claude.json", "/home/vscode/.claude.json"],
+                user=AGENT_CONTAINER_USER,
             )
             out_lines.append("Copied .claude.json into container home\n")
         else:
@@ -360,10 +375,35 @@ class BcContainerController:
             )
             out_lines.append("Ran bd dolt pull\n")
 
-        # Start tmux session
+            # Hand /workspace ownership to vscode.  The clone + bd dolt pull
+            # exec_runs above default to root inside the BC image, leaving
+            # /workspace and /workspace/.beads root-owned.  vscode then
+            # cannot subsequently write (git commit, file edits, scenario
+            # artifacts) — reproduced in lead-d64 as
+            # `docker exec -u vscode bc-<bc> touch /workspace/.test` →
+            # Permission denied.  This chown runs as root (the default) so
+            # it can transfer ownership of files it does not yet own.
+            self._driver.exec_run(
+                container,
+                ["chown", "-R", f"{AGENT_CONTAINER_USER}:{AGENT_CONTAINER_USER}",
+                 CONTAINER_WORKSPACE],
+            )
+            out_lines.append(
+                f"Chowned {CONTAINER_WORKSPACE} to {AGENT_CONTAINER_USER}\n"
+            )
+
+        # Start tmux session as vscode.  Claude Code refuses
+        # --dangerously-skip-permissions when EUID==0 ("cannot be used with
+        # root/sudo privileges for security reasons"), so the agent must
+        # run as the unprivileged vscode user — and that requires the tmux
+        # server itself to be vscode-owned, because tmux refuses
+        # cross-user attach (any subsequent send-keys / capture-pane /
+        # has-session / attach-session call against this session must
+        # therefore also run as vscode).
         tmux_result = self._driver.exec_run(
             container,
             ["tmux", "new-session", "-d", "-s", AGENT_TMUX_SESSION],
+            user=AGENT_CONTAINER_USER,
         )
         out_lines.append(f"Started tmux session '{AGENT_TMUX_SESSION}'\n")
 
@@ -386,6 +426,7 @@ class BcContainerController:
                 container,
                 ["tmux", "send-keys", "-t", AGENT_TMUX_SESSION,
                  "claude --dangerously-skip-permissions", "Enter"],
+                user=AGENT_CONTAINER_USER,
             )
             # Step 2: wait for the PRE-trust workspace-trust banner.
             # CLAUDE_READY_MARKER is "Accessing workspace:" — the first
@@ -422,6 +463,7 @@ class BcContainerController:
             self._driver.exec_run(
                 container,
                 ["tmux", "send-keys", "-t", AGENT_TMUX_SESSION, "Enter"],
+                user=AGENT_CONTAINER_USER,
             )
             # Step 4: wait for the POST-trust input-ready marker.
             # CLAUDE_INPUT_READY_MARKER is "bypass permissions on" — only
@@ -452,6 +494,7 @@ class BcContainerController:
                 container,
                 ["tmux", "send-keys", "-t", AGENT_TMUX_SESSION,
                  startup_prompt, "Enter"],
+                user=AGENT_CONTAINER_USER,
             )
             out_lines.append(f"Injected startup prompt: {startup_prompt!r}\n")
 
@@ -467,9 +510,12 @@ class BcContainerController:
         Replaces the current process via exec.
         """
         container = _container_name(bc_name)
+        # Attach as vscode: the agent tmux session is owned by vscode (see
+        # launch()), and tmux refuses cross-user attach.
         self._driver.exec_interactive(
             container,
             ["tmux", "attach-session", "-t", AGENT_TMUX_SESSION],
+            user=AGENT_CONTAINER_USER,
         )
 
     # ------------------------------------------------------------------
@@ -479,9 +525,11 @@ class BcContainerController:
     def inject(self, bc_name: str, prompt_text: str) -> CommandResult:
         """Send text to the container's tmux session."""
         container = _container_name(bc_name)
+        # send-keys against the vscode-owned tmux server must run as vscode.
         self._driver.exec_run(
             container,
             ["tmux", "send-keys", "-t", AGENT_TMUX_SESSION, prompt_text, "Enter"],
+            user=AGENT_CONTAINER_USER,
         )
         return CommandResult(
             exit_code=0,
@@ -495,9 +543,11 @@ class BcContainerController:
     def monitor(self, bc_name: str) -> CommandResult:
         """Capture and return the current contents of the tmux session pane."""
         container = _container_name(bc_name)
+        # capture-pane against the vscode-owned tmux server must run as vscode.
         result = self._driver.exec_run(
             container,
             ["tmux", "capture-pane", "-p", "-t", AGENT_TMUX_SESSION],
+            user=AGENT_CONTAINER_USER,
         )
         return CommandResult(
             exit_code=result.returncode,
@@ -534,10 +584,12 @@ class BcContainerController:
                 ),
             )
 
-        # Check tmux session
+        # Check tmux session.  has-session against the vscode-owned tmux
+        # server must run as vscode, same as every other tmux client call.
         tmux_result = self._driver.exec_run(
             container,
             ["tmux", "has-session", "-t", AGENT_TMUX_SESSION],
+            user=AGENT_CONTAINER_USER,
         )
         tmux_state = "active" if tmux_result.returncode == 0 else "inactive"
 

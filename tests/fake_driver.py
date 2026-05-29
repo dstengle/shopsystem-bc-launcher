@@ -14,9 +14,16 @@ from bc_launcher.driver import ContainerInfo, ContainerMount
 
 @dataclass
 class ExecCall:
-    """Records one exec_run or exec_interactive call."""
+    """Records one exec_run or exec_interactive call.
+
+    ``user`` is the container user the command ran as (``docker exec -u
+    <user>``), or ``None`` for the default (root in the BC image).  Tests
+    assert on this to verify the tmux session and its clients all run as
+    vscode end-to-end.
+    """
     container: str
     command: list[str]
+    user: str | None = None
 
 
 class FakeDockerDriver:
@@ -178,10 +185,18 @@ class FakeDockerDriver:
         self.operation_log.append(("network_create", network_name))
 
     def exec_run(
-        self, container_name: str, command: list[str]
+        self,
+        container_name: str,
+        command: list[str],
+        user: str | None = None,
     ) -> subprocess.CompletedProcess:
-        self.exec_calls.append(ExecCall(container=container_name, command=command))
-        self._last_command = ["docker", "exec", container_name] + command
+        self.exec_calls.append(
+            ExecCall(container=container_name, command=command, user=user)
+        )
+        prefix = ["docker", "exec"]
+        if user is not None:
+            prefix += ["-u", user]
+        self._last_command = prefix + [container_name] + command
 
         # Simulate tmux has-session
         if command[:3] == ["tmux", "has-session", "-t"]:
@@ -216,9 +231,19 @@ class FakeDockerDriver:
         # Default: success
         return subprocess.CompletedProcess(command, 0, "", "")
 
-    def exec_interactive(self, container_name: str, command: list[str]) -> None:
-        self.interactive_calls.append(ExecCall(container=container_name, command=command))
-        self._last_command = ["docker", "exec", "-it", container_name] + command
+    def exec_interactive(
+        self,
+        container_name: str,
+        command: list[str],
+        user: str | None = None,
+    ) -> None:
+        self.interactive_calls.append(
+            ExecCall(container=container_name, command=command, user=user)
+        )
+        prefix = ["docker", "exec", "-it"]
+        if user is not None:
+            prefix += ["-u", user]
+        self._last_command = prefix + [container_name] + command
 
     def stop(self, container_name: str) -> None:
         self._last_command = ["docker", "rm", "-f", container_name]
