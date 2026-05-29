@@ -24,6 +24,21 @@ AGENT_TMUX_SESSION = "agent"
 BC_IMAGE = "ghcr.io/dstengle/shopsystem-bc-base:latest"
 SHOPMSG_DSN_ENV = "SHOPMSG_DSN"
 
+# Claude Code readiness markers used to sequence prompt injection inside
+# the agent tmux session.  The default tmux session command is bash, so a
+# naïve send-keys of the startup prompt lands in bash and fails as
+# "-bash: <first-word>: command not found".  The launch sequence is:
+#   1. send-keys 'claude' Enter           — start Claude Code
+#   2. wait for CLAUDE_READY_MARKER       — Claude Code banner appeared
+#   3. send-keys Enter                    — accept workspace-trust default
+#   4. wait for CLAUDE_INPUT_READY_MARKER — main input prompt is live
+#   5. send-keys <startup_prompt> Enter   — prompt lands inside Claude Code
+# On any wait timeout, the launcher emits a stderr warning naming the
+# step that did not confirm.
+CLAUDE_READY_MARKER = "Claude Code v"
+CLAUDE_INPUT_READY_MARKER = "❯"  # the "❯" input prompt indicator
+CLAUDE_READINESS_TIMEOUT_SECONDS = 60.0
+
 
 def _container_name(bc_name: str) -> str:
     return f"bc-{bc_name}"
@@ -328,8 +343,67 @@ class BcContainerController:
         )
         out_lines.append(f"Started tmux session '{AGENT_TMUX_SESSION}'\n")
 
-        # Optional startup prompt
+        # Start Claude Code inside the tmux session and wait for readiness
+        # before injecting any user prompt.  The default tmux session command
+        # is bash; without this sequence the startup prompt lands in bash
+        # ("-bash: Run: command not found") and Claude Code never starts.
+        # Only run the readiness sequence when a startup_prompt will be
+        # injected.  An empty startup_prompt (lead-9sq's documented opt-out)
+        # skips both the prompt injection AND the Claude Code start, leaving
+        # the tmux session with its default bash command — preserving the
+        # legacy escape hatch.
         if startup_prompt:
+            # Step 1: start Claude Code
+            self._driver.exec_run(
+                container,
+                ["tmux", "send-keys", "-t", AGENT_TMUX_SESSION,
+                 "claude", "Enter"],
+            )
+            # Step 2: wait for Claude Code banner
+            ready = self._driver.wait_for_pane_marker(
+                container,
+                AGENT_TMUX_SESSION,
+                CLAUDE_READY_MARKER,
+                CLAUDE_READINESS_TIMEOUT_SECONDS,
+            )
+            if not ready:
+                err_lines.append(
+                    f"warning: Claude Code did not become ready within "
+                    f"{CLAUDE_READINESS_TIMEOUT_SECONDS:.0f}s "
+                    f"(marker {CLAUDE_READY_MARKER!r} not seen); "
+                    f"startup prompt NOT injected\n"
+                )
+                return CommandResult(
+                    exit_code=0,
+                    stdout="".join(out_lines),
+                    stderr="".join(err_lines),
+                )
+            # Step 3: accept workspace-trust prompt (default "Yes, I trust")
+            self._driver.exec_run(
+                container,
+                ["tmux", "send-keys", "-t", AGENT_TMUX_SESSION, "Enter"],
+            )
+            # Step 4: wait for main input to be ready
+            input_ready = self._driver.wait_for_pane_marker(
+                container,
+                AGENT_TMUX_SESSION,
+                CLAUDE_INPUT_READY_MARKER,
+                CLAUDE_READINESS_TIMEOUT_SECONDS,
+            )
+            if not input_ready:
+                err_lines.append(
+                    f"warning: Claude Code workspace-trust prompt did not "
+                    f"clear / main input did not become ready within "
+                    f"{CLAUDE_READINESS_TIMEOUT_SECONDS:.0f}s "
+                    f"(marker {CLAUDE_INPUT_READY_MARKER!r} not seen); "
+                    f"startup prompt NOT injected\n"
+                )
+                return CommandResult(
+                    exit_code=0,
+                    stdout="".join(out_lines),
+                    stderr="".join(err_lines),
+                )
+            # Step 5: inject the startup prompt into Claude Code's input
             self._driver.exec_run(
                 container,
                 ["tmux", "send-keys", "-t", AGENT_TMUX_SESSION,

@@ -67,6 +67,16 @@ class FakeDockerDriver:
         # Per-container run commands indexed by container name (for multi-launch scenarios)
         self._run_commands_by_container: dict[str, list[str]] = {}
 
+        # Pane-marker simulation: list of (container_name, session, marker)
+        # tuples that wait_for_pane_marker should treat as "never observed"
+        # (i.e. simulate the timeout path).  Anything not listed is treated
+        # as observed on the first poll (success path).
+        self._marker_timeouts: set[tuple[str, str, str]] = set()
+
+        # Record of wait_for_pane_marker invocations so tests can assert
+        # exactly which markers the controller polled for and in what order.
+        self.wait_for_marker_calls: list[tuple[str, str, str]] = []
+
     # --- Setup helpers (called by step definitions) ---
 
     def set_network(self, network_name: str, exists: bool = True) -> None:
@@ -132,6 +142,32 @@ class FakeDockerDriver:
             for t, s, d, _ro in mounts
         ]
         self._mounts[container_name] = mount_objs
+
+    def simulate_marker_timeout(
+        self, container_name: str, tmux_session: str, marker: str
+    ) -> None:
+        """Configure a (container, session, marker) tuple to time out.
+
+        Used by tests exercising the readiness-poll-timeout warning path:
+        the controller calls wait_for_pane_marker; the fake returns False
+        for any tuple registered here; the controller should then emit
+        a stderr warning identifying the step that failed.
+        """
+        self._marker_timeouts.add((container_name, tmux_session, marker))
+
+    def wait_for_pane_marker(
+        self,
+        container_name: str,
+        tmux_session: str,
+        marker: str,
+        timeout_seconds: float,
+        poll_interval_seconds: float = 0.5,
+    ) -> bool:
+        """Deterministic marker simulation: success unless registered to time out."""
+        self.wait_for_marker_calls.append((container_name, tmux_session, marker))
+        if (container_name, tmux_session, marker) in self._marker_timeouts:
+            return False
+        return True
 
     def network_exists(self, network_name: str) -> bool:
         return network_name in self._networks

@@ -8,6 +8,7 @@ RealDockerDriver which shells out to the docker CLI.
 from __future__ import annotations
 
 import subprocess
+import time
 from dataclasses import dataclass, field
 from typing import Protocol
 
@@ -85,6 +86,25 @@ class DockerDriver(Protocol):
 
     def network_create(self, network_name: str) -> None:
         """Create a Docker network with the given name."""
+        ...
+
+    def wait_for_pane_marker(
+        self,
+        container_name: str,
+        tmux_session: str,
+        marker: str,
+        timeout_seconds: float,
+        poll_interval_seconds: float = 0.5,
+    ) -> bool:
+        """
+        Poll ``tmux capture-pane`` for the named session until ``marker`` is
+        observed in the pane contents, or until ``timeout_seconds`` elapses.
+
+        Returns True if the marker was observed, False on timeout.  The
+        controller uses this to sequence Claude Code startup inside the tmux
+        session (claude command → ready banner → trust accept → input ready)
+        before injecting the first user prompt.
+        """
         ...
 
 
@@ -199,3 +219,27 @@ class RealDockerDriver:
         cmd = ["docker", "network", "create", network_name]
         self._last_command = cmd
         subprocess.run(cmd, check=True)
+
+    def wait_for_pane_marker(
+        self,
+        container_name: str,
+        tmux_session: str,
+        marker: str,
+        timeout_seconds: float,
+        poll_interval_seconds: float = 0.5,
+    ) -> bool:
+        """Poll tmux capture-pane until marker is observed or timeout elapses."""
+        deadline = time.monotonic() + timeout_seconds
+        capture_cmd = [
+            "docker", "exec", container_name,
+            "tmux", "capture-pane", "-p", "-t", tmux_session,
+        ]
+        while True:
+            result = subprocess.run(
+                capture_cmd, capture_output=True, text=True, check=False,
+            )
+            if marker in result.stdout:
+                return True
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(poll_interval_seconds)
