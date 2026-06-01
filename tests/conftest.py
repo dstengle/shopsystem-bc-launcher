@@ -2128,3 +2128,218 @@ def assert_network_create_called_exactly_once(network_name, ctx, fake_driver):
         f"Expected 'docker network create {network_name}' to be called exactly once, "
         f"but it was called {len(calls)} time(s). All calls: {fake_driver.network_create_calls!r}"
     )
+
+
+# ===========================================================================
+# Prompt-submit scenario step definitions (lead-xsmn / lead-hyee)
+#
+# These pin the resolution of the --startup-prompt / inject submit bug:
+# a prompt must be COMMITTED to the agent's input loop (Enter as a discrete
+# tmux send-keys key argument), not left as an unsubmitted buffer entry
+# (text with an appended '\n').  The FakeDockerDriver models this faithfully:
+# it flips the agent to "processing" only when a send-keys carries a
+# non-empty text token followed by a discrete "Enter" token (see
+# tests/fake_driver.py).
+# ===========================================================================
+
+@given(parsers.parse(
+    'a Docker container named "{container_name}" is running with a tmux session '
+    'named "{session}" hosting an interactive agent at its input prompt'
+))
+def container_running_with_agent_at_prompt(container_name, session, ctx, fake_driver):
+    fake_driver.set_running(container_name, running=True)
+    fake_driver.add_tmux_session(container_name, session)
+    # The agent is idle at its input prompt: nothing committed, nothing buffered.
+    ctx["container_name"] = container_name
+
+
+@when(parsers.parse(
+    'I run "bc-container launch {bc_name} --startup-prompt \'{prompt}\'" '
+    'and the launch command exits zero'
+))
+def run_launch_quoted_startup_prompt(bc_name, prompt, ctx, fake_driver, controller, tmp_path):
+    repo_url = ctx.get("repo_url", f"https://github.com/shopsystem/{bc_name}.git")
+    manifest_path = ctx.get("launch_manifest_path")
+    if manifest_path is None and "launch_no_manifest" not in ctx:
+        default_manifest = tmp_path / "bc-manifest.yaml"
+        if not default_manifest.exists():
+            import yaml as _yaml
+            default_manifest.write_text(_yaml.dump({
+                "product": "shopsystem product",
+                "bcs": [{"name": bc_name, "remote": repo_url, "role": "bc"}],
+            }))
+        manifest_path = default_manifest
+    credential_home = ctx.get("credential_home")
+    result = controller.launch(
+        bc_name=bc_name,
+        repo_url=repo_url,
+        startup_prompt=prompt,
+        manifest_path=manifest_path,
+        credential_home=credential_home,
+    )
+    assert result.exit_code == 0, (
+        f"Expected launch to exit zero, got {result.exit_code} (stderr: {result.stderr!r})"
+    )
+    ctx["result"] = result
+    ctx["container_name"] = f"bc-{bc_name}"
+    ctx["bc_name"] = bc_name
+    ctx["startup_prompt"] = prompt
+
+
+@when(parsers.parse(
+    'I run "bc-container inject {bc_name} \'{prompt}\'" and the command exits zero'
+))
+def run_inject_quoted(bc_name, prompt, ctx, fake_driver, controller):
+    result = controller.inject(bc_name, prompt)
+    assert result.exit_code == 0, (
+        f"Expected inject to exit zero, got {result.exit_code} (stderr: {result.stderr!r})"
+    )
+    ctx["result"] = result
+    ctx["container_name"] = f"bc-{bc_name}"
+    ctx["bc_name"] = bc_name
+    ctx["prompt"] = prompt
+
+
+@when(parsers.parse(
+    'I run "bc-container monitor {bc_name}" and read its streamed output '
+    'without issuing any further "bc-container inject" or other host-side keystroke'
+))
+def run_monitor_quoted(bc_name, ctx, fake_driver, controller):
+    # Record the send-keys call count BEFORE monitor so the Then step can
+    # assert no intervening inject occurred between launch and the marker.
+    container_name = f"bc-{bc_name}"
+    ctx["send_keys_before_monitor"] = len(fake_driver.send_keys_calls(container_name))
+    result = controller.monitor(bc_name)
+    ctx["monitor_result"] = result
+    ctx["result"] = result
+    ctx["container_name"] = container_name
+    ctx["bc_name"] = bc_name
+
+
+@then(parsers.parse(
+    'no subsequent "bc-container inject" invocation (whether with a non-empty '
+    'prompt or an empty prompt acting as a forced Enter) is required for the '
+    'in-container agent to begin processing the prompt "{prompt}"'
+))
+def assert_no_followup_inject_required(prompt, ctx, fake_driver):
+    container_name = ctx["container_name"]
+    committed = fake_driver.agent_committed_prompt(container_name)
+    assert committed == prompt, (
+        f"Expected the agent in {container_name!r} to have committed prompt "
+        f"{prompt!r} from the launch/inject alone (no follow-up inject), but the "
+        f"agent's committed prompt is {committed!r} (buffer: "
+        f"{fake_driver.agent_buffer(container_name)!r}). A non-None buffer with a "
+        f"None committed prompt is the exact regression: text sits unsubmitted "
+        f"awaiting an Enter keystroke."
+    )
+
+
+@then(parsers.parse(
+    "the in-container agent's input loop has been committed the prompt "
+    '"{prompt}" as a submitted input, not as an unsubmitted buffer entry '
+    'awaiting an Enter keystroke'
+))
+def assert_prompt_committed_not_buffered(prompt, ctx, fake_driver):
+    container_name = ctx["container_name"]
+    committed = fake_driver.agent_committed_prompt(container_name)
+    buffered = fake_driver.agent_buffer(container_name)
+    assert committed == prompt and buffered is None, (
+        f"Expected prompt {prompt!r} committed (not buffered) in {container_name!r}; "
+        f"got committed={committed!r}, buffer={buffered!r}."
+    )
+    # Pin the call shape directly: the last send-keys carrying the prompt text
+    # must pass "Enter" as a DISCRETE trailing token, never an appended "\n".
+    send_keys = [
+        c for c in fake_driver.send_keys_calls(container_name) if prompt in c.command
+    ]
+    assert send_keys, (
+        f"Expected a tmux send-keys carrying {prompt!r} in {container_name!r}; "
+        f"recorded send-keys: {[c.command for c in fake_driver.send_keys_calls(container_name)]!r}"
+    )
+    call = send_keys[-1]
+    assert "Enter" in call.command, (
+        f"Expected discrete 'Enter' key argument in send-keys command, got {call.command!r}"
+    )
+    # The prompt text must be its own token (no baked-in newline / no
+    # concatenation with Enter): assert no token both contains the prompt and
+    # a trailing newline, and that the prompt appears as an exact token.
+    assert prompt in call.command, (
+        f"Expected {prompt!r} as a discrete token (not concatenated with a "
+        f"newline or Enter); got {call.command!r}"
+    )
+    for tok in call.command:
+        assert "\n" not in tok, (
+            f"Found a literal newline baked into a send-keys token {tok!r} — "
+            f"the buggy '<text>\\n' shape. Enter must be a discrete argument. "
+            f"Full command: {call.command!r}"
+        )
+
+
+@then(parsers.parse(
+    "the agent's observable state transitions from idle to actively processing "
+    'the prompt "{prompt}" as a direct consequence of the {trigger} command completing'
+))
+def assert_agent_transitions_to_processing(prompt, trigger, ctx, fake_driver):
+    container_name = ctx["container_name"]
+    committed = fake_driver.agent_committed_prompt(container_name)
+    assert committed == prompt, (
+        f"Expected the agent in {container_name!r} to be actively processing "
+        f"{prompt!r} after the {trigger} command, got committed={committed!r}."
+    )
+    # The observable surface (capture-pane / monitor) must reflect processing.
+    pane = controller_monitor_pane(ctx, fake_driver, container_name)
+    assert prompt in pane and "Working" in pane, (
+        f"Expected the monitor/capture-pane surface to show the agent working on "
+        f"{prompt!r}; got pane {pane!r}."
+    )
+
+
+def controller_monitor_pane(ctx, fake_driver, container_name):
+    """Helper: read the current capture-pane surface for the container."""
+    result = ctx["controller"].monitor(container_name.removeprefix("bc-"))
+    return result.stdout
+
+
+@then(parsers.parse(
+    'within 30 seconds of the launch command exiting, the streamed monitor '
+    'output contains an agent-working state-marker line that is produced only '
+    'when the agent has committed input and is actively processing it (and not '
+    'produced when the agent is idle at an unsubmitted input buffer)'
+))
+def assert_monitor_shows_working_marker(ctx, fake_driver):
+    result = ctx["monitor_result"]
+    assert result.exit_code == 0, (
+        f"Expected monitor to exit zero, got {result.exit_code}"
+    )
+    assert "Working" in result.stdout, (
+        f"Expected an agent-working state-marker in monitor output, got: {result.stdout!r}"
+    )
+    # Non-vacuity: the marker is produced ONLY when input is committed. Confirm
+    # the modelled agent is in the processing state, not idle-at-buffer.
+    container_name = ctx["container_name"]
+    assert fake_driver.agent_committed_prompt(container_name) is not None, (
+        "Monitor surfaced a working marker but the modelled agent has no "
+        "committed input — the marker would be vacuous."
+    )
+
+
+@then(parsers.parse(
+    "the agent-working state-marker appears as a direct consequence of the "
+    "launch's --startup-prompt being submitted, with no intervening "
+    '"bc-container inject" invocation'
+))
+def assert_marker_no_intervening_inject(ctx, fake_driver):
+    container_name = ctx["container_name"]
+    before = ctx.get("send_keys_before_monitor")
+    after = len(fake_driver.send_keys_calls(container_name))
+    assert before is not None, "send_keys_before_monitor not recorded by the monitor When step"
+    assert after == before, (
+        f"Expected no intervening tmux send-keys (inject) between launch and the "
+        f"monitor read; send-keys count went {before} -> {after}."
+    )
+    startup_prompt = ctx.get("startup_prompt")
+    assert fake_driver.agent_committed_prompt(container_name) == startup_prompt, (
+        f"Expected the working marker to trace to the launch's --startup-prompt "
+        f"{startup_prompt!r}; committed prompt is "
+        f"{fake_driver.agent_committed_prompt(container_name)!r}."
+    )

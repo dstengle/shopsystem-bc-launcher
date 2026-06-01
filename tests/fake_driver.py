@@ -84,6 +84,26 @@ class FakeDockerDriver:
         # exactly which markers the controller polled for and in what order.
         self.wait_for_marker_calls: list[tuple[str, str, str]] = []
 
+        # --- Interactive-agent submission model (lead-xsmn / lead-hyee) ---
+        # The bug being pinned: `tmux send-keys '<text>\n'` (a literal newline
+        # APPENDED to the text payload, all in one argument) leaves the prompt
+        # sitting in the agent's input buffer UNSUBMITTED — an LF byte buffered
+        # into an interactive TUI is not a submit.  Only `tmux send-keys
+        # '<text>' Enter` (Enter as a DISCRETE trailing key-name argument)
+        # commits the input to the agent's main loop.
+        #
+        # This model makes the FakeDockerDriver a faithful stand-in for the
+        # real tmux send-keys call shape: it flips the agent from idle to
+        # "processing" ONLY when a send-keys carries a non-empty text token
+        # followed by a discrete "Enter" token.  A send-keys whose text token
+        # has a trailing "\n" baked in (the buggy shape) leaves the buffer
+        # populated but the agent idle — exactly the observable defect.
+        #
+        # container_name -> dict with keys:
+        #   "buffer":     text currently sitting unsubmitted in the input box
+        #   "processing": prompt text the agent has committed and is working on
+        self._agent_state: dict[str, dict[str, str | None]] = {}
+
     # --- Setup helpers (called by step definitions) ---
 
     def set_network(self, network_name: str, exists: bool = True) -> None:
@@ -211,13 +231,54 @@ class FakeDockerDriver:
             self._tmux_sessions.setdefault(container_name, set()).add(session)
             return subprocess.CompletedProcess(command, 0, "", "")
 
-        # Simulate tmux capture-pane
+        # Simulate tmux capture-pane.  Surface the agent-working state-marker
+        # when the modelled agent has committed input and is processing it;
+        # otherwise fall back to whatever pane content was configured.  This
+        # is what `bc-container monitor` reads, so it is the host-reachable
+        # observability surface for scenario 5ef728039884a9a2.
         if command[:3] == ["tmux", "capture-pane", "-p"]:
-            pane = self._tmux_pane.get(container_name, "")
+            state = self._agent_state.get(container_name)
+            if state and state.get("processing"):
+                pane = f"Working… (processing {state['processing']!r})"
+            else:
+                pane = self._tmux_pane.get(container_name, "")
             return subprocess.CompletedProcess(command, 0, pane, "")
 
-        # Simulate tmux send-keys
+        # Simulate tmux send-keys with faithful submit semantics (see
+        # _agent_state above).  Strip the "-t <session>" target tokens, then
+        # treat the remaining tokens as the send-keys payload.  Input is
+        # COMMITTED to the agent's main loop only when a non-empty text token
+        # is followed by a DISCRETE "Enter" key-name token.  A text token with
+        # an appended "\n" (the buggy shape) populates the buffer but does NOT
+        # submit.
         if command[:2] == ["tmux", "send-keys"]:
+            payload = command[2:]
+            # Drop the "-t <session>" pair if present.
+            if payload[:1] == ["-t"]:
+                payload = payload[2:]
+            state = self._agent_state.setdefault(
+                container_name, {"buffer": None, "processing": None}
+            )
+            if payload and payload[-1] == "Enter":
+                text_tokens = payload[:-1]
+                text = " ".join(text_tokens)
+                if text:
+                    # Non-empty text + discrete Enter == committed input.
+                    state["processing"] = text
+                    state["buffer"] = None
+                else:
+                    # Bare Enter (e.g. trust-accept, or the empty-text inject
+                    # workaround): commits whatever is currently buffered.
+                    if state.get("buffer"):
+                        state["processing"] = state["buffer"]
+                        state["buffer"] = None
+            else:
+                # No discrete trailing Enter.  Any text (including a token with
+                # a baked-in "\n") lands in the buffer UNSUBMITTED — the agent
+                # stays idle.  This is the regression the scenarios guard.
+                text = " ".join(payload)
+                if text:
+                    state["buffer"] = text
             return subprocess.CompletedProcess(command, 0, "", "")
 
         # Simulate git clone
@@ -269,3 +330,27 @@ class FakeDockerDriver:
     def run_command_for_container(self, container_name: str) -> list[str]:
         """Return the docker run command recorded for a specific container."""
         return self._run_commands_by_container.get(container_name, [])
+
+    # --- Interactive-agent submission model queries (lead-xsmn / lead-hyee) ---
+
+    def agent_committed_prompt(self, container_name: str) -> str | None:
+        """Return the prompt the modelled agent has committed and is processing.
+
+        ``None`` means the agent is idle (no input committed) — either nothing
+        was sent, or text was sent without a discrete trailing ``Enter`` and is
+        therefore sitting unsubmitted in the input buffer.
+        """
+        state = self._agent_state.get(container_name)
+        return state.get("processing") if state else None
+
+    def agent_buffer(self, container_name: str) -> str | None:
+        """Return text sitting unsubmitted in the input buffer (or ``None``)."""
+        state = self._agent_state.get(container_name)
+        return state.get("buffer") if state else None
+
+    def send_keys_calls(self, container_name: str) -> list[ExecCall]:
+        """Return all recorded tmux send-keys exec calls for the container."""
+        return [
+            c for c in self.exec_calls
+            if c.container == container_name and c.command[:2] == ["tmux", "send-keys"]
+        ]
