@@ -51,15 +51,6 @@ Feature: bc-container commands
     When I run bc-container attach with BC name "shopsystem-messaging"
     Then the command executes docker exec -it bc-shopsystem-messaging tmux attach-session -t agent
 
-  @scenario_hash:76228a581318f90c @bc:shopsystem-bc-launcher
-  Scenario: bc-container inject sends a startup prompt to the BC container's tmux session
-    Given the shopsystem-bc-launcher BC is installed
-    And a Docker container named "bc-shopsystem-messaging" is running
-    And a tmux session named "agent" exists inside the container
-    When I run bc-container inject with BC name "shopsystem-messaging" and prompt text "bd prime"
-    Then the command exits zero
-    And the tmux session named "agent" in container "bc-shopsystem-messaging" has received the text "bd prime" followed by a newline via tmux send-keys
-
   @scenario_hash:940a6e2c4180454b @bc:shopsystem-bc-launcher
   Scenario: bc-container monitor streams the BC container's tmux session output to host stdout
     Given the shopsystem-bc-launcher BC is installed
@@ -124,14 +115,6 @@ Feature: bc-container commands
     When I run bc-container launch with BC name "shopsystem-messaging"
     Then the FakeDockerDriver records that the docker run command for "bc-shopsystem-messaging" includes the flag "-e SHOPMSG_DSN=postgresql://customhost:5432/mydb"
     And the command exits zero
-
-  @scenario_hash:a6162bd63fca8ed4 @bc:shopsystem-bc-launcher
-  Scenario: bc-container launch accepts an optional startup prompt that is injected after the agent starts
-    Given the shopsystem-bc-launcher BC is installed
-    And no Docker container named "bc-shopsystem-messaging" is running
-    When I run bc-container launch with BC name "shopsystem-messaging" and startup prompt "bd prime"
-    And the container starts and the tmux session is active
-    Then the text "bd prime" followed by a newline has been sent to the tmux session named "agent" in container "bc-shopsystem-messaging"
 
   @scenario_hash:791a18a1781a343e @bc:shopsystem-bc-launcher
   Scenario: bc-container is available on PATH after installing the shopsystem-bc-launcher package

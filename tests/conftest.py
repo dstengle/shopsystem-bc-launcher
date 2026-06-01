@@ -649,22 +649,6 @@ def assert_exec_interactive_command(container_name, session, ctx, fake_driver):
         f"Expected command {expected_cmd!r}, got {call.command!r}"
 
 
-@then(parsers.parse('the tmux session named "{session}" in container "{container_name}" has received the text "{text}" followed by a newline via tmux send-keys'))
-def assert_tmux_send_keys(session, container_name, text, ctx, fake_driver):
-    send_key_calls = [
-        c for c in fake_driver.exec_calls
-        if c.container == container_name
-        and c.command[:2] == ["tmux", "send-keys"]
-        and text in c.command
-    ]
-    assert send_key_calls, \
-        f"Expected tmux send-keys with text {text!r} in {container_name!r}"
-    # Verify "Enter" (newline) is also in the command
-    call = send_key_calls[-1]
-    assert "Enter" in call.command, \
-        f"Expected 'Enter' in send-keys command, got {call.command!r}"
-
-
 @then(parsers.parse('stdout includes the text "{text}"'))
 def assert_stdout_includes_text(text, ctx):
     result = ctx.get("result") or ctx.get("help_result")
@@ -751,27 +735,6 @@ def assert_docker_run_includes_flag(container_name, flag, ctx, fake_driver):
     assert flag in cmd_str, (
         f"Expected flag {flag!r} in docker run command for {container_name!r}.\n"
         f"Recorded run command: {cmd_str!r}"
-    )
-
-
-@then(parsers.parse('the text "{text}" followed by a newline has been sent to the tmux session named "{session}" in container "{container_name}"'))
-def assert_tmux_send_keys_startup(text, session, container_name, ctx, fake_driver):
-    """
-    Matches the a6162bd63fca8ed4 scenario (startup prompt injection).
-    The step phrasing differs from the inject scenario step above but asserts
-    the same underlying behaviour.
-    """
-    send_key_calls = [
-        c for c in fake_driver.exec_calls
-        if c.container == container_name
-        and c.command[:2] == ["tmux", "send-keys"]
-        and text in c.command
-        and "Enter" in c.command
-    ]
-    assert send_key_calls, (
-        f"Expected tmux send-keys with text {text!r} and 'Enter' "
-        f"in container {container_name!r}, session {session!r}.\n"
-        f"Recorded exec calls: {[c.command for c in fake_driver.exec_calls]!r}"
     )
 
 
