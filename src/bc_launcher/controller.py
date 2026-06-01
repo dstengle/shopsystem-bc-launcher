@@ -559,11 +559,25 @@ class BcContainerController:
                     stdout="".join(out_lines),
                     stderr="".join(err_lines),
                 )
-            # Step 5: inject the startup prompt into Claude Code's input
+            # Step 5: inject the startup prompt into Claude Code's input.
+            #
+            # Two DISCRETE send-keys invocations (text first, Enter second),
+            # NOT one invocation carrying both (lead-lez1 / lead-9q0f root
+            # cause).  A single `send-keys <text> Enter` exec_run concatenates
+            # the whole keystream into ONE pty write() syscall; Claude Code's
+            # TUI treats single-write payloads above ~70 bytes as a paste and
+            # absorbs the trailing CR into the input buffer instead of
+            # submitting.  Two exec_run calls are two discrete pty writes
+            # separated by a kernel-scheduling gap, which the TUI processes as
+            # a discrete submit keypress.
             self._driver.exec_run(
                 container,
-                ["tmux", "send-keys", "-t", AGENT_TMUX_SESSION,
-                 startup_prompt, "Enter"],
+                ["tmux", "send-keys", "-t", AGENT_TMUX_SESSION, startup_prompt],
+                user=AGENT_CONTAINER_USER,
+            )
+            self._driver.exec_run(
+                container,
+                ["tmux", "send-keys", "-t", AGENT_TMUX_SESSION, "Enter"],
                 user=AGENT_CONTAINER_USER,
             )
             out_lines.append(f"Injected startup prompt: {startup_prompt!r}\n")
@@ -596,9 +610,23 @@ class BcContainerController:
         """Send text to the container's tmux session."""
         container = _container_name(bc_name)
         # send-keys against the vscode-owned tmux server must run as vscode.
+        #
+        # Two DISCRETE send-keys invocations (text first, Enter second), NOT
+        # one invocation carrying both (lead-lez1 / lead-9q0f root cause).  A
+        # single `send-keys <text> Enter` exec_run concatenates the whole
+        # keystream into ONE pty write() syscall; Claude Code's TUI treats
+        # single-write payloads above ~70 bytes as a paste and absorbs the
+        # trailing CR into the input buffer instead of submitting.  Two
+        # exec_run calls are two discrete pty writes separated by a
+        # kernel-scheduling gap, which the TUI processes as a discrete submit.
         self._driver.exec_run(
             container,
-            ["tmux", "send-keys", "-t", AGENT_TMUX_SESSION, prompt_text, "Enter"],
+            ["tmux", "send-keys", "-t", AGENT_TMUX_SESSION, prompt_text],
+            user=AGENT_CONTAINER_USER,
+        )
+        self._driver.exec_run(
+            container,
+            ["tmux", "send-keys", "-t", AGENT_TMUX_SESSION, "Enter"],
             user=AGENT_CONTAINER_USER,
         )
         return CommandResult(

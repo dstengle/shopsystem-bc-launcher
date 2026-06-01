@@ -2105,15 +2105,11 @@ def assert_network_create_called_exactly_once(network_name, ctx, fake_driver):
 # tests/fake_driver.py).
 # ===========================================================================
 
-@given(parsers.parse(
-    'a Docker container named "{container_name}" is running with a tmux session '
-    'named "{session}" hosting an interactive agent at its input prompt'
-))
-def container_running_with_agent_at_prompt(container_name, session, ctx, fake_driver):
-    fake_driver.set_running(container_name, running=True)
-    fake_driver.add_tmux_session(container_name, session)
-    # The agent is idle at its input prompt: nothing committed, nothing buffered.
-    ctx["container_name"] = container_name
+# NOTE: the Given step 'a Docker container named "..." is running with a tmux
+# session named "..." hosting an interactive agent at its input prompt' was
+# retired with scenario 28 (17518db1dc1c9001) under lead-lez1.  Scenario 31
+# (ad68aaf60377706e) uses the simpler '... running with a tmux session named
+# "agent"' Given, defined in the two-call section below.
 
 
 @when(parsers.parse(
@@ -2179,88 +2175,17 @@ def run_monitor_quoted(bc_name, ctx, fake_driver, controller):
     ctx["bc_name"] = bc_name
 
 
-@then(parsers.parse(
-    'no subsequent "bc-container inject" invocation (whether with a non-empty '
-    'prompt or an empty prompt acting as a forced Enter) is required for the '
-    'in-container agent to begin processing the prompt "{prompt}"'
-))
-def assert_no_followup_inject_required(prompt, ctx, fake_driver):
-    container_name = ctx["container_name"]
-    committed = fake_driver.agent_committed_prompt(container_name)
-    assert committed == prompt, (
-        f"Expected the agent in {container_name!r} to have committed prompt "
-        f"{prompt!r} from the launch/inject alone (no follow-up inject), but the "
-        f"agent's committed prompt is {committed!r} (buffer: "
-        f"{fake_driver.agent_buffer(container_name)!r}). A non-None buffer with a "
-        f"None committed prompt is the exact regression: text sits unsubmitted "
-        f"awaiting an Enter keystroke."
-    )
-
-
-@then(parsers.parse(
-    "the in-container agent's input loop has been committed the prompt "
-    '"{prompt}" as a submitted input, not as an unsubmitted buffer entry '
-    'awaiting an Enter keystroke'
-))
-def assert_prompt_committed_not_buffered(prompt, ctx, fake_driver):
-    container_name = ctx["container_name"]
-    committed = fake_driver.agent_committed_prompt(container_name)
-    buffered = fake_driver.agent_buffer(container_name)
-    assert committed == prompt and buffered is None, (
-        f"Expected prompt {prompt!r} committed (not buffered) in {container_name!r}; "
-        f"got committed={committed!r}, buffer={buffered!r}."
-    )
-    # Pin the call shape directly: the last send-keys carrying the prompt text
-    # must pass "Enter" as a DISCRETE trailing token, never an appended "\n".
-    send_keys = [
-        c for c in fake_driver.send_keys_calls(container_name) if prompt in c.command
-    ]
-    assert send_keys, (
-        f"Expected a tmux send-keys carrying {prompt!r} in {container_name!r}; "
-        f"recorded send-keys: {[c.command for c in fake_driver.send_keys_calls(container_name)]!r}"
-    )
-    call = send_keys[-1]
-    assert "Enter" in call.command, (
-        f"Expected discrete 'Enter' key argument in send-keys command, got {call.command!r}"
-    )
-    # The prompt text must be its own token (no baked-in newline / no
-    # concatenation with Enter): assert no token both contains the prompt and
-    # a trailing newline, and that the prompt appears as an exact token.
-    assert prompt in call.command, (
-        f"Expected {prompt!r} as a discrete token (not concatenated with a "
-        f"newline or Enter); got {call.command!r}"
-    )
-    for tok in call.command:
-        assert "\n" not in tok, (
-            f"Found a literal newline baked into a send-keys token {tok!r} — "
-            f"the buggy '<text>\\n' shape. Enter must be a discrete argument. "
-            f"Full command: {call.command!r}"
-        )
-
-
-@then(parsers.parse(
-    "the agent's observable state transitions from idle to actively processing "
-    'the prompt "{prompt}" as a direct consequence of the {trigger} command completing'
-))
-def assert_agent_transitions_to_processing(prompt, trigger, ctx, fake_driver):
-    container_name = ctx["container_name"]
-    committed = fake_driver.agent_committed_prompt(container_name)
-    assert committed == prompt, (
-        f"Expected the agent in {container_name!r} to be actively processing "
-        f"{prompt!r} after the {trigger} command, got committed={committed!r}."
-    )
-    # The observable surface (capture-pane / monitor) must reflect processing.
-    pane = controller_monitor_pane(ctx, fake_driver, container_name)
-    assert prompt in pane and "Working" in pane, (
-        f"Expected the monitor/capture-pane surface to show the agent working on "
-        f"{prompt!r}; got pane {pane!r}."
-    )
-
-
-def controller_monitor_pane(ctx, fake_driver, container_name):
-    """Helper: read the current capture-pane surface for the container."""
-    result = ctx["controller"].monitor(container_name.removeprefix("bc-"))
-    return result.stdout
+# NOTE: three Then step definitions were retired with scenarios 27
+# (0e733774844ed9f3) and 28 (17518db1dc1c9001) under lead-lez1, because no
+# remaining feature references their phrasings:
+#   * 'no subsequent "bc-container inject" invocation ... is required ...'
+#   * "the in-container agent's input loop has been committed the prompt ..."
+#   * "the agent's observable state transitions from idle to actively
+#      processing the prompt ..."
+# Plus the controller_monitor_pane helper used only by the last of those.
+# The successor scenarios 30 (6477b2ab3720ac53) and 31 (ad68aaf60377706e)
+# pin the two-discrete-invocation send-keys shape via the step definitions
+# in the two-call section below.
 
 
 @then(parsers.parse(
@@ -2305,4 +2230,191 @@ def assert_marker_no_intervening_inject(ctx, fake_driver):
         f"Expected the working marker to trace to the launch's --startup-prompt "
         f"{startup_prompt!r}; committed prompt is "
         f"{fake_driver.agent_committed_prompt(container_name)!r}."
+    )
+
+
+# ===========================================================================
+# Two-discrete-invocation send-keys scenario step definitions
+# (lead-lez1 / lead-9q0f, scenarios 30 / 31).
+#
+# These pin the ROOT-CAUSE fix at the driver argv surface: launch
+# --startup-prompt and inject must each issue EXACTLY TWO tmux send-keys
+# invocations against the container driver — the prompt text alone first,
+# then a bare Enter second — and NO single invocation may carry both.  This
+# is the shape that survives Claude Code's paste-absorption heuristic
+# (single text+Enter pty write is swallowed as a paste).  Assertions read the
+# FakeDockerDriver's recorded send_keys_calls (the driver-surface recorder).
+# ===========================================================================
+
+
+@given(parsers.parse(
+    'a Docker container named "{container_name}" is running with a tmux '
+    'session named "{session}"'
+))
+def container_running_with_tmux_session(container_name, session, ctx, fake_driver):
+    fake_driver.set_running(container_name, running=True)
+    fake_driver.add_tmux_session(container_name, session)
+    ctx["container_name"] = container_name
+
+
+def _prompt_submit_send_keys(fake_driver, container_name, prompt):
+    """Return the send-keys invocations attributable to the prompt submission.
+
+    The launch path issues earlier readiness send-keys (launching claude,
+    accepting the trust prompt) that are NOT part of the --startup-prompt
+    handling.  The prompt-submit handling is the trailing pair: the
+    text-carrying invocation for ``prompt`` and the Enter invocation that
+    immediately follows it.  We locate the invocation carrying the prompt
+    text as a discrete token and return it together with the next send-keys
+    invocation.
+    """
+    calls = fake_driver.send_keys_calls(container_name)
+    # Index of the (last) invocation whose payload carries the prompt text as
+    # a discrete token.
+    text_idx = None
+    for i, c in enumerate(calls):
+        if prompt in c.command:
+            text_idx = i
+    assert text_idx is not None, (
+        f"No tmux send-keys invocation carried prompt text {prompt!r} in "
+        f"{container_name!r}; recorded: {[c.command for c in calls]!r}"
+    )
+    assert text_idx + 1 < len(calls), (
+        f"Expected a send-keys invocation AFTER the prompt-text invocation "
+        f"(the discrete Enter), but the prompt-text invocation was the last "
+        f"send-keys recorded: {[c.command for c in calls]!r}"
+    )
+    return calls[text_idx], calls[text_idx + 1], text_idx, text_idx + 1
+
+
+@then(parsers.parse(
+    'the BC has issued exactly two tmux send-keys invocations against the '
+    'container driver targeting the tmux session named "{session}" in '
+    'container "{container_name}" as a direct consequence of the '
+    '--startup-prompt being honored'
+))
+def assert_exactly_two_send_keys_launch(session, container_name, ctx, fake_driver):
+    prompt = ctx.get("startup_prompt")
+    text_call, enter_call, text_idx, enter_idx = _prompt_submit_send_keys(
+        fake_driver, container_name, prompt
+    )
+    ctx["submit_text_call"] = text_call
+    ctx["submit_enter_call"] = enter_call
+    ctx["submit_text_idx"] = text_idx
+    ctx["submit_enter_idx"] = enter_idx
+    ctx["submit_prompt"] = prompt
+    for call in (text_call, enter_call):
+        assert call.command[:4] == ["tmux", "send-keys", "-t", session], (
+            f"Expected send-keys targeting session {session!r}; got {call.command!r}"
+        )
+
+
+@then(parsers.parse(
+    'the BC has issued exactly two tmux send-keys invocations against the '
+    'container driver targeting the tmux session named "{session}" in '
+    'container "{container_name}" as a direct consequence of the inject command'
+))
+def assert_exactly_two_send_keys_inject(session, container_name, ctx, fake_driver):
+    prompt = ctx.get("prompt")
+    # The inject command's ONLY send-keys are the prompt-submit pair.
+    calls = fake_driver.send_keys_calls(container_name)
+    assert len(calls) == 2, (
+        f"Expected exactly two send-keys invocations from the inject command "
+        f"against {container_name!r}; got {len(calls)}: {[c.command for c in calls]!r}"
+    )
+    text_call, enter_call = calls[0], calls[1]
+    ctx["submit_text_call"] = text_call
+    ctx["submit_enter_call"] = enter_call
+    ctx["submit_text_idx"] = 0
+    ctx["submit_enter_idx"] = 1
+    ctx["submit_prompt"] = prompt
+    for call in (text_call, enter_call):
+        assert call.command[:4] == ["tmux", "send-keys", "-t", session], (
+            f"Expected send-keys targeting session {session!r}; got {call.command!r}"
+        )
+
+
+@then(parsers.parse(
+    'the first of those two invocations carries the prompt text "{prompt}" as '
+    'its key payload and does not carry the Enter key in the same invocation'
+))
+def assert_first_invocation_text_only(prompt, ctx):
+    text_call = ctx["submit_text_call"]
+    assert prompt in text_call.command, (
+        f"Expected first invocation to carry prompt text {prompt!r}; got "
+        f"{text_call.command!r}"
+    )
+    assert "Enter" not in text_call.command, (
+        f"First invocation must NOT carry the Enter key; got {text_call.command!r}"
+    )
+
+
+@then(parsers.parse(
+    'the second of those two invocations carries the Enter key as its key '
+    'payload and does not carry the prompt text "{prompt}" in the same invocation'
+))
+def assert_second_invocation_enter_only(prompt, ctx):
+    enter_call = ctx["submit_enter_call"]
+    assert "Enter" in enter_call.command, (
+        f"Expected second invocation to carry the Enter key; got {enter_call.command!r}"
+    )
+    assert prompt not in enter_call.command, (
+        f"Second invocation must NOT carry the prompt text {prompt!r}; got "
+        f"{enter_call.command!r}"
+    )
+
+
+@then(parsers.parse(
+    'no single tmux send-keys invocation issued by the launch command\'s '
+    '--startup-prompt handling carries both the prompt text "{prompt}" and '
+    'the Enter key together'
+))
+def assert_no_single_invocation_carries_both_launch(prompt, ctx, fake_driver):
+    container_name = ctx["container_name"]
+    offenders = [
+        c.command for c in fake_driver.send_keys_calls(container_name)
+        if prompt in c.command and "Enter" in c.command
+    ]
+    assert not offenders, (
+        f"Found send-keys invocation(s) carrying BOTH prompt {prompt!r} and "
+        f"Enter — the paste-absorption regression: {offenders!r}"
+    )
+
+
+@then(parsers.parse(
+    'no single tmux send-keys invocation issued by the inject command carries '
+    'both the prompt text "{prompt}" and the Enter key together'
+))
+def assert_no_single_invocation_carries_both_inject(prompt, ctx, fake_driver):
+    container_name = ctx["container_name"]
+    offenders = [
+        c.command for c in fake_driver.send_keys_calls(container_name)
+        if prompt in c.command and "Enter" in c.command
+    ]
+    assert not offenders, (
+        f"Found send-keys invocation(s) carrying BOTH prompt {prompt!r} and "
+        f"Enter — the paste-absorption regression: {offenders!r}"
+    )
+
+
+@then(
+    "the two invocations are issued in order: the text-only invocation first, "
+    "the Enter-only invocation second"
+)
+def assert_invocation_order(ctx, fake_driver):
+    container_name = ctx["container_name"]
+    # Use the indices captured when the pair was located (the bare-Enter
+    # invocation is identical to the trust-accept Enter, so re-searching by
+    # value would alias to the wrong index).
+    text_idx = ctx["submit_text_idx"]
+    enter_idx = ctx["submit_enter_idx"]
+    calls = fake_driver.send_keys_calls(container_name)
+    assert text_idx < enter_idx, (
+        f"Expected text-only invocation (index {text_idx}) before Enter-only "
+        f"invocation (index {enter_idx}); recorded: {[c.command for c in calls]!r}"
+    )
+    assert enter_idx == text_idx + 1, (
+        f"Expected the Enter-only invocation (index {enter_idx}) to immediately "
+        f"follow the text-only invocation (index {text_idx}); recorded: "
+        f"{[c.command for c in calls]!r}"
     )

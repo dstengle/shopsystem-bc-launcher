@@ -135,8 +135,11 @@ def test_launch_sends_claude_command_before_startup_prompt(tmp_path):
         ),
         None,
     )
+    # Post-lead-lez1 two-call shape: the startup prompt is sent as its own
+    # text-only send-keys (no Enter token); a discrete bare-Enter follows.
+    # Match the prompt-text invocation on the text alone, NOT on text+Enter.
     prompt_idx = next(
-        (i for i, cmd in enumerate(send_keys) if "hello world" in cmd and "Enter" in cmd),
+        (i for i, cmd in enumerate(send_keys) if "hello world" in cmd),
         None,
     )
     assert claude_idx is not None, (

@@ -249,13 +249,35 @@ def test_launch_default_prompt_reaches_tmux_send_keys(monkeypatch, tmp_path):
         bc_name="shopsystem-messaging"
     )
 
-    send_key_calls = [
+    # Post-lead-lez1 two-call shape: the prompt text reaches its OWN send-keys
+    # invocation (text alone, no Enter), and a SEPARATE bare-Enter invocation
+    # immediately follows it.  A single invocation carrying both text and Enter
+    # is the retired paste-absorption regression, so the prompt-text invocation
+    # must NOT carry Enter.
+    text_calls = [
         c for c in fake_driver.exec_calls
         if c.command[:2] == ["tmux", "send-keys"]
         and expected_prompt in c.command
-        and "Enter" in c.command
     ]
-    assert send_key_calls, (
-        "Expected tmux send-keys with default imperative + 'Enter'.\n"
+    assert text_calls, (
+        "Expected a tmux send-keys carrying the default imperative.\n"
         f"Recorded exec calls: {[c.command for c in fake_driver.exec_calls]!r}"
+    )
+    text_call = text_calls[-1]
+    assert "Enter" not in text_call.command, (
+        "Post-lead-lez1: the prompt-text send-keys must NOT also carry Enter "
+        "(that is the retired single-invocation paste-absorption shape).\n"
+        f"Prompt-text invocation: {text_call.command!r}"
+    )
+    # The Enter must arrive as its own discrete invocation right after the text.
+    send_keys = [
+        c.command for c in fake_driver.exec_calls
+        if c.command[:2] == ["tmux", "send-keys"]
+    ]
+    text_idx = send_keys.index(text_call.command)
+    assert text_idx + 1 < len(send_keys) and send_keys[text_idx + 1] == [
+        "tmux", "send-keys", "-t", "agent", "Enter"
+    ], (
+        "Expected a discrete bare-Enter send-keys immediately after the "
+        f"prompt-text invocation.\nAll send-keys: {send_keys!r}"
     )

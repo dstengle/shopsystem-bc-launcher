@@ -84,20 +84,29 @@ class FakeDockerDriver:
         # exactly which markers the controller polled for and in what order.
         self.wait_for_marker_calls: list[tuple[str, str, str]] = []
 
-        # --- Interactive-agent submission model (lead-xsmn / lead-hyee) ---
-        # The bug being pinned: `tmux send-keys '<text>\n'` (a literal newline
-        # APPENDED to the text payload, all in one argument) leaves the prompt
-        # sitting in the agent's input buffer UNSUBMITTED — an LF byte buffered
-        # into an interactive TUI is not a submit.  Only `tmux send-keys
-        # '<text>' Enter` (Enter as a DISCRETE trailing key-name argument)
-        # commits the input to the agent's main loop.
+        # --- Interactive-agent submission model (lead-xsmn / lead-hyee /
+        #     lead-lez1 / lead-9q0f) ---
+        # The bug being pinned (empirically narrowed under lead-9q0f): a SINGLE
+        # `tmux send-keys -t agent '<text>' Enter` exec_run concatenates the
+        # whole keystream into ONE pty write() syscall.  Claude Code's TUI
+        # treats single-write payloads above ~70 bytes as a paste and absorbs
+        # the trailing CR into the input buffer rather than submitting it — so
+        # a single text+Enter invocation leaves the prompt UNSUBMITTED, idle in
+        # the buffer.  Only TWO discrete send-keys invocations — text-only
+        # first, then a bare Enter second — produce two discrete pty writes
+        # separated by a kernel-scheduling gap, which the TUI processes as a
+        # discrete submit keypress and commits.
         #
         # This model makes the FakeDockerDriver a faithful stand-in for the
-        # real tmux send-keys call shape: it flips the agent from idle to
-        # "processing" ONLY when a send-keys carries a non-empty text token
-        # followed by a discrete "Enter" token.  A send-keys whose text token
-        # has a trailing "\n" baked in (the buggy shape) leaves the buffer
-        # populated but the agent idle — exactly the observable defect.
+        # real tmux send-keys call shape:
+        #   * send-keys '<text>'                  -> buffer = text (idle)
+        #   * send-keys (bare) Enter              -> commit whatever is buffered
+        #   * send-keys '<text>' Enter (one call) -> PASTE: buffer = text, idle
+        #                                            (the trailing CR is absorbed
+        #                                            into the buffer, NOT a submit)
+        #   * send-keys '<text>\n' (baked LF)     -> buffer = text (idle)
+        # The single-call text+Enter shape and the baked-LF shape are BOTH the
+        # regression; only the two-call (text, then bare Enter) shape commits.
         #
         # container_name -> dict with keys:
         #   "buffer":     text currently sitting unsubmitted in the input box
@@ -263,12 +272,16 @@ class FakeDockerDriver:
                 text_tokens = payload[:-1]
                 text = " ".join(text_tokens)
                 if text:
-                    # Non-empty text + discrete Enter == committed input.
-                    state["processing"] = text
-                    state["buffer"] = None
+                    # Non-empty text AND Enter in ONE invocation: the paste
+                    # regression (lead-9q0f).  The single pty write is absorbed
+                    # as a paste — the text lands in the buffer and the trailing
+                    # CR is swallowed into it, so NOTHING is submitted.  Agent
+                    # stays idle.
+                    state["buffer"] = text
                 else:
-                    # Bare Enter (e.g. trust-accept, or the empty-text inject
-                    # workaround): commits whatever is currently buffered.
+                    # Bare Enter (e.g. trust-accept, the two-call submit's
+                    # second invocation, or the empty-text inject workaround):
+                    # a discrete submit keypress — commit whatever is buffered.
                     if state.get("buffer"):
                         state["processing"] = state["buffer"]
                         state["buffer"] = None
