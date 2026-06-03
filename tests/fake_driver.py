@@ -113,6 +113,36 @@ class FakeDockerDriver:
         #   "processing": prompt text the agent has committed and is working on
         self._agent_state: dict[str, dict[str, str | None]] = {}
 
+        # --- Messaging readiness / beads / health simulation ---
+        # Messaging reachability is modelled as reachable-by-default so that
+        # existing launch scenarios (which configure a host SHOPMSG_DSN but
+        # never set up a live database) keep injecting their startup prompt.
+        # The readiness scenarios that pin the unreachable path register the
+        # offending DSN here explicitly via set_dsn_reachable(dsn, False).
+        self._unreachable_dsns: set[str] = set()
+
+        # Containers that have passed their readiness sequence (idempotent
+        # re-run support).
+        self._ready_containers: set[str] = set()
+
+        # Per-container beads issue_prefix configured inside .beads.  Empty /
+        # missing means beads is NOT functionally usable: `bd create` fails.
+        self._beads_prefix: dict[str, str] = {}
+
+        # Monotonic counter for synthesising beads issue ids.
+        self._beads_seq: dict[str, int] = {}
+
+        # Containers whose beads is forced unusable regardless of prefix
+        # (models the "bd create exits non-zero" health scenario).
+        self._beads_broken: set[str] = set()
+
+        # Explicit health-status overrides per container (when a test wants
+        # to assert a docker-inspect status directly rather than derive it).
+        self._health_override: dict[str, str] = {}
+
+        # The DSN configured for each container (recorded from docker run -e).
+        self._container_dsn: dict[str, str] = {}
+
     # --- Setup helpers (called by step definitions) ---
 
     def set_network(self, network_name: str, exists: bool = True) -> None:
@@ -138,6 +168,46 @@ class FakeDockerDriver:
     def set_mounts(self, container_name: str, mounts: list[ContainerMount]) -> None:
         self._mounts[container_name] = mounts
 
+    def set_dsn_reachable(self, dsn: str, reachable: bool = True) -> None:
+        """Mark a DSN reachable (default) or unreachable for readiness checks.
+
+        Reachability is modelled as reachable-by-default; only DSNs
+        explicitly marked unreachable here fail the readiness barrier.
+        """
+        if reachable:
+            self._unreachable_dsns.discard(dsn)
+        else:
+            self._unreachable_dsns.add(dsn)
+
+    def set_container_dsn(self, container_name: str, dsn: str) -> None:
+        """Record the DSN configured for a (possibly pre-existing) container."""
+        self._container_dsn[container_name] = dsn
+
+    def mark_ready(self, container_name: str) -> None:
+        """Mark a container as having passed its readiness sequence."""
+        self._ready_containers.add(container_name)
+
+    def is_marked_ready(self, container_name: str) -> bool:
+        return container_name in self._ready_containers
+
+    def set_beads_prefix(self, container_name: str, prefix: str) -> None:
+        """Pre-configure a beads issue_prefix inside a container's .beads."""
+        self._beads_prefix[container_name] = prefix
+
+    def beads_prefix(self, container_name: str) -> str:
+        """Return the issue_prefix configured inside the container's .beads."""
+        return self._beads_prefix.get(container_name, "")
+
+    def set_beads_broken(self, container_name: str, broken: bool = True) -> None:
+        """Force `bd create` to fail inside the container regardless of prefix."""
+        if broken:
+            self._beads_broken.add(container_name)
+        else:
+            self._beads_broken.discard(container_name)
+
+    def set_health_override(self, container_name: str, status: str) -> None:
+        self._health_override[container_name] = status
+
     # --- DockerDriver protocol implementation ---
 
     def is_running(self, container_name: str) -> bool:
@@ -157,6 +227,8 @@ class FakeDockerDriver:
             cmd.append("-d")
         for key, val in env.items():
             cmd += ["-e", f"{key}={val}"]
+            if key == "SHOPMSG_DSN":
+                self._container_dsn[container_name] = val
         for mount_type, source, dest, readonly in mounts:
             spec = f"type={mount_type},source={source},target={dest}"
             if readonly:
@@ -204,6 +276,29 @@ class FakeDockerDriver:
         if (container_name, tmux_session, marker) in self._marker_timeouts:
             return False
         return True
+
+    def messaging_db_reachable(self, dsn: str) -> bool:
+        """Reachable-by-default unless the DSN was marked unreachable."""
+        return bool(dsn) and dsn not in self._unreachable_dsns
+
+    def health_status(self, container_name: str) -> str:
+        """Compose the container's health status.
+
+        An explicit override (set_health_override) wins.  Otherwise the
+        container is "healthy" only when beads is functionally usable inside
+        it (a non-empty issue_prefix configured and not forced broken) AND
+        the messaging database at its configured DSN is reachable; any other
+        state is "unhealthy".  Returns "none" if the container is unknown.
+        """
+        if container_name in self._health_override:
+            return self._health_override[container_name]
+        if container_name not in self._all_containers:
+            return "none"
+        prefix = self._beads_prefix.get(container_name, "")
+        beads_ok = bool(prefix) and container_name not in self._beads_broken
+        dsn = self._container_dsn.get(container_name, "")
+        db_ok = bool(dsn) and dsn not in self._unreachable_dsns
+        return "healthy" if (beads_ok and db_ok) else "unhealthy"
 
     def network_exists(self, network_name: str) -> bool:
         return network_name in self._networks
@@ -300,6 +395,41 @@ class FakeDockerDriver:
 
         # Simulate bd dolt pull
         if command[:3] == ["bd", "dolt", "pull"]:
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+        # Simulate `bd config set issue_prefix <prefix>` — the launcher's
+        # beads-usability fix.  Records the configured prefix so subsequent
+        # `bd create` / `bd ready` behave as functionally usable.
+        if command[:3] == ["bd", "config", "set"] and len(command) >= 5 \
+                and command[3] == "issue_prefix":
+            self._beads_prefix[container_name] = command[4]
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+        # Simulate `bd create ...` — exits zero and emits a new issue id
+        # carrying the configured prefix ONLY when beads is functionally
+        # usable (a non-empty issue_prefix is configured and beads is not
+        # forced broken).  Otherwise it exits non-zero, mirroring the
+        # "database not initialized: issue_prefix config is missing" failure.
+        if command[:2] == ["bd", "create"]:
+            prefix = self._beads_prefix.get(container_name, "")
+            if not prefix or container_name in self._beads_broken:
+                return subprocess.CompletedProcess(
+                    command, 1, "",
+                    "database not initialized: issue_prefix config is missing\n",
+                )
+            seq = self._beads_seq.get(container_name, 0) + 1
+            self._beads_seq[container_name] = seq
+            issue_id = f"{prefix}-{seq}"
+            return subprocess.CompletedProcess(command, 0, f"{issue_id}\n", "")
+
+        # Simulate `bd ready` — exits zero when beads is functionally usable.
+        if command[:2] == ["bd", "ready"]:
+            prefix = self._beads_prefix.get(container_name, "")
+            if not prefix or container_name in self._beads_broken:
+                return subprocess.CompletedProcess(
+                    command, 1, "",
+                    "database not initialized: issue_prefix config is missing\n",
+                )
             return subprocess.CompletedProcess(command, 0, "", "")
 
         # Default: success

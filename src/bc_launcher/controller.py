@@ -76,6 +76,23 @@ def _container_name(bc_name: str) -> str:
     return f"bc-{bc_name}"
 
 
+def beads_prefix_for(bc_name: str) -> str:
+    """Derive the beads issue_prefix this BC's registry is expected to carry.
+
+    A BC named ``shopsystem-<identifier>`` keeps its beads under a prefix
+    derived from the identifier: lowercase, non-alphanumerics stripped.  The
+    ``shopsystem-`` namespace prefix is dropped so the resulting registry
+    prefix is the short BC identifier (e.g. ``shopsystem-messaging`` →
+    ``messaging``).  This is the prefix the launcher configures inside the
+    container's ``.beads`` so ``bd create`` yields ids carrying it.
+    """
+    ident = bc_name
+    if ident.startswith("shopsystem-"):
+        ident = ident[len("shopsystem-"):]
+    ident = re.sub(r"[^a-z0-9]", "", ident.lower())
+    return ident
+
+
 def _slugify(text: str) -> str:
     """Lowercase and replace runs of spaces with hyphens."""
     return re.sub(r"\s+", "-", text.strip().lower())
@@ -445,6 +462,23 @@ class BcContainerController:
             )
             out_lines.append("Ran bd dolt pull\n")
 
+            # Ensure beads is functionally usable inside the container by
+            # configuring a non-empty issue_prefix in the workspace .beads.
+            # A freshly cloned BC may land with its beads database missing
+            # the issue_prefix config ("database not initialized:
+            # issue_prefix config is missing"), which makes `bd create` fail
+            # — the agent then cannot file its own follow-up findings.  The
+            # launcher derives the BC's expected prefix and configures it so
+            # `bd create` / `bd ready` work from first boot.
+            prefix = beads_prefix_for(bc_name)
+            self._driver.exec_run(
+                container,
+                ["bd", "config", "set", "issue_prefix", prefix],
+            )
+            out_lines.append(
+                f"Configured beads issue_prefix {prefix!r} in container\n"
+            )
+
             # Hand /workspace ownership to vscode.  The clone + bd dolt pull
             # exec_runs above default to root inside the BC image, leaving
             # /workspace and /workspace/.beads root-owned.  vscode then
@@ -487,6 +521,31 @@ class BcContainerController:
         # the tmux session with its default bash command — preserving the
         # legacy escape hatch.
         if startup_prompt:
+            # Readiness barrier — messaging database reachability.
+            #
+            # Before engaging the agent we verify the messaging backend at
+            # SHOPMSG_DSN is reachable.  A BC agent whose messaging DB is
+            # unreachable cannot arm its inbox watcher or drain pending
+            # inbox, so injecting the startup prompt would launch an agent
+            # straight into a wall of connection failures.  This barrier
+            # fires BEFORE any Claude Code start / prompt injection: on
+            # failure we return non-zero with a stderr line naming the DSN
+            # and send NOTHING to the tmux session.
+            dsn_for_readiness = env.get(SHOPMSG_DSN_ENV)
+            if dsn_for_readiness and not self._driver.messaging_db_reachable(
+                dsn_for_readiness
+            ):
+                err_lines.append(
+                    f"messaging readiness failure: messaging database at "
+                    f"{SHOPMSG_DSN_ENV}={dsn_for_readiness} is not reachable; "
+                    f"startup prompt NOT injected\n"
+                )
+                return CommandResult(
+                    exit_code=1,
+                    stdout="".join(out_lines),
+                    stderr="".join(err_lines),
+                )
+
             # Step 1: start Claude Code with --dangerously-skip-permissions.
             # The BC container is the isolation boundary the permission
             # prompts are meant to substitute for; bypassing them inside
@@ -699,6 +758,81 @@ class BcContainerController:
                 f"container_state: running\n"
                 f"tmux_session: {tmux_state}\n"
             ),
+        )
+
+    # ------------------------------------------------------------------
+    # readiness sequence (messaging-DB barrier, idempotent)
+    # ------------------------------------------------------------------
+
+    def ensure_ready(
+        self,
+        bc_name: str,
+        shopmsg_dsn: str | None = None,
+    ) -> CommandResult:
+        """Run (or re-run) the messaging readiness sequence for the container.
+
+        Idempotent: re-running against a container that has already passed
+        its readiness sequence is a no-op that exits zero and reports the
+        container is already ready — it does NOT re-send any startup prompt.
+
+        Returns non-zero with a DSN-naming stderr line when the messaging
+        database is unreachable.
+        """
+        container = _container_name(bc_name)
+        dsn = shopmsg_dsn or os.environ.get(SHOPMSG_DSN_ENV)
+
+        if self._container_marked_ready(container):
+            return CommandResult(
+                exit_code=0,
+                stdout=f"{container} is already ready\n",
+            )
+
+        if dsn and not self._driver.messaging_db_reachable(dsn):
+            return CommandResult(
+                exit_code=1,
+                stdout="",
+                stderr=(
+                    f"messaging readiness failure: messaging database at "
+                    f"{SHOPMSG_DSN_ENV}={dsn} is not reachable\n"
+                ),
+            )
+
+        self._mark_container_ready(container)
+        return CommandResult(
+            exit_code=0,
+            stdout=f"{container} is ready\n",
+        )
+
+    # Readiness bookkeeping is delegated to the driver so the fake can model
+    # an already-ready container.  Real drivers may persist this as a
+    # container label / sentinel; the fake holds it in memory.
+    def _container_marked_ready(self, container: str) -> bool:
+        marker = getattr(self._driver, "is_marked_ready", None)
+        return bool(marker(container)) if callable(marker) else False
+
+    def _mark_container_ready(self, container: str) -> None:
+        marker = getattr(self._driver, "mark_ready", None)
+        if callable(marker):
+            marker(container)
+
+    # ------------------------------------------------------------------
+    # health
+    # ------------------------------------------------------------------
+
+    def health(self, bc_name: str) -> CommandResult:
+        """Report the BC container's Docker health status.
+
+        The container is healthy only when beads is functionally usable
+        inside it AND the messaging database at SHOPMSG_DSN is reachable;
+        otherwise it is unhealthy even if the agent process is alive.  This
+        mirrors the in-container healthcheck the launch wires up; the host
+        reads the resulting status via ``docker inspect``.
+        """
+        container = _container_name(bc_name)
+        status = self._driver.health_status(container)
+        return CommandResult(
+            exit_code=0 if status == "healthy" else 1,
+            stdout=f"{status}\n",
         )
 
     # ------------------------------------------------------------------

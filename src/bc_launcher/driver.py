@@ -130,6 +130,27 @@ class DockerDriver(Protocol):
         """
         ...
 
+    def messaging_db_reachable(self, dsn: str) -> bool:
+        """Return True if the messaging database at ``dsn`` is reachable.
+
+        This is the readiness barrier the launcher checks before injecting
+        any startup prompt: a BC agent whose messaging backend is
+        unreachable cannot arm its inbox watcher or drain pending inbox, so
+        engaging it is pointless.  The controller calls this BEFORE prompt
+        injection; on failure it surfaces a readiness error naming the DSN
+        and does NOT send the startup prompt.
+        """
+        ...
+
+    def health_status(self, container_name: str) -> str:
+        """Return the container's reported health status string.
+
+        One of ``"healthy"``, ``"unhealthy"``, ``"starting"``, or
+        ``"none"`` (no healthcheck configured), mirroring
+        ``docker inspect --format '{{.State.Health.Status}}'``.
+        """
+        ...
+
 
 # ---------------------------------------------------------------------------
 # Real implementation (shells out to docker CLI)
@@ -258,6 +279,47 @@ class RealDockerDriver:
         cmd = ["docker", "network", "create", network_name]
         self._last_command = cmd
         subprocess.run(cmd, check=True)
+
+    def messaging_db_reachable(self, dsn: str) -> bool:
+        """Probe the messaging database at ``dsn`` for reachability.
+
+        Uses ``shop-msg ping`` if available, falling back to a TCP connect
+        against the host:port parsed from the DSN.  Any failure (unparseable
+        DSN, refused connection, timeout) returns False.
+        """
+        if not dsn:
+            return False
+        # Prefer the messaging BC's own readiness probe when present.
+        probe = subprocess.run(
+            ["shop-msg", "ping", "--dsn", dsn],
+            capture_output=True, text=True, check=False,
+        )
+        if probe.returncode == 0:
+            return True
+        # Fall back to a raw TCP connect against the DSN's host:port.
+        import socket
+        from urllib.parse import urlparse
+        try:
+            parsed = urlparse(dsn)
+            host = parsed.hostname
+            port = parsed.port or 5432
+            if not host:
+                return False
+            with socket.create_connection((host, port), timeout=2.0):
+                return True
+        except (OSError, ValueError):
+            return False
+
+    def health_status(self, container_name: str) -> str:
+        """Read the container's Docker health status via docker inspect."""
+        result = subprocess.run(
+            ["docker", "inspect", "--format",
+             "{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}",
+             container_name],
+            capture_output=True, text=True, check=False,
+        )
+        status = result.stdout.strip()
+        return status or "none"
 
     def wait_for_pane_marker(
         self,

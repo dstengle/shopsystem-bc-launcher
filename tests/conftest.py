@@ -341,6 +341,77 @@ def verify_container_running_given(container_name, ctx, fake_driver):
 
 
 # ---------------------------------------------------------------------------
+# Given steps — messaging readiness / beads usability / health (lead-ieph)
+# ---------------------------------------------------------------------------
+
+# A canonical DSN value used by the readiness/health scenarios.
+_READINESS_DSN = "postgresql://shopmsg:shopmsg@db.invalid:5432/shopsystem"
+
+
+@given('SHOPMSG_DSN for the container points at an address where no reachable '
+       'database is listening')
+def dsn_points_at_unreachable(ctx, fake_driver):
+    """Configure a SHOPMSG_DSN whose backend is explicitly unreachable."""
+    ctx["shopmsg_dsn"] = _READINESS_DSN
+    fake_driver.set_dsn_reachable(_READINESS_DSN, reachable=False)
+
+
+@given(parsers.parse('a Docker container named "{container_name}" is running and '
+                     'has already passed its readiness sequence'))
+def container_already_ready(container_name, ctx, fake_driver):
+    fake_driver.set_running(container_name, running=True)
+    fake_driver.mark_ready(container_name)
+    ctx["container_name"] = container_name
+    ctx["bc_name"] = container_name.removeprefix("bc-")
+
+
+@given(parsers.parse('a BC container named "{container_name}" is running'))
+def bc_container_is_running(container_name, ctx, fake_driver):
+    fake_driver.set_running(container_name, running=True)
+    ctx["container_name"] = container_name
+    ctx["bc_name"] = container_name.removeprefix("bc-")
+
+
+@given(parsers.parse('a BC container named "{container_name}" is running with '
+                     'its agent process alive'))
+def bc_container_running_agent_alive(container_name, ctx, fake_driver):
+    fake_driver.set_running(container_name, running=True)
+    ctx["container_name"] = container_name
+    ctx["bc_name"] = container_name.removeprefix("bc-")
+
+
+@given('beads is functionally usable inside the container and the messaging '
+       'database at SHOPMSG_DSN is reachable')
+def beads_usable_and_db_reachable(ctx, fake_driver):
+    container_name = ctx["container_name"]
+    bc_name = ctx["bc_name"]
+    from bc_launcher.controller import beads_prefix_for
+    fake_driver.set_beads_prefix(container_name, beads_prefix_for(bc_name))
+    fake_driver.set_container_dsn(container_name, _READINESS_DSN)
+    fake_driver.set_dsn_reachable(_READINESS_DSN, reachable=True)
+
+
+@given('the messaging database at SHOPMSG_DSN is not reachable')
+def db_not_reachable(ctx, fake_driver):
+    container_name = ctx["container_name"]
+    bc_name = ctx["bc_name"]
+    from bc_launcher.controller import beads_prefix_for
+    # beads is fine; only the DB is unreachable, so health must be unhealthy.
+    fake_driver.set_beads_prefix(container_name, beads_prefix_for(bc_name))
+    fake_driver.set_container_dsn(container_name, _READINESS_DSN)
+    fake_driver.set_dsn_reachable(_READINESS_DSN, reachable=False)
+
+
+@given('bd create run inside the container\'s workspace directory exits non-zero')
+def bd_create_exits_nonzero(ctx, fake_driver):
+    container_name = ctx["container_name"]
+    # DB is reachable; only beads is broken, so health must still be unhealthy.
+    fake_driver.set_container_dsn(container_name, _READINESS_DSN)
+    fake_driver.set_dsn_reachable(_READINESS_DSN, reachable=True)
+    fake_driver.set_beads_broken(container_name, broken=True)
+
+
+# ---------------------------------------------------------------------------
 # When steps
 # ---------------------------------------------------------------------------
 
@@ -439,6 +510,102 @@ def run_launch_with_startup_prompt(bc_name, prompt, ctx, fake_driver, controller
     ctx["container_name"] = f"bc-{bc_name}"
     ctx["bc_name"] = bc_name
     ctx["startup_prompt"] = prompt
+
+
+@when(parsers.parse('I run bc-container launch with BC name "{bc_name}" and a '
+                    'startup prompt'))
+def run_launch_with_a_startup_prompt(bc_name, ctx, fake_driver, controller, tmp_path):
+    """Launch with a (non-empty) startup prompt and the readiness DSN.
+
+    Distinct from the parameterised '... and startup prompt "<prompt>"' step:
+    here the prompt text is immaterial — what matters is that a prompt WOULD
+    be injected, so the messaging readiness barrier is exercised.
+    """
+    repo_url = ctx.get("repo_url", f"https://github.com/shopsystem/{bc_name}.git")
+    # Resolve the DSN this launch will use, mirroring the controller's own
+    # resolution (explicit arg wins, else host SHOPMSG_DSN), and pin it
+    # explicitly so the readiness Then steps can reason about the same value.
+    import os as _os
+    dsn = ctx.get("shopmsg_dsn") or _os.environ.get("SHOPMSG_DSN")
+    if not dsn:
+        # Ensure the barrier has a concrete DSN to fail against even when the
+        # host environment does not export one.
+        dsn = _READINESS_DSN
+    ctx["shopmsg_dsn"] = dsn
+    # Both scenarios using this exact "and a startup prompt" phrasing pin the
+    # barrier-blocks-at-launch path: the readiness sequence has NOT yet
+    # passed, so the messaging DB is unreachable at launch time.  Mark it
+    # unreachable so the launch blocks before any prompt injection.  (The
+    # "once readiness completes successfully" Then step flips it back to
+    # reachable and re-launches.)
+    fake_driver.set_dsn_reachable(dsn, reachable=False)
+    manifest_path = ctx.get("launch_manifest_path")
+    if manifest_path is None and "launch_no_manifest" not in ctx:
+        default_manifest = tmp_path / "bc-manifest.yaml"
+        if not default_manifest.exists():
+            import yaml as _yaml
+            default_manifest.write_text(_yaml.dump({
+                "product": "shopsystem product",
+                "bcs": [{"name": bc_name, "remote": repo_url, "role": "bc"}],
+            }))
+        manifest_path = default_manifest
+    credential_home = ctx.get("credential_home")
+    result = controller.launch(
+        bc_name=bc_name,
+        repo_url=repo_url,
+        shopmsg_dsn=dsn,
+        startup_prompt="please begin your session",
+        manifest_path=manifest_path,
+        credential_home=credential_home,
+    )
+    ctx["result"] = result
+    ctx["container_name"] = f"bc-{bc_name}"
+    ctx["bc_name"] = bc_name
+    ctx["startup_prompt"] = "please begin your session"
+    ctx["launch_manifest_path"] = manifest_path
+
+
+@when("the container has cloned the repository and bd dolt pull has been run "
+      "inside the workspace directory")
+def cloned_and_dolt_pulled(ctx, fake_driver):
+    """Confirm clone + bd dolt pull ran during launch (both simulated)."""
+    container_name = ctx["container_name"]
+    clone_calls = [
+        c for c in fake_driver.exec_calls
+        if c.container == container_name
+        and c.command[:2] == ["git", "clone"]
+    ]
+    assert clone_calls, "Expected a git clone exec call during launch"
+    dolt_calls = [
+        c for c in fake_driver.exec_calls
+        if c.container == container_name
+        and c.command[:3] == ["bd", "dolt", "pull"]
+    ]
+    assert dolt_calls, "Expected a 'bd dolt pull' exec call during launch"
+
+
+@when("the container is up but the readiness sequence has not yet completed")
+def readiness_not_yet_completed(ctx, fake_driver):
+    """No-op: the launch under test ran with an unreachable DSN, so the
+    readiness barrier failed and the prompt was not injected."""
+
+
+@when(parsers.parse('I run the readiness sequence against container '
+                    '"{container_name}" a second time'))
+def run_readiness_second_time(container_name, ctx, fake_driver, controller):
+    bc_name = container_name.removeprefix("bc-")
+    result = controller.ensure_ready(bc_name)
+    ctx["result"] = result
+    ctx["container_name"] = container_name
+    ctx["bc_name"] = bc_name
+
+
+@when("I inspect the container's health status via docker inspect")
+def inspect_health(ctx, fake_driver, controller):
+    bc_name = ctx["bc_name"]
+    result = controller.health(bc_name)
+    ctx["result"] = result
+    ctx["health_status"] = result.stdout.strip()
 
 
 @when("the container starts")
@@ -2417,4 +2584,145 @@ def assert_invocation_order(ctx, fake_driver):
         f"Expected the Enter-only invocation (index {enter_idx}) to immediately "
         f"follow the text-only invocation (index {text_idx}); recorded: "
         f"{[c.command for c in calls]!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Then steps — messaging readiness / beads usability / health (lead-ieph)
+# ---------------------------------------------------------------------------
+
+@then("the beads issue_prefix configured inside the container's .beads is "
+      "non-empty and matches the BC's expected prefix")
+def assert_beads_prefix_configured(ctx, fake_driver):
+    from bc_launcher.controller import beads_prefix_for
+    container_name = ctx["container_name"]
+    bc_name = ctx["bc_name"]
+    expected = beads_prefix_for(bc_name)
+    configured = fake_driver.beads_prefix(container_name)
+    assert configured, (
+        f"Expected a non-empty beads issue_prefix configured in "
+        f"{container_name!r}, got {configured!r}"
+    )
+    assert configured == expected, (
+        f"Expected beads issue_prefix {expected!r} for BC {bc_name!r}, "
+        f"got {configured!r}"
+    )
+
+
+@then("bd create run inside the container's workspace directory exits zero and "
+      "yields a new issue id carrying that prefix")
+def assert_bd_create_yields_prefixed_id(ctx, fake_driver):
+    from bc_launcher.controller import beads_prefix_for
+    container_name = ctx["container_name"]
+    expected_prefix = beads_prefix_for(ctx["bc_name"])
+    result = fake_driver.exec_run(container_name, ["bd", "create", "scratch"])
+    assert result.returncode == 0, (
+        f"Expected `bd create` to exit zero inside {container_name!r}, "
+        f"got rc={result.returncode} stderr={result.stderr!r}"
+    )
+    issue_id = result.stdout.strip()
+    assert issue_id, "Expected `bd create` to emit a new issue id on stdout"
+    assert issue_id.startswith(expected_prefix + "-"), (
+        f"Expected new issue id to carry prefix {expected_prefix!r}, "
+        f"got {issue_id!r}"
+    )
+
+
+@then("bd ready run inside the container's workspace directory exits zero")
+def assert_bd_ready_exits_zero(ctx, fake_driver):
+    container_name = ctx["container_name"]
+    result = fake_driver.exec_run(container_name, ["bd", "ready"])
+    assert result.returncode == 0, (
+        f"Expected `bd ready` to exit zero inside {container_name!r}, "
+        f"got rc={result.returncode} stderr={result.stderr!r}"
+    )
+
+
+@then("stderr reports a messaging readiness failure that names the SHOPMSG_DSN "
+      "value")
+def assert_stderr_readiness_failure_names_dsn(ctx):
+    result = ctx["result"]
+    stderr = result.stderr
+    dsn = ctx["shopmsg_dsn"]
+    assert "readiness" in stderr.lower(), (
+        f"Expected a messaging readiness failure in stderr, got: {stderr!r}"
+    )
+    assert dsn in stderr, (
+        f"Expected the SHOPMSG_DSN value {dsn!r} named in stderr, got: {stderr!r}"
+    )
+
+
+@then(parsers.parse('no startup prompt has been sent to the tmux session named '
+                    '"{session}" in container "{container_name}"'))
+def assert_no_startup_prompt_sent(session, container_name, ctx, fake_driver):
+    send_keys = fake_driver.send_keys_calls(container_name)
+    # Filter to send-keys targeting the named session that carry text payload
+    # (i.e. not a bare Enter and not the claude-start command... but no
+    # send-keys should have happened at all on the readiness-failure path).
+    targeted = [
+        c for c in send_keys
+        if "-t" in c.command
+        and c.command[c.command.index("-t") + 1] == session
+    ]
+    assert not targeted, (
+        f"Expected NO send-keys to tmux session {session!r} in "
+        f"{container_name!r}, but found: {[c.command for c in targeted]!r}"
+    )
+
+
+@then(parsers.parse('once the readiness sequence completes successfully, the '
+                    'startup prompt is sent to the tmux session named "{session}"'))
+def assert_prompt_sent_after_readiness(session, ctx, fake_driver, controller):
+    """Make the messaging DB reachable, re-launch, and assert the prompt is
+    now injected into the named tmux session."""
+    container_name = ctx["container_name"]
+    bc_name = ctx["bc_name"]
+    dsn = ctx.get("shopmsg_dsn")
+    # Container is not yet running (the prior launch failed the barrier before
+    # marking ready); make the DSN reachable and re-launch.
+    fake_driver.set_running(container_name, running=False)
+    fake_driver.set_dsn_reachable(dsn, reachable=True)
+    result = controller.launch(
+        bc_name=bc_name,
+        repo_url=ctx.get("repo_url", f"https://github.com/shopsystem/{bc_name}.git"),
+        shopmsg_dsn=dsn,
+        startup_prompt=ctx["startup_prompt"],
+        manifest_path=ctx.get("launch_manifest_path"),
+        credential_home=ctx.get("credential_home"),
+    )
+    assert result.exit_code == 0, (
+        f"Expected launch to succeed once DB reachable, got "
+        f"rc={result.exit_code} stderr={result.stderr!r}"
+    )
+    committed = fake_driver.agent_committed_prompt(container_name)
+    assert committed == ctx["startup_prompt"], (
+        f"Expected startup prompt {ctx['startup_prompt']!r} submitted to "
+        f"session {session!r}, agent committed: {committed!r}"
+    )
+
+
+@then(parsers.parse('it reports that "{container_name}" is already ready'))
+def assert_reports_already_ready(container_name, ctx):
+    stdout = ctx["result"].stdout
+    assert container_name in stdout and "already ready" in stdout, (
+        f"Expected stdout to report {container_name!r} already ready, "
+        f"got: {stdout!r}"
+    )
+
+
+@then(parsers.parse('no startup prompt has been re-sent to the tmux session '
+                    'named "{session}" in container "{container_name}"'))
+def assert_no_prompt_resent(session, container_name, ctx, fake_driver):
+    send_keys = fake_driver.send_keys_calls(container_name)
+    assert not send_keys, (
+        f"Expected NO send-keys to {container_name!r} on the idempotent "
+        f"readiness re-run, but found: {[c.command for c in send_keys]!r}"
+    )
+
+
+@then(parsers.parse('the container\'s reported health status is "{status}"'))
+def assert_health_status(status, ctx):
+    actual = ctx["health_status"]
+    assert actual == status, (
+        f"Expected health status {status!r}, got {actual!r}"
     )
