@@ -3024,12 +3024,20 @@ def then_latest_points_to_good(repo_path, digest_label, ctx):
     # version, keeping the prior digest pullable and enabling a latest-repoint;
     # the documented re-tag procedure lives in a runbook.
     workflows = ctx.get("workflows") or _load_workflows()
+    # Mirror scenario-37's then_registry_exposes_version_tag rigor: genuine
+    # version-tagging is a real ${{ github.ref_name }} tag expression or a
+    # concrete :vMAJOR.MINOR.PATCH tag in the workflow body, NOT merely the
+    # word "version" appearing in a comment. The bare-substring "version"
+    # fallback let a mutation that strips the real ref_name tag slip past so
+    # long as any comment mentioning "version" survived.
+    image_base = f"ghcr.io/{repo_path}"
+    version_tag_re = re.compile(
+        r"\$\{\{\s*github\.ref_name\s*\}\}|:v\d+\.\d+\.\d+"
+    )
     tags_by_version = False
     for path, doc in workflows.items():
         text = path.read_text()
-        if f"ghcr.io/{repo_path}:latest" in text and (
-            "ref_name" in text or "version" in text.lower()
-        ):
+        if f"{image_base}:latest" in text and version_tag_re.search(text):
             tags_by_version = True
             break
     assert tags_by_version, (
