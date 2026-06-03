@@ -21,7 +21,7 @@ from bc_launcher.cli import build_parser, main as cli_main
 from bc_launcher.controller import BcContainerController
 from bc_launcher.driver import ContainerMount
 from bc_launcher.manifest import ManifestController, load_manifest, BC_NAME_RE, GITHUB_URL_RE
-from tests.fake_driver import FakeDockerDriver
+from tests.fake_driver import FakeDockerDriver, FakeRegistryDriver
 from tests.fake_github_driver import FakeGitHubDriver
 from tests.fake_git_driver import FakeGitDriver
 
@@ -429,10 +429,21 @@ def run_launch_with_repo_url(bc_name, ctx, fake_driver, controller, tmp_path):
             }))
         manifest_path = default_manifest
     credential_home = ctx.get("credential_home")
-    result = controller.launch(bc_name=bc_name, repo_url=repo_url,
+    # Scenario af2f03d3ac519cb5 injects a FakeRegistryDriver so launch's
+    # digest-resolution step is exercised; when absent, the default controller
+    # (no registry driver) is used and behaviour is unchanged.
+    registry_driver = ctx.get("registry_driver")
+    if registry_driver is not None:
+        launch_controller = BcContainerController(
+            fake_driver, registry_driver=registry_driver
+        )
+    else:
+        launch_controller = controller
+    result = launch_controller.launch(bc_name=bc_name, repo_url=repo_url,
                                manifest_path=manifest_path,
                                credential_home=credential_home)
     ctx["result"] = result
+    ctx["fake_driver_for_run"] = fake_driver
     ctx["container_name"] = f"bc-{bc_name}"
     ctx["bc_name"] = bc_name
 
@@ -2725,4 +2736,405 @@ def assert_health_status(status, ctx):
     actual = ctx["health_status"]
     assert actual == status, (
         f"Expected health status {status!r}, got {actual!r}"
+    )
+
+
+# ===========================================================================
+# lead-yk3o (ruling on lead-yy30): bc-base build/publish artifacts + launch
+# digest resolution.
+#
+# Scenarios 36/37/38/41 are pinned DECLARATIVELY by structural inspection of
+# the committed Dockerfile and workflow YAML (live registry / live Actions
+# state is OUT-OF-BAND per the architect ruling / scenario-40 precedent).
+# Scenario 39 is pinned BEHAVIORALLY via the RegistryDriver seam.
+# ===========================================================================
+
+# The bc-launcher repository root is the parent of the tests/ directory.
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _find_bc_base_dockerfile() -> Path | None:
+    """Return the tracked Dockerfile that builds shopsystem-bc-base, or None.
+
+    A Dockerfile "builds the shopsystem-bc-base image" if it is a Dockerfile
+    whose surrounding context / content identifies it as the bc-base image
+    build.  We accept any tracked file named Dockerfile (optionally suffixed)
+    whose text references shopsystem-bc-base, ignoring the .git tree.
+    """
+    for path in _REPO_ROOT.rglob("Dockerfile*"):
+        if ".git" in path.parts:
+            continue
+        if not path.is_file():
+            continue
+        text = path.read_text()
+        if "shopsystem-bc-base" in text:
+            return path
+    return None
+
+
+def _workflows_dir() -> Path:
+    return _REPO_ROOT / ".github" / "workflows"
+
+
+def _load_workflows() -> dict[Path, dict]:
+    """Load all committed workflow YAML files under .github/workflows."""
+    out: dict[Path, dict] = {}
+    wf_dir = _workflows_dir()
+    if not wf_dir.is_dir():
+        return out
+    for path in sorted(wf_dir.glob("*.yml")) + sorted(wf_dir.glob("*.yaml")):
+        out[path] = yaml.safe_load(path.read_text())
+    return out
+
+
+# --- Scenario 36 (d9909f38abea83b5): committed bc-base Dockerfile ----------
+
+@given("the shopsystem-bc-launcher BC repository")
+def given_bc_launcher_repository(ctx):
+    ctx["repo_root"] = _REPO_ROOT
+
+
+@when("the repository file tree is inspected")
+def when_repo_file_tree_inspected(ctx):
+    ctx["bc_base_dockerfile"] = _find_bc_base_dockerfile()
+
+
+@then("a Dockerfile that builds the shopsystem-bc-base image exists at a "
+      "tracked path within the bc-launcher repository")
+def then_bc_base_dockerfile_exists(ctx):
+    dockerfile = ctx.get("bc_base_dockerfile")
+    assert dockerfile is not None, (
+        "No tracked Dockerfile building shopsystem-bc-base found under the "
+        "bc-launcher repository file tree."
+    )
+    # Confirm the path is git-tracked, not merely present on disk.
+    rel = dockerfile.relative_to(_REPO_ROOT)
+    result = subprocess.run(
+        ["git", "ls-files", "--error-unmatch", str(rel)],
+        cwd=str(_REPO_ROOT), capture_output=True, text=True, check=False,
+    )
+    assert result.returncode == 0, (
+        f"Dockerfile {rel} exists on disk but is not git-tracked."
+    )
+
+
+@then('that Dockerfile installs the framework utility CLIs from their VCS or '
+      'published-package version pins in the '
+      '"github.com/dstengle/<utility> @ vMAJOR.MINOR.PATCH" shape rather than '
+      'from an editable clone')
+def then_dockerfile_pins_clis(ctx):
+    dockerfile = ctx["bc_base_dockerfile"]
+    text = dockerfile.read_text()
+    # Must NOT install from an editable clone of a sibling working tree.
+    assert "pip install -e" not in text and "pip install --editable" not in text, (
+        "bc-base Dockerfile installs a framework CLI from an editable clone "
+        "(pip install -e); the ruling requires VCS/published-package version "
+        "pins instead."
+    )
+    # Must install at least one dstengle framework utility pinned to a
+    # vMAJOR.MINOR.PATCH version in the VCS-pin shape:
+    #   <utility> @ git+https://github.com/dstengle/<utility>.git@vX.Y.Z
+    pin_re = re.compile(
+        r"github\.com/dstengle/[A-Za-z0-9._-]+(?:\.git)?@v\d+\.\d+\.\d+"
+    )
+    matches = pin_re.findall(text)
+    assert matches, (
+        "bc-base Dockerfile does not install any framework utility CLI from a "
+        "github.com/dstengle/<utility> @ vMAJOR.MINOR.PATCH version pin.\n"
+        f"Dockerfile content:\n{text}"
+    )
+
+
+# --- Scenario 37 (b688a5feaf1cf34a): publish-on-tag workflow ----------------
+
+@given(parsers.parse('a tag named "{tag}" is pushed to the "{branch}" branch '
+                     'of the shopsystem-bc-launcher source repository'))
+def given_version_tag_pushed(tag, branch, ctx):
+    ctx["pushed_tag"] = tag
+    ctx["pushed_branch"] = branch
+
+
+@when("the bc-launcher publish workflow associated with that tag push "
+      "completes successfully")
+def when_publish_workflow_completes(ctx):
+    # Live Actions execution is OUT-OF-BAND (scenario-40 precedent): the
+    # in-suite proxy is the committed workflow STRUCTURE.  Locate the publish
+    # workflow whose push trigger matches a "v*" tag pattern.
+    workflows = _load_workflows()
+    ctx["workflows"] = workflows
+    publish_wf = None
+    for path, doc in workflows.items():
+        if not isinstance(doc, dict):
+            continue
+        # PyYAML parses the bare key `on:` as the boolean True.
+        on = doc.get("on", doc.get(True))
+        if not isinstance(on, dict):
+            continue
+        push = on.get("push")
+        if isinstance(push, dict):
+            tags = push.get("tags") or []
+            if any(str(t).startswith("v") for t in tags):
+                publish_wf = (path, doc)
+                break
+    ctx["publish_workflow"] = publish_wf
+
+
+def _workflow_text(ctx) -> str:
+    path = ctx["publish_workflow"][0]
+    return path.read_text()
+
+
+@then(parsers.parse('the registry "{registry}" exposes an image manifest at '
+                    'the repository path "{repo_path}" reachable by the image '
+                    'tag "{tag}"'))
+def then_registry_exposes_version_tag(registry, repo_path, tag, ctx):
+    assert ctx.get("publish_workflow") is not None, (
+        'No committed publish workflow triggered on a "v*" tag push was found '
+        "under .github/workflows."
+    )
+    text = _workflow_text(ctx)
+    image_base = f"{registry}/{repo_path}"
+    assert image_base in text, (
+        f"Publish workflow does not push to {image_base!r}."
+    )
+    # For the version tag, the workflow tags by the pushed ref name (github.ref_name).
+    if tag.startswith("v"):
+        assert "ref_name" in text or f":{tag}" in text, (
+            "Publish workflow does not tag the image by its version "
+            "(github.ref_name) for the pushed v* tag."
+        )
+
+
+@then(parsers.parse('the registry "{registry}" exposes an image manifest at '
+                    'the repository path "{repo_path}" reachable by the image '
+                    'tag "latest" pointing to the same digest as the "{vtag}" '
+                    'tag'))
+def then_latest_same_digest_as_version(registry, repo_path, vtag, ctx):
+    text = _workflow_text(ctx)
+    image_base = f"{registry}/{repo_path}"
+    # The same build-push step tags BOTH the version and "latest", so the one
+    # built digest is reachable by both tags.
+    assert f"{image_base}:latest" in text, (
+        f"Publish workflow does not tag {image_base}:latest."
+    )
+    assert ("ref_name" in text or f"{image_base}:{vtag}" in text), (
+        "Publish workflow does not also tag the same image by its version, so "
+        '"latest" and the version tag would not share a digest.'
+    )
+
+
+@then('both image tags can be pulled by an unauthenticated "docker pull" '
+      'client because the package is published with public visibility')
+def then_public_visibility_declared(ctx):
+    text = _workflow_text(ctx)
+    # Live unauthenticated pull is OUT-OF-BAND; the in-suite proxy is the
+    # declared public visibility in the workflow.
+    assert "visibility=public" in text or "visibility: public" in text, (
+        "Publish workflow does not declare public package visibility, so an "
+        "unauthenticated docker pull is not pinned."
+    )
+
+
+# --- Scenario 38 (4e470f7584650a2d): repository_dispatch rebuild ------------
+
+@given(parsers.parse('the image tag "latest" at "{image_ref}" currently '
+                     'points to a digest "{digest_label}"'))
+def given_latest_points_to_digest(image_ref, digest_label, ctx):
+    ctx.setdefault("digest_labels", {})[digest_label] = image_ref
+
+
+@when('a "repository_dispatch" event is delivered to the bc-launcher '
+      "repository and the bc-launcher build workflow runs to successful "
+      "completion in response to that event")
+def when_repository_dispatch_runs(ctx):
+    # Live Actions execution OUT-OF-BAND; proxy is the committed workflow
+    # declaring a repository_dispatch trigger whose job re-pushes "latest".
+    workflows = _load_workflows()
+    ctx["workflows"] = workflows
+    dispatch_wf = None
+    for path, doc in workflows.items():
+        if not isinstance(doc, dict):
+            continue
+        on = doc.get("on", doc.get(True))
+        if isinstance(on, dict) and "repository_dispatch" in on:
+            dispatch_wf = (path, doc)
+            break
+    ctx["dispatch_workflow"] = dispatch_wf
+
+
+@then(parsers.parse('a new bc-base image is built that installs the current '
+                    'framework utility versions producing a digest '
+                    '"{new_digest}" distinct from "{old_digest}"'))
+def then_new_image_built(new_digest, old_digest, ctx):
+    assert ctx.get("dispatch_workflow") is not None, (
+        "No committed workflow declaring a repository_dispatch trigger was "
+        "found under .github/workflows."
+    )
+    text = ctx["dispatch_workflow"][0].read_text()
+    # A genuine rebuild (new digest) requires an actual build-push step.
+    assert "build-push-action" in text or "docker build" in text, (
+        "repository_dispatch workflow does not run an image build step, so it "
+        "cannot produce a new digest."
+    )
+
+
+@then(parsers.parse('the registry "{registry}" exposes the image tag "latest" '
+                    'at the repository path "{repo_path}" pointing to '
+                    '"{new_digest}"'))
+def then_dispatch_repushes_latest(registry, repo_path, new_digest, ctx):
+    text = ctx["dispatch_workflow"][0].read_text()
+    image_base = f"{registry}/{repo_path}"
+    assert f"{image_base}:latest" in text, (
+        f"repository_dispatch workflow does not re-push {image_base}:latest."
+    )
+
+
+# --- Scenario 41 (be11d615375564e1): rollback re-tag ------------------------
+
+@given(parsers.parse('the registry "{image_ref}" holds a prior known-good '
+                     'build pullable by its digest "{digest_label}"'))
+def given_prior_known_good_digest(image_ref, digest_label, ctx):
+    ctx["rollback_image_ref"] = image_ref
+    ctx.setdefault("digest_labels", {})[digest_label] = image_ref
+
+
+@given(parsers.parse('the "latest" tag currently points to a later digest '
+                     '"{digest_label}"'))
+def given_latest_points_to_later(digest_label, ctx):
+    ctx.setdefault("digest_labels", {})[digest_label] = ctx.get(
+        "rollback_image_ref"
+    )
+
+
+@when(parsers.parse('the "latest" tag is republished to point at the existing '
+                    'digest "{digest_label}"'))
+def when_latest_republished_to_good(digest_label, ctx):
+    # The rollback re-tag procedure is pinned declaratively: the publish
+    # workflow tags every release by its immutable version (so prior digests
+    # stay pullable), and the runbook documents the latest-repoint procedure.
+    ctx["workflows"] = _load_workflows()
+    ctx["rollback_target_label"] = digest_label
+
+
+@then(parsers.parse('the registry exposes the image tag "latest" at the '
+                    'repository path "{repo_path}" pointing to '
+                    '"{digest_label}"'))
+def then_latest_points_to_good(repo_path, digest_label, ctx):
+    # Declarative pin (scenario-40 precedent): the publish workflow tags by
+    # version, keeping the prior digest pullable and enabling a latest-repoint;
+    # the documented re-tag procedure lives in a runbook.
+    workflows = ctx.get("workflows") or _load_workflows()
+    tags_by_version = False
+    for path, doc in workflows.items():
+        text = path.read_text()
+        if f"ghcr.io/{repo_path}:latest" in text and (
+            "ref_name" in text or "version" in text.lower()
+        ):
+            tags_by_version = True
+            break
+    assert tags_by_version, (
+        "No committed workflow tags the bc-base image by version alongside "
+        '"latest", so a prior digest could not be re-pointed by "latest".'
+    )
+    runbook = _REPO_ROOT / "docs" / "runbooks" / "bc-base-rollback.md"
+    assert runbook.is_file(), (
+        "No rollback runbook documenting the latest re-tag procedure was found "
+        f"at {runbook.relative_to(_REPO_ROOT)}."
+    )
+
+
+@then(parsers.parse('no new image build is required because "{digest_label}" '
+                    "is an already-published digest re-tagged in place"))
+def then_no_rebuild_required(digest_label, ctx):
+    runbook = _REPO_ROOT / "docs" / "runbooks" / "bc-base-rollback.md"
+    text = runbook.read_text()
+    # The runbook must document a re-tag-in-place (no rebuild) procedure.
+    assert "imagetools create" in text or "re-tag" in text.lower() or (
+        "no new image build" in text.lower() or "without rebuild" in text.lower()
+    ), (
+        "Rollback runbook does not document an in-place re-tag (no rebuild) "
+        "procedure."
+    )
+
+
+# --- Scenario 39 (af2f03d3ac519cb5): launch resolves latest digest ----------
+
+_BC_BASE_LATEST_REF = "ghcr.io/dstengle/shopsystem-bc-base:latest"
+
+
+@given(parsers.parse('the local Docker cache holds the bc-base "latest" tag '
+                     'at an older digest "{old_digest}"'))
+def given_cache_holds_old_digest(old_digest, ctx):
+    ctx["cached_digest"] = old_digest
+
+
+@given(parsers.parse('the registry "{image_ref}" now publishes the "latest" '
+                     'tag at a newer digest "{new_digest}"'))
+def given_registry_publishes_new_digest(image_ref, new_digest, ctx):
+    registry_driver = FakeRegistryDriver()
+    # The registry resolves the bc-base "latest" reference to the new digest.
+    # Model the digest as a content-addressable sha256 value carrying the
+    # scenario's digest label, so the resolved reference is a genuine
+    # repo@sha256:... pin (the shape the real driver produces) while remaining
+    # assertable by the label.
+    # Use a hex-only token derived from the label so the value is a
+    # well-formed sha256 digest, and remember it for assertions.
+    label_hex = "".join(c for c in new_digest.lower() if c in "0123456789abcdef")
+    sha = f"sha256:{label_hex}".ljust(71, "0")[:71]
+    registry_driver.set_registry_digest(_BC_BASE_LATEST_REF, sha)
+    ctx["registry_driver"] = registry_driver
+    ctx["registry_new_digest"] = new_digest
+    ctx["registry_new_sha"] = sha
+
+
+@then(parsers.parse('launch resolves the bc-base "latest" tag against the '
+                    'registry and pulls digest "{new_digest}" before starting '
+                    "the container"))
+def then_launch_resolves_new_digest(new_digest, ctx):
+    registry_driver = ctx["registry_driver"]
+    assert _BC_BASE_LATEST_REF in registry_driver.resolve_calls, (
+        "launch did not resolve the bc-base \"latest\" tag against the "
+        f"registry; resolve calls were: {registry_driver.resolve_calls!r}"
+    )
+    # The resolution must occur BEFORE the container is started: the recorded
+    # docker run command for the container must reference the resolved digest.
+    resolved_sha = ctx["registry_new_sha"]
+    run_cmd = ctx["fake_driver_for_run"].run_command_for_container(
+        ctx["container_name"]
+    )
+    assert any(resolved_sha in tok for tok in run_cmd), (
+        f"launch did not run the container from the resolved digest "
+        f"{resolved_sha!r} (label {new_digest!r}); docker run command was: "
+        f"{run_cmd!r}"
+    )
+
+
+@then(parsers.parse('the started container "{container_name}" is running from '
+                    'image digest "{new_digest}" rather than the cached '
+                    '"{old_digest}"'))
+def then_container_runs_from_new_digest(container_name, new_digest, old_digest, ctx):
+    run_cmd = ctx["fake_driver_for_run"].run_command_for_container(container_name)
+    image_tokens = [tok for tok in run_cmd if "shopsystem-bc-base" in tok]
+    assert image_tokens, (
+        f"docker run for {container_name} carries no bc-base image reference: "
+        f"{run_cmd!r}"
+    )
+    image_ref = image_tokens[0]
+    resolved_sha = ctx["registry_new_sha"]
+    # The container must run from the registry-resolved digest pin
+    # (repo@sha256:...), NOT from the bare ":latest" tag that the local cache
+    # would otherwise serve as the stale D_old.
+    assert resolved_sha in image_ref, (
+        f"Container {container_name} not started from the resolved new digest "
+        f"{resolved_sha!r} (label {new_digest!r}): image ref was {image_ref!r}."
+    )
+    assert image_ref.endswith("@" + resolved_sha), (
+        f"Container {container_name} bc-base image ref is not a digest pin "
+        f"({old_digest!r} cached-latest tag would otherwise be served): "
+        f"{image_ref!r}."
+    )
+    assert ":latest" not in image_ref, (
+        f"Container {container_name} started from the moving :latest tag (the "
+        f"cached {old_digest!r}) instead of the resolved digest pin: "
+        f"{image_ref!r}."
     )

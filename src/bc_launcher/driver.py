@@ -34,6 +34,35 @@ class ContainerInfo:
 
 
 # ---------------------------------------------------------------------------
+# Registry driver protocol (scenario af2f03d3ac519cb5)
+# ---------------------------------------------------------------------------
+
+class RegistryDriver(Protocol):
+    """Resolve a registry image reference to its current digest.
+
+    The seam scenario 39 (af2f03d3ac519cb5) pins: launch must resolve the
+    bc-base ``latest`` tag against the registry BEFORE starting the container,
+    so a republished image (a newer digest under the same ``latest`` tag)
+    reaches the new container instead of a stale locally-cached digest.
+
+    This protocol belongs to scenario 39 ONLY (the launch-path / behavioral
+    side).  It is explicitly NOT shared with the CI/workflow scenarios
+    37/38/41, which are pinned declaratively as committed YAML with no in-src
+    seam (per the architect ruling on lead-yk3o).
+    """
+
+    def resolve_digest(self, image_ref: str) -> str:
+        """Resolve ``image_ref`` (e.g. ``ghcr.io/...:latest``) to a digest.
+
+        Returns the registry-current digest for the tag named in
+        ``image_ref``.  The real implementation queries the registry; the
+        test fake returns the digest the test has configured as the
+        registry-current ``latest``.
+        """
+        ...
+
+
+# ---------------------------------------------------------------------------
 # Protocol
 # ---------------------------------------------------------------------------
 
@@ -348,3 +377,26 @@ class RealDockerDriver:
             if time.monotonic() >= deadline:
                 return False
             time.sleep(poll_interval_seconds)
+
+
+# ---------------------------------------------------------------------------
+# Real registry driver (shells out to docker buildx imagetools)
+# ---------------------------------------------------------------------------
+
+class RealRegistryDriver:
+    """Production RegistryDriver that resolves a tag's current registry digest.
+
+    Uses ``docker buildx imagetools inspect --format '{{.Manifest.Digest}}'``
+    to read the registry-current digest for the given image reference.  Falls
+    back to the original reference if resolution fails (so launch is not made
+    strictly dependent on registry reachability at run time).
+    """
+
+    def resolve_digest(self, image_ref: str) -> str:
+        result = subprocess.run(
+            ["docker", "buildx", "imagetools", "inspect",
+             "--format", "{{.Manifest.Digest}}", image_ref],
+            capture_output=True, text=True, check=False,
+        )
+        digest = result.stdout.strip()
+        return digest or image_ref

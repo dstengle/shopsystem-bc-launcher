@@ -1,0 +1,42 @@
+# Rebuild the shopsystem-bc-base image on an inbound repository_dispatch event.
+#
+# Pins scenario 38 (4e470f7584650a2d) declaratively: a repository_dispatch
+# trigger whose job rebuilds docker/bc-base/Dockerfile (picking up the current
+# framework utility versions) and re-pushes the "latest" tag at the freshly
+# built digest.
+name: rebuild-bc-base
+
+on:
+  repository_dispatch:
+    types:
+      - rebuild-bc-base
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  rebuild-and-republish-latest:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the bc-launcher repository
+        uses: actions/checkout@v4
+
+      - name: Log in to ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Rebuild bc-base and re-push latest at the new digest
+        uses: docker/build-push-action@v6
+        with:
+          context: ./docker/bc-base
+          file: ./docker/bc-base/Dockerfile
+          push: true
+          # Re-push "latest" so a repository_dispatch produces a new digest
+          # (D_new) pointed at by "latest", distinct from the prior D_old.
+          no-cache: true
+          tags: |
+            ghcr.io/dstengle/shopsystem-bc-base:latest

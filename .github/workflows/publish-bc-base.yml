@@ -1,0 +1,69 @@
+# Publish the shopsystem-bc-base image to ghcr on a version-tag push.
+#
+# Pins scenario 37 (b688a5feaf1cf34a) declaratively: on push of a tag matching
+# "v*", build docker/bc-base/Dockerfile and push it to
+# ghcr.io/dstengle/shopsystem-bc-base, tagging BOTH the version and "latest",
+# with the package published at public visibility.
+#
+# Also pins the rollback observable for scenario 41 (be11d615375564e1): because
+# every build is tagged BY ITS VERSION (not only "latest"), every prior digest
+# remains pullable by its immutable version tag, so "latest" can be re-pointed
+# at any earlier known-good digest without a rebuild (see ROLLBACK below and
+# docs/runbooks/bc-base-rollback.md).
+name: publish-bc-base
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the bc-launcher repository
+        uses: actions/checkout@v4
+
+      - name: Log in to ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push bc-base, tagging both the version and latest
+        uses: docker/build-push-action@v6
+        with:
+          context: ./docker/bc-base
+          file: ./docker/bc-base/Dockerfile
+          push: true
+          # Tag the SAME built digest with both the immutable version tag and
+          # the moving "latest" tag, so "latest" and "v*" resolve to one digest.
+          tags: |
+            ghcr.io/dstengle/shopsystem-bc-base:${{ github.ref_name }}
+            ghcr.io/dstengle/shopsystem-bc-base:latest
+
+      # Declare the published package's visibility as public so both tags are
+      # pullable by an unauthenticated `docker pull` client.
+      - name: Set package visibility to public
+        run: |
+          gh api \
+            --method PATCH \
+            -H "Accept: application/vnd.github+json" \
+            "/user/packages/container/shopsystem-bc-base/visibility" \
+            -f visibility=public
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+# ROLLBACK (scenario 41 / be11d615375564e1):
+# Rollback is the published-by-version property: because each release is pushed
+# with its own immutable "v*" tag, every prior known-good digest stays pullable
+# by that tag. To roll back, re-point "latest" at an existing earlier digest —
+# no rebuild is required because the digest is already published. The procedure
+# (a manual `docker buildx imagetools create` re-tag, or a `gh workflow run`
+# repository_dispatch carrying the target version) is documented as a runbook
+# at docs/runbooks/bc-base-rollback.md.

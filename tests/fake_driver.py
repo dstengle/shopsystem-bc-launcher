@@ -26,6 +26,36 @@ class ExecCall:
     user: str | None = None
 
 
+class FakeRegistryDriver:
+    """In-memory RegistryDriver test double (scenario af2f03d3ac519cb5).
+
+    Simulates the registry resolving a tag (e.g. bc-base "latest") to a
+    digest.  A test configures the registry-current digest via
+    ``set_registry_digest(image_ref, digest)``; ``resolve_digest`` returns it
+    and records the call so the test can assert launch resolved the tag
+    before starting the container.
+
+    This fake belongs to scenario 39 ONLY — it is NOT shared with the
+    workflow/CI scenarios 37/38/41, which carry no in-src registry seam.
+    """
+
+    def __init__(self) -> None:
+        # image_ref -> registry-current digest
+        self._registry_digests: dict[str, str] = {}
+        # Ordered record of resolve_digest(image_ref) calls.
+        self.resolve_calls: list[str] = []
+
+    def set_registry_digest(self, image_ref: str, digest: str) -> None:
+        """Configure the digest the registry currently exposes for image_ref."""
+        self._registry_digests[image_ref] = digest
+
+    def resolve_digest(self, image_ref: str) -> str:
+        self.resolve_calls.append(image_ref)
+        # Return the configured registry-current digest; if none configured,
+        # echo the reference back unchanged (no resolution).
+        return self._registry_digests.get(image_ref, image_ref)
+
+
 class FakeDockerDriver:
     """
     Fully in-memory DockerDriver for tests.

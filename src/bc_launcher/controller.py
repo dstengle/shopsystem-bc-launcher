@@ -12,7 +12,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from bc_launcher.driver import ContainerMount, DockerDriver
+from bc_launcher.driver import ContainerMount, DockerDriver, RegistryDriver
 
 
 # ---------------------------------------------------------------------------
@@ -256,8 +256,19 @@ class BcContainerController:
     Accepts a DockerDriver at construction time so tests can inject fakes.
     """
 
-    def __init__(self, driver: DockerDriver) -> None:
+    def __init__(
+        self,
+        driver: DockerDriver,
+        registry_driver: RegistryDriver | None = None,
+    ) -> None:
         self._driver = driver
+        # Optional registry seam (scenario af2f03d3ac519cb5).  When present,
+        # launch resolves the bc-base "latest" tag's current registry digest
+        # BEFORE starting the container, and runs the container from that
+        # resolved digest rather than whatever digest the local cache holds
+        # under "latest".  Absent (the default), launch runs from BC_IMAGE as
+        # before — the resolution step is purely additive.
+        self._registry_driver = registry_driver
 
     # ------------------------------------------------------------------
     # launch
@@ -400,9 +411,31 @@ class BcContainerController:
             socket_dir = os.path.dirname(dsn_value)
             mounts.append(("bind", socket_dir, socket_dir, False))
 
+        # Digest-resolution step (scenario af2f03d3ac519cb5).
+        #
+        # Before starting the container, resolve the bc-base "latest" tag's
+        # CURRENT registry digest and run from that digest, so a republished
+        # image reaches the new container instead of a stale locally-cached
+        # "latest".  Without this step, a container started from the bare
+        # "latest" tag would run whatever digest the local Docker cache holds
+        # under "latest" (D_old) even after the registry has moved "latest"
+        # to a newer digest (D_new).  When no registry driver is injected the
+        # behaviour is unchanged: launch runs from BC_IMAGE.
+        launch_image = BC_IMAGE
+        if self._registry_driver is not None:
+            resolved_digest = self._registry_driver.resolve_digest(BC_IMAGE)
+            # Pin the run to the resolved digest.  A bare digest (sha256:...)
+            # is turned into a fully-qualified digest reference against the
+            # bc-base repository; an already-qualified reference is used as-is.
+            if resolved_digest.startswith("sha256:"):
+                repo = BC_IMAGE.split(":", 1)[0]
+                launch_image = f"{repo}@{resolved_digest}"
+            else:
+                launch_image = resolved_digest
+
         self._driver.run(
             container_name=container,
-            image=BC_IMAGE,
+            image=launch_image,
             env=env,
             mounts=mounts,
             network=resolved_network,
