@@ -2921,6 +2921,74 @@ def then_shop_templates_alongside_other_clis(ctx):
     )
 
 
+# --- BC-internal (bead shopsystem-bc-launcher-tuk): all five framework-CLI ----
+# installs are pinned to their CORRECT owner/repo --------------------------
+#
+# ADDITIVE coverage. Scenario 42 (ccb145d71c7100a2) pins only shop-templates
+# and scenario 36 (d9909f38abea83b5) requires only ">=1 dstengle VCS pin +
+# reject editable". Neither binds the OTHER four CLIs to their owner/repo,
+# which is how two wrong-repo 404 defects (dstengle/shop-msg, dstengle/beads)
+# shipped green. This step binds each of the five framework packages to its
+# correct (owner, repo) pair and asserts each is present in the
+#   "<pkg> @ git+https://github.com/<owner>/<repo>.git@vMAJOR.MINOR.PATCH"
+# VCS-pin shape. The version is matched by SHAPE (vX.Y.Z), not exact value, so
+# legitimate version bumps don't break the test while the 404 class still
+# trips. Note beads -> gascity/beads (legitimate third party, NOT dstengle).
+
+# package name (left of " @ ") -> (correct owner, correct repo)
+_BC_BASE_FRAMEWORK_CLI_PINS = {
+    "shopsystem-messaging": ("dstengle", "shopsystem-messaging"),
+    "scenarios": ("dstengle", "shopsystem-scenarios"),
+    "shop-templates": ("dstengle", "shopsystem-templates"),
+    "beads": ("gascity", "beads"),
+    "shopsystem-bc-launcher": ("dstengle", "shopsystem-bc-launcher"),
+}
+
+
+@then("the Dockerfile installs all five framework CLIs each from a VCS "
+      "version pin bound to its correct owner and repo")
+def then_dockerfile_pins_all_five_clis(ctx):
+    dockerfile = ctx.get("bc_base_dockerfile")
+    assert dockerfile is not None, (
+        "No tracked Dockerfile building shopsystem-bc-base found under the "
+        "bc-launcher repository file tree."
+    )
+    text = dockerfile.read_text()
+    missing = []
+    for pkg, (owner, repo) in _BC_BASE_FRAMEWORK_CLI_PINS.items():
+        # Bind the package name to its CORRECT owner/repo. A wrong owner
+        # (e.g. dstengle/beads) or wrong repo (e.g. dstengle/shop-msg) will
+        # not match its package's required (owner, repo) pair -> FAIL.
+        pin_re = re.compile(
+            re.escape(pkg) + r" @ git\+https://github\.com/"
+            + re.escape(owner) + r"/" + re.escape(repo)
+            + r"(?:\.git)?@v\d+\.\d+\.\d+"
+        )
+        if not pin_re.search(text):
+            missing.append(
+                f"{pkg} -> github.com/{owner}/{repo} @ vMAJOR.MINOR.PATCH"
+            )
+    assert not missing, (
+        "bc-base Dockerfile is missing or mis-pins these framework CLIs "
+        "(each must bind to its correct owner/repo in the "
+        "<pkg> @ git+https://github.com/<owner>/<repo>.git@vMAJOR.MINOR.PATCH "
+        "shape):\n  " + "\n  ".join(missing)
+        + f"\nDockerfile content:\n{text}"
+    )
+
+
+@then("none of the five framework CLIs is installed from an editable clone")
+def then_no_framework_cli_is_editable(ctx):
+    dockerfile = ctx["bc_base_dockerfile"]
+    text = dockerfile.read_text()
+    assert "pip install -e" not in text and "pip install --editable" not in text, (
+        "bc-base Dockerfile installs a framework CLI from an editable clone "
+        "(pip install -e / --editable); all five framework CLIs must install "
+        "from VCS version pins instead.\n"
+        f"Dockerfile content:\n{text}"
+    )
+
+
 # --- Scenario 75ae95be0ecf1640 (lead-dlrx): launch pours shop-templates ------
 # skill-group into the cloned workspace's ".claude/skills/" directory, after
 # the clone, modelled behaviourally through the DockerDriver seam.
