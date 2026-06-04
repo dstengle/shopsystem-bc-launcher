@@ -25,7 +25,7 @@ USER root
 # VCS-pin shape. The owner is dstengle for these four shopsystem packages.
 RUN pip install --no-cache-dir \
     "shopsystem-messaging @ git+https://github.com/dstengle/shopsystem-messaging.git@v0.2.1" \
-    "scenarios @ git+https://github.com/dstengle/shopsystem-scenarios.git@v0.2.0" \
+    "scenarios @ git+https://github.com/dstengle/shopsystem-scenarios@v0.2.0" \
     "shop-templates @ git+https://github.com/dstengle/shopsystem-templates.git@v0.2.0" \
     "shopsystem-bc-launcher @ git+https://github.com/dstengle/shopsystem-bc-launcher.git@v0.2.0"
 
