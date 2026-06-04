@@ -2921,33 +2921,43 @@ def then_shop_templates_alongside_other_clis(ctx):
     )
 
 
-# --- BC-internal (bead shopsystem-bc-launcher-tuk): all five framework-CLI ----
-# installs are pinned to their CORRECT owner/repo --------------------------
+# --- BC-internal (bead shopsystem-bc-launcher-tuk, scoped by lead-6rm4): ------
+# the FOUR dstengle framework-CLI installs are pinned to their CORRECT
+# owner/repo, AND bd (beads) is installed via the steveyegge/beads binary -----
 #
 # ADDITIVE coverage. Scenario 42 (ccb145d71c7100a2) pins only shop-templates
 # and scenario 36 (d9909f38abea83b5) requires only ">=1 dstengle VCS pin +
-# reject editable". Neither binds the OTHER four CLIs to their owner/repo,
+# reject editable". Neither binds the OTHER dstengle CLIs to their owner/repo,
 # which is how two wrong-repo 404 defects (dstengle/shop-msg, dstengle/beads)
-# shipped green. This step binds each of the five framework packages to its
-# correct (owner, repo) pair and asserts each is present in the
+# shipped green. This step binds each of the four DSTENGLE framework packages
+# to its correct (owner, repo) pair and asserts each is present in the
 #   "<pkg> @ git+https://github.com/<owner>/<repo>.git@vMAJOR.MINOR.PATCH"
 # VCS-pin shape. The version is matched by SHAPE (vX.Y.Z), not exact value, so
 # legitimate version bumps don't break the test while the 404 class still
-# trips. Note beads -> gascity/beads (legitimate third party, NOT dstengle).
+# trips.
+#
+# beads is NOT a dstengle utility and NOT pip-installable (lead-6rm4): bd is a
+# third-party Go binary installed from the steveyegge/beads releases, asserted
+# separately by then_dockerfile_installs_beads_binary below. The prior
+# beads -> gascity/beads pip pin was the defective install KIND that broke the
+# Phase-3 publish-bc-base GHA build (run 26967027158) on the v0.2.0 tag.
 
 # package name (left of " @ ") -> (correct owner, correct repo)
 _BC_BASE_FRAMEWORK_CLI_PINS = {
     "shopsystem-messaging": ("dstengle", "shopsystem-messaging"),
     "scenarios": ("dstengle", "shopsystem-scenarios"),
     "shop-templates": ("dstengle", "shopsystem-templates"),
-    "beads": ("gascity", "beads"),
     "shopsystem-bc-launcher": ("dstengle", "shopsystem-bc-launcher"),
 }
 
+# bd (beads) binary install — third-party Go binary, NOT a pip VCS pin.
+_BC_BASE_BEADS_BINARY_OWNER = "steveyegge"
+_BC_BASE_BEADS_BINARY_VERSION = "1.0.3"
 
-@then("the Dockerfile installs all five framework CLIs each from a VCS "
-      "version pin bound to its correct owner and repo")
-def then_dockerfile_pins_all_five_clis(ctx):
+
+@then("the Dockerfile installs the four dstengle framework CLIs each from a "
+      "VCS version pin bound to its correct owner and repo")
+def then_dockerfile_pins_four_dstengle_clis(ctx):
     dockerfile = ctx.get("bc_base_dockerfile")
     assert dockerfile is not None, (
         "No tracked Dockerfile building shopsystem-bc-base found under the "
@@ -2977,14 +2987,69 @@ def then_dockerfile_pins_all_five_clis(ctx):
     )
 
 
-@then("none of the five framework CLIs is installed from an editable clone")
+@then("bd is installed from the steveyegge/beads binary release pinned to "
+      "BD_VERSION=1.0.3 rather than from a pip VCS pin")
+def then_dockerfile_installs_beads_binary(ctx):
+    dockerfile = ctx.get("bc_base_dockerfile")
+    assert dockerfile is not None, (
+        "No tracked Dockerfile building shopsystem-bc-base found under the "
+        "bc-launcher repository file tree."
+    )
+    text = dockerfile.read_text()
+
+    # beads must NOT be a pip VCS pin of ANY owner: the whole point of this
+    # bugfix is that bd is a Go binary, not pip-installable. Reverting beads
+    # to any "beads @ git+https://github.com/<owner>/beads" pip pin must FAIL.
+    beads_pip_re = re.compile(
+        r"beads @ git\+https://github\.com/[A-Za-z0-9._-]+/beads"
+    )
+    assert not beads_pip_re.search(text), (
+        "bc-base Dockerfile installs beads as a pip VCS pin; bd is a "
+        "third-party Go binary (NOT pip-installable) and must be installed "
+        "from the steveyegge/beads binary release instead.\n"
+        f"Dockerfile content:\n{text}"
+    )
+
+    # bd must be installed from the steveyegge/beads releases, pinned to the
+    # exact tagged binary version, into /usr/local/bin/bd. Teeth: mutating
+    # BD_VERSION away from 1.0.3, or the owner away from steveyegge, must FAIL.
+    owner = _BC_BASE_BEADS_BINARY_OWNER
+    version = re.escape(_BC_BASE_BEADS_BINARY_VERSION)
+    version_re = re.compile(r"BD_VERSION=" + version + r"\b")
+    url_re = re.compile(
+        r"github\.com/" + re.escape(owner)
+        + r"/beads/releases/download/v\$\{BD_VERSION\}/"
+    )
+    install_re = re.compile(r"install\b[^\n]*/usr/local/bin/bd\b")
+
+    failures = []
+    if not version_re.search(text):
+        failures.append(
+            f"BD_VERSION={_BC_BASE_BEADS_BINARY_VERSION} pin not found"
+        )
+    if not url_re.search(text):
+        failures.append(
+            f"binary fetched from github.com/{owner}/beads/releases not found"
+        )
+    if not install_re.search(text):
+        failures.append("bd not installed to /usr/local/bin/bd")
+    assert not failures, (
+        "bc-base Dockerfile does not install bd as the steveyegge/beads "
+        "binary pinned to BD_VERSION=1.0.3 in /usr/local/bin/bd:\n  "
+        + "\n  ".join(failures)
+        + f"\nDockerfile content:\n{text}"
+    )
+
+
+@then("none of the four dstengle framework CLIs is installed from an editable "
+      "clone")
 def then_no_framework_cli_is_editable(ctx):
     dockerfile = ctx["bc_base_dockerfile"]
     text = dockerfile.read_text()
     assert "pip install -e" not in text and "pip install --editable" not in text, (
         "bc-base Dockerfile installs a framework CLI from an editable clone "
-        "(pip install -e / --editable); all five framework CLIs must install "
-        "from VCS version pins instead.\n"
+        "(pip install -e / --editable); the four dstengle framework CLIs must "
+        "install from VCS version pins instead.\n"
         f"Dockerfile content:\n{text}"
     )
 
