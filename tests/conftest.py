@@ -2845,10 +2845,12 @@ def then_dockerfile_pins_clis(ctx):
     )
 
 
-# --- Scenario 30165afc5692ac3d (lead-dlrx): bc-base installs shop-templates --
-# from a github.com/dstengle/shop-templates @ vMAJOR.MINOR.PATCH VCS pin,
-# alongside the other framework utility CLIs in the same pin shape.  Mirrors
-# the scenario-36 declarative-artifact inspection rigor: rejects editable /
+# --- Scenario ccb145d71c7100a2 (lead-b6gd, supersedes 30165afc5692ac3d): -----
+# bc-base installs shop-templates (package name "shop-templates") from a
+# github.com/dstengle/shopsystem-templates @ vMAJOR.MINOR.PATCH VCS pin,
+# alongside the other framework utility CLIs in the same pin shape.  The repo
+# is shopsystem-templates (NOT shop-templates, which 404s).  Mirrors the
+# scenario-36 declarative-artifact inspection rigor: rejects editable /
 # `pip install -e` clones.
 
 @when("the bc-base Dockerfile in that repository is inspected")
@@ -2857,7 +2859,7 @@ def when_bc_base_dockerfile_inspected(ctx):
 
 
 @then('the Dockerfile installs "shop-templates" from a '
-      '"github.com/dstengle/shop-templates @ vMAJOR.MINOR.PATCH" version pin '
+      '"github.com/dstengle/shopsystem-templates @ vMAJOR.MINOR.PATCH" version pin '
       'rather than from an editable clone')
 def then_dockerfile_pins_shop_templates(ctx):
     dockerfile = ctx.get("bc_base_dockerfile")
@@ -2870,18 +2872,20 @@ def then_dockerfile_pins_shop_templates(ctx):
     # working tree (same rigor as the scenario-36 step).
     assert "pip install -e" not in text and "pip install --editable" not in text, (
         "bc-base Dockerfile installs a framework CLI from an editable clone "
-        "(pip install -e); the lead-dlrx pin requires a VCS version pin instead."
+        "(pip install -e); the lead-b6gd pin requires a VCS version pin instead."
     )
-    # shop-templates must be installed from a
-    # github.com/dstengle/shop-templates @ vMAJOR.MINOR.PATCH VCS pin in the
-    # pip VCS-requirement spelling.
+    # The shop-templates package must be installed from a
+    # github.com/dstengle/shopsystem-templates @ vMAJOR.MINOR.PATCH VCS pin in
+    # the pip VCS-requirement spelling (package name shop-templates, repo
+    # shopsystem-templates).
     pin_re = re.compile(
-        r"github\.com/dstengle/shop-templates(?:\.git)?@v\d+\.\d+\.\d+"
+        r"shop-templates @ git\+https://github\.com/dstengle/"
+        r"shopsystem-templates(?:\.git)?@v\d+\.\d+\.\d+"
     )
     assert pin_re.search(text), (
         "bc-base Dockerfile does not install shop-templates from a "
-        "github.com/dstengle/shop-templates @ vMAJOR.MINOR.PATCH version pin.\n"
-        f"Dockerfile content:\n{text}"
+        "github.com/dstengle/shopsystem-templates @ vMAJOR.MINOR.PATCH version "
+        f"pin.\nDockerfile content:\n{text}"
     )
 
 
@@ -2890,19 +2894,25 @@ def then_dockerfile_pins_shop_templates(ctx):
 def then_shop_templates_alongside_other_clis(ctx):
     dockerfile = ctx["bc_base_dockerfile"]
     text = dockerfile.read_text()
+    # Each VCS-pin is "<pkg> @ git+https://github.com/dstengle/<repo>.git@vX.Y.Z".
+    # The distributed package name (left of " @ ") is what identifies the
+    # utility; the repo path may differ from the package name (shop-templates
+    # ships from the shopsystem-templates repo).
     pin_re = re.compile(
-        r"github\.com/dstengle/([A-Za-z0-9._-]+?)(?:\.git)?@v\d+\.\d+\.\d+"
+        r"([A-Za-z0-9._-]+) @ git\+https://github\.com/dstengle/"
+        r"([A-Za-z0-9._-]+?)(?:\.git)?@v\d+\.\d+\.\d+"
     )
-    utilities = {m.group(1) for m in pin_re.finditer(text)}
+    packages = {m.group(1) for m in pin_re.finditer(text)}
     # shop-templates is one of the VCS-pinned utilities ...
-    assert "shop-templates" in utilities, (
-        "shop-templates is not installed in the github.com/dstengle/<utility> "
-        f"@ vMAJOR.MINOR.PATCH VCS-pin shape; pinned utilities found: {utilities}"
+    assert "shop-templates" in packages, (
+        "shop-templates is not installed in the "
+        "<pkg> @ git+https://github.com/dstengle/<repo> @ vMAJOR.MINOR.PATCH "
+        f"VCS-pin shape; pinned packages found: {packages}"
     )
     # ... and it sits ALONGSIDE at least one OTHER framework utility pinned in
     # the exact same shape (e.g. shop-msg / beads), confirming it joins the
     # existing pinned set rather than standing alone in a different form.
-    others = utilities - {"shop-templates"}
+    others = packages - {"shop-templates"}
     assert others, (
         "shop-templates is the ONLY utility in the VCS-pin shape; the scenario "
         "requires it to sit alongside the other framework utility CLIs "
@@ -2920,7 +2930,7 @@ def given_bc_base_carries_shop_templates(ctx, fake_driver):
     """Precondition: the launched container's image has the shop-templates CLI.
 
     The bc-base Dockerfile installs shop-templates from its VCS version pin
-    (scenario 30165afc), so a real launch's `shop-templates pour` exec runs a
+    (scenario ccb145d71c7100a2), so a real launch's `shop-templates pour` exec runs a
     binary that is present.  In the fake driver the pour is modelled
     unconditionally; this Given records the precondition for readability and
     so the scenario reads end-to-end.
