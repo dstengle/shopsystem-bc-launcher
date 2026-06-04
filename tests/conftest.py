@@ -2845,6 +2845,128 @@ def then_dockerfile_pins_clis(ctx):
     )
 
 
+# --- Scenario 30165afc5692ac3d (lead-dlrx): bc-base installs shop-templates --
+# from a github.com/dstengle/shop-templates @ vMAJOR.MINOR.PATCH VCS pin,
+# alongside the other framework utility CLIs in the same pin shape.  Mirrors
+# the scenario-36 declarative-artifact inspection rigor: rejects editable /
+# `pip install -e` clones.
+
+@when("the bc-base Dockerfile in that repository is inspected")
+def when_bc_base_dockerfile_inspected(ctx):
+    ctx["bc_base_dockerfile"] = _find_bc_base_dockerfile()
+
+
+@then('the Dockerfile installs "shop-templates" from a '
+      '"github.com/dstengle/shop-templates @ vMAJOR.MINOR.PATCH" version pin '
+      'rather than from an editable clone')
+def then_dockerfile_pins_shop_templates(ctx):
+    dockerfile = ctx.get("bc_base_dockerfile")
+    assert dockerfile is not None, (
+        "No tracked Dockerfile building shopsystem-bc-base found under the "
+        "bc-launcher repository file tree."
+    )
+    text = dockerfile.read_text()
+    # Must NOT install shop-templates from an editable clone of a sibling
+    # working tree (same rigor as the scenario-36 step).
+    assert "pip install -e" not in text and "pip install --editable" not in text, (
+        "bc-base Dockerfile installs a framework CLI from an editable clone "
+        "(pip install -e); the lead-dlrx pin requires a VCS version pin instead."
+    )
+    # shop-templates must be installed from a
+    # github.com/dstengle/shop-templates @ vMAJOR.MINOR.PATCH VCS pin in the
+    # pip VCS-requirement spelling.
+    pin_re = re.compile(
+        r"github\.com/dstengle/shop-templates(?:\.git)?@v\d+\.\d+\.\d+"
+    )
+    assert pin_re.search(text), (
+        "bc-base Dockerfile does not install shop-templates from a "
+        "github.com/dstengle/shop-templates @ vMAJOR.MINOR.PATCH version pin.\n"
+        f"Dockerfile content:\n{text}"
+    )
+
+
+@then("that shop-templates install sits alongside the other framework utility "
+      "CLIs the Dockerfile installs in the same VCS-pin shape")
+def then_shop_templates_alongside_other_clis(ctx):
+    dockerfile = ctx["bc_base_dockerfile"]
+    text = dockerfile.read_text()
+    pin_re = re.compile(
+        r"github\.com/dstengle/([A-Za-z0-9._-]+?)(?:\.git)?@v\d+\.\d+\.\d+"
+    )
+    utilities = {m.group(1) for m in pin_re.finditer(text)}
+    # shop-templates is one of the VCS-pinned utilities ...
+    assert "shop-templates" in utilities, (
+        "shop-templates is not installed in the github.com/dstengle/<utility> "
+        f"@ vMAJOR.MINOR.PATCH VCS-pin shape; pinned utilities found: {utilities}"
+    )
+    # ... and it sits ALONGSIDE at least one OTHER framework utility pinned in
+    # the exact same shape (e.g. shop-msg / beads), confirming it joins the
+    # existing pinned set rather than standing alone in a different form.
+    others = utilities - {"shop-templates"}
+    assert others, (
+        "shop-templates is the ONLY utility in the VCS-pin shape; the scenario "
+        "requires it to sit alongside the other framework utility CLIs "
+        "(e.g. shop-msg, beads) installed in the same shape.\n"
+        f"Dockerfile content:\n{text}"
+    )
+
+
+# --- Scenario 75ae95be0ecf1640 (lead-dlrx): launch pours shop-templates ------
+# skill-group into the cloned workspace's ".claude/skills/" directory, after
+# the clone, modelled behaviourally through the DockerDriver seam.
+
+@given("the bc-base image carries the shop-templates binary")
+def given_bc_base_carries_shop_templates(ctx, fake_driver):
+    """Precondition: the launched container's image has the shop-templates CLI.
+
+    The bc-base Dockerfile installs shop-templates from its VCS version pin
+    (scenario 30165afc), so a real launch's `shop-templates pour` exec runs a
+    binary that is present.  In the fake driver the pour is modelled
+    unconditionally; this Given records the precondition for readability and
+    so the scenario reads end-to-end.
+    """
+    ctx["bc_base_has_shop_templates"] = True
+
+
+@then("the shop-templates pour has been run inside the container's workspace "
+      "directory")
+def then_shop_templates_pour_ran_in_workspace(ctx, fake_driver):
+    container_name = ctx["container_name"]
+    pour_calls = [
+        c for c in fake_driver.exec_calls
+        if c.container == container_name
+        and c.command[:2] == ["shop-templates", "pour"]
+    ]
+    assert pour_calls, (
+        "Expected a 'shop-templates pour' exec call during launch; none ran. "
+        "The launch path must pour the shop-templates skill-group after clone."
+    )
+    # The pour must target the container's workspace directory — i.e. it ran
+    # INSIDE the workspace, not against some other path.
+    assert any("/workspace" in c.command for c in pour_calls), (
+        "shop-templates pour ran but did not target the container's workspace "
+        f"directory (/workspace); pour commands: {[c.command for c in pour_calls]}"
+    )
+
+
+@then('the workspace\'s ".claude/skills/" directory is populated with the '
+      'shop-templates skill-group after launch completes')
+def then_workspace_skills_populated(ctx, fake_driver):
+    container_name = ctx["container_name"]
+    skills = fake_driver.workspace_skills(container_name)
+    assert skills, (
+        "The workspace's .claude/skills/ directory was NOT populated after "
+        "launch completed; the shop-templates pour did not deposit the "
+        "skill-group. (Skipping the pour leaves this empty — the assertion's "
+        "teeth.)"
+    )
+    assert fake_driver.SHOP_TEMPLATES_SKILL_GROUP.issubset(skills), (
+        "The workspace's .claude/skills/ directory does not contain the full "
+        f"shop-templates skill-group; present: {skills}, "
+        f"expected superset of: {set(fake_driver.SHOP_TEMPLATES_SKILL_GROUP)}"
+    )
+
+
 # --- Scenario 37 (b688a5feaf1cf34a): publish-on-tag workflow ----------------
 
 @given(parsers.parse('a tag named "{tag}" is pushed to the "{branch}" branch '

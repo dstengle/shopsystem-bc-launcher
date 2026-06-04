@@ -173,6 +173,23 @@ class FakeDockerDriver:
         # The DSN configured for each container (recorded from docker run -e).
         self._container_dsn: dict[str, str] = {}
 
+        # --- shop-templates pour model (lead-dlrx, scenario 75ae95be0ecf1640) ---
+        # The workspace's ".claude/skills/" directory, modelled per container as
+        # the set of skill-group entries present.  Empty / missing means the
+        # pour has NOT populated it.  A `shop-templates pour` exec_run run inside
+        # the workspace directory populates it with the shop-templates
+        # skill-group, giving the scenario's "skills populated after launch"
+        # assertion teeth: skip the pour and the set stays empty (scenario
+        # FAILS).
+        self._workspace_skills: dict[str, set[str]] = {}
+        # Ordered record of (container, command) for shop-templates pour calls,
+        # so tests can assert the pour ran inside the workspace directory.
+        self.pour_calls: list[ExecCall] = []
+        # The skill-group entries a pour deposits into ".claude/skills/".
+        self.SHOP_TEMPLATES_SKILL_GROUP = frozenset(
+            {"shop-templates"}
+        )
+
     # --- Setup helpers (called by step definitions) ---
 
     def set_network(self, network_name: str, exists: bool = True) -> None:
@@ -462,8 +479,31 @@ class FakeDockerDriver:
                 )
             return subprocess.CompletedProcess(command, 0, "", "")
 
+        # Simulate `shop-templates pour ...` — the launch step that populates
+        # the workspace's ".claude/skills/" with the shop-templates skill-group
+        # (lead-dlrx, scenario 75ae95be0ecf1640).  The pour is recognised when
+        # the command runs the shop-templates "pour" subcommand AND names the
+        # container workspace directory (so the assertion that it ran INSIDE the
+        # workspace directory has teeth).  Modelling the populate effect here is
+        # what gives the scenario's "skills populated after launch" Then step
+        # its teeth: skip the pour and _workspace_skills stays empty → FAIL.
+        if command[:2] == ["shop-templates", "pour"]:
+            self.pour_calls.append(
+                ExecCall(container=container_name, command=command, user=user)
+            )
+            # Only a pour that targets the workspace directory populates it.
+            if "/workspace" in command:
+                self._workspace_skills.setdefault(container_name, set()).update(
+                    self.SHOP_TEMPLATES_SKILL_GROUP
+                )
+            return subprocess.CompletedProcess(command, 0, "", "")
+
         # Default: success
         return subprocess.CompletedProcess(command, 0, "", "")
+
+    def workspace_skills(self, container_name: str) -> set[str]:
+        """Return the skill-group entries present in the workspace .claude/skills/."""
+        return set(self._workspace_skills.get(container_name, set()))
 
     def exec_interactive(
         self,

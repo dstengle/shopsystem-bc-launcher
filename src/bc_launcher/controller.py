@@ -529,6 +529,28 @@ class BcContainerController:
                 f"Chowned {CONTAINER_WORKSPACE} to {AGENT_CONTAINER_USER}\n"
             )
 
+            # shop-templates pour (lead-dlrx, scenario 75ae95be0ecf1640).
+            #
+            # After the repository has been cloned (and the beads/ownership
+            # setup steps have run), pour the shop-templates skill-group into
+            # the cloned workspace so the launched BC shop carries its
+            # ".claude/skills/" content from first boot.  The pour runs INSIDE
+            # the container's workspace directory (the bc-base image carries the
+            # shop-templates binary, installed from its VCS version pin) and
+            # targets that same workspace dir, populating
+            # ${CONTAINER_WORKSPACE}/.claude/skills/ with the shop-templates
+            # skill-group.  Run as vscode so the poured files are owned by the
+            # agent user (the chown above handed /workspace to vscode).
+            self._driver.exec_run(
+                container,
+                ["shop-templates", "pour", "--workspace", CONTAINER_WORKSPACE],
+                user=AGENT_CONTAINER_USER,
+            )
+            out_lines.append(
+                f"Poured shop-templates skill-group into "
+                f"{CONTAINER_WORKSPACE}/.claude/skills/\n"
+            )
+
         # Start tmux session as vscode.  Claude Code refuses
         # --dangerously-skip-permissions when EUID==0 ("cannot be used with
         # root/sudo privileges for security reasons"), so the agent must

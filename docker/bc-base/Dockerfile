@@ -20,7 +20,8 @@ USER root
 # is "<utility> @ git+https://github.com/dstengle/<utility>.git@vX.Y.Z".
 RUN pip install --no-cache-dir \
     "shop-msg @ git+https://github.com/dstengle/shop-msg.git@v0.3.0" \
-    "beads @ git+https://github.com/dstengle/beads.git@v0.5.1"
+    "beads @ git+https://github.com/dstengle/beads.git@v0.5.1" \
+    "shop-templates @ git+https://github.com/dstengle/shop-templates.git@v0.1.0"
 
 # tmux + git are required by the launcher's in-container agent session and
 # repository clone steps.
