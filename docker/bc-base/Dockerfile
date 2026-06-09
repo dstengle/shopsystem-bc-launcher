@@ -50,6 +50,16 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends tmux git \
     && rm -rf /var/lib/apt/lists/*
 
+# Claude Code CLI — the BC agent runtime. Installed as the vscode user so the
+# native installer lands in /home/vscode/.local (where the launched BC, running
+# as vscode with HOME=/home/vscode, finds it). Without this the published image
+# has no `claude` on PATH and a BC cannot run its agent (lead-79kp). ENV PATH
+# adds the install dir for all users at runtime.
+USER vscode
+RUN curl -fsSL https://claude.ai/install.sh | bash
+USER root
+ENV PATH="/home/vscode/.local/bin:${PATH}"
+
 WORKDIR /workspace
 
 CMD ["sleep", "infinity"]
