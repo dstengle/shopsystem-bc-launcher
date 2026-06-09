@@ -50,6 +50,23 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends tmux git \
     && rm -rf /var/lib/apt/lists/*
 
+# GitHub CLI (gh) — required for a BC container to authenticate git pushes to
+# origin/main (the pre-emit "commit reachable from origin/main" gate). The
+# launcher already bind-mounts the host's ~/.config/gh into the container
+# (controller.py credential propagation), but without `gh` in the image that
+# mounted token is unusable and a BC cannot push (lead-ym1b). Installed from the
+# official GitHub CLI apt repository.
+RUN mkdir -p -m 755 /etc/apt/keyrings \
+    && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+       | tee /etc/apt/keyrings/githubcli-archive-keyring.gpg > /dev/null \
+    && chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+       > /etc/apt/sources.list.d/github-cli.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends gh \
+    && rm -rf /var/lib/apt/lists/* \
+    && gh --version
+
 # Claude Code CLI — the BC agent runtime. Installed as the vscode user so the
 # native installer lands in /home/vscode/.local (where the launched BC, running
 # as vscode with HOME=/home/vscode, finds it). Without this the published image
