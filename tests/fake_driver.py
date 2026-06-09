@@ -173,6 +173,20 @@ class FakeDockerDriver:
         # The DSN configured for each container (recorded from docker run -e).
         self._container_dsn: dict[str, str] = {}
 
+        # --- Agent-vault broker model (ADR-026, lead-hxb8 / lead-v4ih) ---
+        # Broker reachability is modelled as reachable-by-default so existing
+        # launch scenarios keep engaging their agent.  Readiness scenarios
+        # that pin the unreachable path register the offending broker address
+        # here via set_agent_vault_reachable(addr, False).
+        self._unreachable_brokers: set[str] = set()
+        # The agent-vault broker address configured for each container, so
+        # health can fold broker reachability into its status.
+        self._container_broker: dict[str, str] = {}
+        # The HTTPS_PROXY env value recorded from docker run -e for a
+        # container, so security scenarios can assert the proxy points at the
+        # broker rather than the container holding a real credential.
+        self._container_proxy_env: dict[str, str] = {}
+
         # --- shop-templates pour model (lead-dlrx, scenario 75ae95be0ecf1640) ---
         # The workspace's ".claude/skills/" directory, modelled per container as
         # the set of skill-group entries present.  Empty / missing means the
@@ -230,6 +244,27 @@ class FakeDockerDriver:
         """Record the DSN configured for a (possibly pre-existing) container."""
         self._container_dsn[container_name] = dsn
 
+    def set_agent_vault_reachable(
+        self, broker_address: str, reachable: bool = True
+    ) -> None:
+        """Mark an agent-vault broker reachable (default) or unreachable.
+
+        Reachability is modelled as reachable-by-default; only brokers
+        explicitly marked unreachable here fail the readiness barrier.
+        """
+        if reachable:
+            self._unreachable_brokers.discard(broker_address)
+        else:
+            self._unreachable_brokers.add(broker_address)
+
+    def set_container_broker(self, container_name: str, broker_address: str) -> None:
+        """Record the agent-vault broker configured for a container."""
+        self._container_broker[container_name] = broker_address
+
+    def container_proxy_env(self, container_name: str) -> str:
+        """Return the HTTPS_PROXY value recorded from the container's docker run."""
+        return self._container_proxy_env.get(container_name, "")
+
     def mark_ready(self, container_name: str) -> None:
         """Mark a container as having passed its readiness sequence."""
         self._ready_containers.add(container_name)
@@ -276,6 +311,9 @@ class FakeDockerDriver:
             cmd += ["-e", f"{key}={val}"]
             if key == "SHOPMSG_DSN":
                 self._container_dsn[container_name] = val
+            if key == "HTTPS_PROXY":
+                self._container_proxy_env[container_name] = val
+                self._container_broker[container_name] = val
         for mount_type, source, dest, readonly in mounts:
             spec = f"type={mount_type},source={source},target={dest}"
             if readonly:
@@ -328,14 +366,20 @@ class FakeDockerDriver:
         """Reachable-by-default unless the DSN was marked unreachable."""
         return bool(dsn) and dsn not in self._unreachable_dsns
 
+    def agent_vault_reachable(self, broker_address: str) -> bool:
+        """Reachable-by-default unless the broker was marked unreachable."""
+        return bool(broker_address) and broker_address not in self._unreachable_brokers
+
     def health_status(self, container_name: str) -> str:
         """Compose the container's health status.
 
         An explicit override (set_health_override) wins.  Otherwise the
         container is "healthy" only when beads is functionally usable inside
-        it (a non-empty issue_prefix configured and not forced broken) AND
-        the messaging database at its configured DSN is reachable; any other
-        state is "unhealthy".  Returns "none" if the container is unknown.
+        it (a non-empty issue_prefix configured and not forced broken), the
+        messaging database at its configured DSN is reachable, AND — when an
+        agent-vault broker is configured for the container (ADR-026) — that
+        broker is reachable; any other state is "unhealthy".  Returns "none"
+        if the container is unknown.
         """
         if container_name in self._health_override:
             return self._health_override[container_name]
@@ -345,7 +389,13 @@ class FakeDockerDriver:
         beads_ok = bool(prefix) and container_name not in self._beads_broken
         dsn = self._container_dsn.get(container_name, "")
         db_ok = bool(dsn) and dsn not in self._unreachable_dsns
-        return "healthy" if (beads_ok and db_ok) else "unhealthy"
+        broker = self._container_broker.get(container_name, "")
+        # A configured-but-unreachable broker makes the container unhealthy
+        # even when the process is alive (scenario 3b2a81c1).  When no broker
+        # is configured for the container, the broker dimension is not gating
+        # (preserves health scenarios that predate the agent-vault model).
+        broker_ok = (not broker) or broker not in self._unreachable_brokers
+        return "healthy" if (beads_ok and db_ok and broker_ok) else "unhealthy"
 
     def network_exists(self, network_name: str) -> bool:
         return network_name in self._networks

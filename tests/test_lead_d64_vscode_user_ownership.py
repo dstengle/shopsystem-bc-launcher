@@ -385,103 +385,15 @@ def test_chown_workspace_recursive_flag_present(tmp_path):
 #     /home/vscode
 # ===========================================================================
 
-def test_cp_gitconfig_does_not_produce_root_owned_file_in_vscode_home(tmp_path):
-    """
-    Acceptance (lead-d64, fix scope 3): the cp of /tmp/host-gitconfig
-    into /home/vscode/.gitconfig must NOT leave a root-owned file there.
-    Two acceptable implementations: (i) run the cp as -u vscode (so the
-    destination is created owned by vscode), or (ii) follow the cp with
-    a chown that transfers ownership to vscode.  This test accepts
-    either pattern.
-
-    The lead-d64 reproduction
-    (``stat -c '%U' /home/vscode/.gitconfig`` returning ``root``) is the
-    defect signature this test guards against.
-    """
-    driver = _launch_with_clone(tmp_path)
-
-    cp_calls_idx = [
-        (i, c) for i, c in enumerate(driver.exec_calls)
-        if c.command[:1] == ["cp"]
-        and len(c.command) >= 3
-        and c.command[-1] == "/home/vscode/.gitconfig"
-    ]
-    assert cp_calls_idx, (
-        f"Expected a cp exec_run with dest /home/vscode/.gitconfig.  "
-        f"exec_calls: {[(c.command, c.user) for c in driver.exec_calls]!r}"
-    )
-    for idx, call in cp_calls_idx:
-        if call.user == VSCODE:
-            # Acceptable: cp ran as vscode, destination owned by vscode.
-            continue
-        # Otherwise: a follow-up chown into vscode:vscode must exist for
-        # this destination (or a parent path covering it) before tmux
-        # starts.  Look for any chown after this cp whose target path is
-        # /home/vscode or /home/vscode/.gitconfig.
-        chown_found = any(
-            later.command
-            and later.command[0] == "chown"
-            and f"{VSCODE}:{VSCODE}" in later.command
-            and any(
-                tok in (
-                    "/home/vscode",
-                    "/home/vscode/",
-                    "/home/vscode/.gitconfig",
-                )
-                for tok in later.command
-            )
-            for later in driver.exec_calls[idx + 1:]
-        )
-        assert chown_found, (
-            f"cp into /home/vscode/.gitconfig ran as user={call.user!r} "
-            f"(not vscode), and no follow-up chown to "
-            f"{VSCODE}:{VSCODE} was issued.  This reproduces lead-d64's "
-            f"root-owned-credential-file defect.\n"
-            f"exec_calls: {[(c.command, c.user) for c in driver.exec_calls]!r}"
-        )
-
-
-def test_cp_claude_json_does_not_produce_root_owned_file_in_vscode_home(tmp_path):
-    """
-    Acceptance (lead-d64, fix scope 3): same invariant for
-    /home/vscode/.claude.json — either the cp runs as vscode, or a
-    follow-up chown transfers ownership.
-    """
-    driver = _launch_with_clone(tmp_path)
-
-    cp_calls_idx = [
-        (i, c) for i, c in enumerate(driver.exec_calls)
-        if c.command[:1] == ["cp"]
-        and len(c.command) >= 3
-        and c.command[-1] == "/home/vscode/.claude.json"
-    ]
-    assert cp_calls_idx, (
-        f"Expected a cp exec_run with dest /home/vscode/.claude.json.  "
-        f"exec_calls: {[(c.command, c.user) for c in driver.exec_calls]!r}"
-    )
-    for idx, call in cp_calls_idx:
-        if call.user == VSCODE:
-            continue
-        chown_found = any(
-            later.command
-            and later.command[0] == "chown"
-            and f"{VSCODE}:{VSCODE}" in later.command
-            and any(
-                tok in (
-                    "/home/vscode",
-                    "/home/vscode/",
-                    "/home/vscode/.claude.json",
-                )
-                for tok in later.command
-            )
-            for later in driver.exec_calls[idx + 1:]
-        )
-        assert chown_found, (
-            f"cp into /home/vscode/.claude.json ran as user={call.user!r} "
-            f"(not vscode), and no follow-up chown to "
-            f"{VSCODE}:{VSCODE} was issued.\n"
-            f"exec_calls: {[(c.command, c.user) for c in driver.exec_calls]!r}"
-        )
+# NOTE (ADR-026 / lead-v4ih / lead-hxb8): the two former tests here
+# (test_cp_gitconfig_does_not_produce_root_owned_file_in_vscode_home and
+# test_cp_claude_json_does_not_produce_root_owned_file_in_vscode_home) pinned
+# the host-credential cp steps — copying /tmp/host-gitconfig into
+# /home/vscode/.gitconfig and the host .claude.json into /home/vscode — which
+# the agent-vault credential model RETIRES.  Under ADR-026 zero host-filesystem
+# credential coupling reaches the container, so there is no such cp to assert
+# vscode-ownership on.  The vscode-ownership invariant for the BC's OWN
+# /workspace (the chown tests above) is unaffected and remains pinned.
 
 
 # ===========================================================================

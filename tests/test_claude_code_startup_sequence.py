@@ -131,7 +131,7 @@ def test_launch_sends_claude_command_before_startup_prompt(tmp_path):
     claude_idx = next(
         (
             i for i, cmd in enumerate(send_keys)
-            if any(tok.startswith("claude") for tok in cmd) and "Enter" in cmd
+            if any("claude" in tok for tok in cmd) and "Enter" in cmd
         ),
         None,
     )
@@ -419,7 +419,7 @@ def test_default_template_path_starts_claude_then_injects_prompt(tmp_path, monke
     claude_idx = next(
         (
             i for i, cmd in enumerate(send_keys)
-            if any(tok.startswith("claude") for tok in cmd) and "Enter" in cmd
+            if any("claude" in tok for tok in cmd) and "Enter" in cmd
         ),
         None,
     )
@@ -487,7 +487,7 @@ def test_monitor_pane_after_default_launch_does_not_contain_bash_command_not_fou
             "Enter" in cmd
             and len(cmd) >= 2
             and isinstance(cmd[-2], str)
-            and cmd[-2].startswith("claude")
+            and "claude" in cmd[-2]
         ):
             seen_claude_start = True
             continue
@@ -595,7 +595,7 @@ def test_step_one_send_keys_includes_dangerously_skip_permissions_flag(tmp_path)
     claude_starts = [
         cmd for cmd in send_keys
         if any(
-            isinstance(tok, str) and tok.startswith("claude")
+            isinstance(tok, str) and "claude" in tok
             for tok in cmd
         )
     ]
@@ -608,7 +608,7 @@ def test_step_one_send_keys_includes_dangerously_skip_permissions_flag(tmp_path)
     # '--dangerously-skip-permissions'.
     claude_tokens = [
         tok for tok in starter
-        if isinstance(tok, str) and tok.startswith("claude")
+        if isinstance(tok, str) and "claude" in tok
     ]
     assert any(
         "--dangerously-skip-permissions" in tok for tok in claude_tokens
@@ -665,7 +665,7 @@ def test_step_three_bare_enter_trust_accept_is_retained(tmp_path):
         (
             i for i, cmd in enumerate(send_keys)
             if any(
-                isinstance(tok, str) and tok.startswith("claude")
+                isinstance(tok, str) and "claude" in tok
                 for tok in cmd
             )
         ),

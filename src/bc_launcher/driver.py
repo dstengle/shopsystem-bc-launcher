@@ -180,6 +180,21 @@ class DockerDriver(Protocol):
         """
         ...
 
+    def agent_vault_reachable(self, broker_address: str) -> bool:
+        """Return True if the agent-vault broker at ``broker_address`` is reachable.
+
+        Under the agent-vault credential model (ADR-026) the launcher mounts
+        NO host credential into the container; the agent's Claude OAuth and
+        GitHub credentials are substituted on outbound requests by an
+        agent-vault broker reached through an HTTPS proxy on the shopsystem
+        network.  An agent whose broker is unreachable can authenticate to
+        nothing, so this is a launch-time readiness barrier alongside the
+        messaging-database check: the controller calls this BEFORE engaging
+        the agent and surfaces a readiness failure (naming the broker
+        address) when it returns False.
+        """
+        ...
+
 
 # ---------------------------------------------------------------------------
 # Real implementation (shells out to docker CLI)
@@ -349,6 +364,33 @@ class RealDockerDriver:
         )
         status = result.stdout.strip()
         return status or "none"
+
+    def agent_vault_reachable(self, broker_address: str) -> bool:
+        """Probe the agent-vault broker at ``broker_address`` for reachability.
+
+        Parses a host:port (or URL) out of ``broker_address`` and attempts a
+        TCP connect.  Any failure (empty/unparseable address, refused
+        connection, timeout) returns False so launch fails fast with a
+        readiness error rather than engaging an agent that can authenticate
+        to nothing.
+        """
+        if not broker_address:
+            return False
+        import socket
+        from urllib.parse import urlparse
+        try:
+            addr = broker_address
+            if "://" not in addr:
+                addr = "tcp://" + addr
+            parsed = urlparse(addr)
+            host = parsed.hostname
+            port = parsed.port
+            if not host or not port:
+                return False
+            with socket.create_connection((host, port), timeout=2.0):
+                return True
+        except (OSError, ValueError):
+            return False
 
     def wait_for_pane_marker(
         self,

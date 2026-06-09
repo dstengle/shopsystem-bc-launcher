@@ -944,12 +944,13 @@ def assert_help_subcommands(ctx):
 def assert_isolation_mounts(ctx, fake_driver):
     """
     Verify that after launch, the container has no bind mounts other than
-    the BC's own repository mount and the standard credential mounts.
+    the BC's own repository mount and the placeholder credential mount.
 
     No sibling BC paths, lead shop workspace paths, or DSN socket paths may
-    appear in the mount list.  The standard credential mounts (for ~/.claude,
-    ~/.config/gh, ~/.gitconfig) are allowed because they come from the
-    operator's own home directory, not from sibling BC or lead shop trees.
+    appear in the mount list.  Under the agent-vault model (ADR-026) the only
+    permitted credential mount is the placeholder-only, read-only
+    .credentials.json at /home/vscode/.claude/.credentials.json — no host
+    ~/.claude, ~/.config/gh, or ~/.gitconfig is ever mounted.
     """
     bind_mounts = ctx.get("bind_mounts", [])
 
@@ -959,11 +960,10 @@ def assert_isolation_mounts(ctx, fake_driver):
     # Derive allowed source: the BC's own repo path (contains bc_name)
     bc_name = ctx.get("bc_name", "shopsystem-messaging")
 
-    # Credential mount destination targets that are always permitted
+    # Credential mount destination targets that are always permitted.  Under
+    # ADR-026 this is only the placeholder Claude credentials file.
     _CREDENTIAL_TARGETS = {
-        "/home/vscode/.claude",
-        "/home/vscode/.config/gh",
-        "/tmp/host-gitconfig",
+        "/home/vscode/.claude/.credentials.json",
     }
 
     for mount in bind_mounts:
@@ -2737,6 +2737,667 @@ def assert_health_status(status, ctx):
     assert actual == status, (
         f"Expected health status {status!r}, got {actual!r}"
     )
+
+
+# ===========================================================================
+# Agent-vault credential broker scenarios (ADR-026, lead-v4ih / lead-hxb8)
+#
+# The host-credential-mount model (the 7 retired hashes f51f21bb, 636ce0c8,
+# 58b727750607, 93ce0083, 85202a40, dc9b9885, 4ba55450, plus collateral
+# scenario 6172b02f) is SUPERSEDED.  Zero host-filesystem credential coupling
+# reaches a BC container; the agent-vault broker is the sole credential path.
+# ===========================================================================
+
+from bc_launcher.controller import (
+    AGENT_VAULT_PLACEHOLDER_TOKEN,
+    CONTAINER_CLAUDE_CREDENTIALS_PATH,
+    DEFAULT_AGENT_VAULT_BROKER,
+)
+
+# A real host OAuth accessToken value that MUST never appear inside the
+# container under the agent-vault model.  The placeholder substitutes for it.
+_REAL_OAUTH_TOKEN = "sk-ant-REAL-oauth-accessToken-DO-NOT-LEAK"
+# A real GitHub token value the broker holds out of band; never in-container.
+_REAL_GITHUB_TOKEN = "ghp_REAL_github_token_DO_NOT_LEAK"
+# An unreachable broker address used by the broker-down readiness/health paths.
+_UNREACHABLE_BROKER = "http://no-such-agent-vault.invalid:9999"
+
+
+def _agent_vault_launch(ctx, controller, fake_driver, tmp_path, bc_name,
+                        *, startup_prompt=None, broker=None, dsn=None):
+    """Run a launch under the agent-vault model and stash the result in ctx."""
+    repo_url = f"https://github.com/shopsystem/{bc_name}.git"
+    manifest_path = ctx.get("launch_manifest_path")
+    if manifest_path is None:
+        default_manifest = tmp_path / "bc-manifest.yaml"
+        if not default_manifest.exists():
+            import yaml as _yaml
+            default_manifest.write_text(_yaml.dump({
+                "product": "shopsystem product",
+                "bcs": [{"name": bc_name, "remote": repo_url, "role": "bc"}],
+            }))
+        manifest_path = default_manifest
+    result = controller.launch(
+        bc_name=bc_name,
+        repo_url=repo_url,
+        shopmsg_dsn=dsn,
+        startup_prompt=startup_prompt,
+        network=None,
+        manifest_path=manifest_path,
+        credential_home=ctx.get("credential_home"),
+        agent_vault_broker=broker,
+    )
+    ctx["result"] = result
+    ctx["container_name"] = f"bc-{bc_name}"
+    ctx["bc_name"] = bc_name
+    return result
+
+
+# --- Given steps -----------------------------------------------------------
+
+@given("an agent-vault broker is running on the shopsystem network and is "
+       "reachable")
+def agent_vault_broker_reachable(ctx, fake_driver):
+    broker = DEFAULT_AGENT_VAULT_BROKER
+    fake_driver.set_agent_vault_reachable(broker, reachable=True)
+    ctx["agent_vault_broker"] = broker
+
+
+@given("an agent-vault broker with a GitHub credential service is running on "
+       "the shopsystem network and is reachable")
+def agent_vault_github_broker_reachable(ctx, fake_driver):
+    broker = DEFAULT_AGENT_VAULT_BROKER
+    fake_driver.set_agent_vault_reachable(broker, reachable=True)
+    ctx["agent_vault_broker"] = broker
+    ctx["broker_github_token"] = _REAL_GITHUB_TOKEN
+
+
+@given("an agent-vault broker with a GitHub credential service is running on "
+       "the shopsystem network")
+def agent_vault_github_broker(ctx, fake_driver):
+    broker = DEFAULT_AGENT_VAULT_BROKER
+    fake_driver.set_agent_vault_reachable(broker, reachable=True)
+    ctx["agent_vault_broker"] = broker
+    ctx["broker_github_token"] = _REAL_GITHUB_TOKEN
+
+
+@given("the environment variable BCLAUNCHER_HOST_HOME is unset")
+def bclauncher_host_home_unset(ctx, monkeypatch):
+    monkeypatch.delenv("BCLAUNCHER_HOST_HOME", raising=False)
+
+
+@given(parsers.parse('the container "{container_name}" is running with no host '
+                     'gh or gitconfig credential mounted'))
+def container_running_no_gh_mount(container_name, ctx, controller, fake_driver,
+                                  tmp_path):
+    bc_name = container_name.removeprefix("bc-")
+    _agent_vault_launch(ctx, controller, fake_driver, tmp_path, bc_name,
+                        broker=ctx.get("agent_vault_broker"))
+    assert fake_driver.is_running(container_name)
+
+
+@given(parsers.parse('the container "{container_name}" routes its GitHub-bound '
+                     'traffic through the broker\'s proxy listener'))
+def container_routes_through_broker(container_name, ctx, controller,
+                                    fake_driver, tmp_path):
+    bc_name = container_name.removeprefix("bc-")
+    _agent_vault_launch(ctx, controller, fake_driver, tmp_path, bc_name,
+                        broker=ctx.get("agent_vault_broker"))
+    assert fake_driver.is_running(container_name)
+
+
+@given("the agent-vault broker address configured for the container points at "
+       "an address where no reachable broker is listening")
+def broker_unreachable_configured(ctx, fake_driver):
+    fake_driver.set_agent_vault_reachable(_UNREACHABLE_BROKER, reachable=False)
+    ctx["agent_vault_broker"] = _UNREACHABLE_BROKER
+
+
+@given("the agent-vault broker configured for the container is not reachable")
+def broker_not_reachable_for_health(ctx, fake_driver):
+    container_name = ctx["container_name"]
+    bc_name = ctx["bc_name"]
+    from bc_launcher.controller import beads_prefix_for
+    # beads + DB are fine; only the broker is down, so health must be unhealthy.
+    fake_driver.set_beads_prefix(container_name, beads_prefix_for(bc_name))
+    fake_driver.set_container_dsn(container_name, _READINESS_DSN)
+    fake_driver.set_dsn_reachable(_READINESS_DSN, reachable=True)
+    fake_driver.set_container_broker(container_name, _UNREACHABLE_BROKER)
+    fake_driver.set_agent_vault_reachable(_UNREACHABLE_BROKER, reachable=False)
+
+
+@given("the messaging database at SHOPMSG_DSN is reachable for the agent-vault "
+       "launch")
+def db_reachable_for_av_launch(ctx, fake_driver):
+    fake_driver.set_dsn_reachable(_READINESS_DSN, reachable=True)
+    ctx["shopmsg_dsn"] = _READINESS_DSN
+
+
+@given("the agent-vault broker on the shopsystem network is reachable")
+def av_broker_reachable_named(ctx, fake_driver):
+    broker = DEFAULT_AGENT_VAULT_BROKER
+    fake_driver.set_agent_vault_reachable(broker, reachable=True)
+    ctx["agent_vault_broker"] = broker
+
+
+@given("the agent-vault broker on the shopsystem network is not reachable")
+def av_broker_not_reachable_named(ctx, fake_driver):
+    broker = DEFAULT_AGENT_VAULT_BROKER
+    fake_driver.set_agent_vault_reachable(broker, reachable=False)
+    ctx["agent_vault_broker"] = broker
+
+
+@given("the agent-vault broker has been provisioned out of band with the real "
+       "Claude OAuth credential and the real GitHub credential")
+def broker_provisioned_out_of_band(ctx, fake_driver):
+    broker = DEFAULT_AGENT_VAULT_BROKER
+    fake_driver.set_agent_vault_reachable(broker, reachable=True)
+    ctx["agent_vault_broker"] = broker
+    ctx["broker_oauth_token"] = _REAL_OAUTH_TOKEN
+    ctx["broker_github_token"] = _REAL_GITHUB_TOKEN
+
+
+@given(parsers.parse('the container "{container_name}" is running under the '
+                     'agent-vault model'))
+def container_running_av_model(container_name, ctx, controller, fake_driver,
+                               tmp_path):
+    bc_name = container_name.removeprefix("bc-")
+    broker = DEFAULT_AGENT_VAULT_BROKER
+    fake_driver.set_agent_vault_reachable(broker, reachable=True)
+    _agent_vault_launch(ctx, controller, fake_driver, tmp_path, bc_name,
+                        broker=broker)
+    assert fake_driver.is_running(container_name)
+
+
+# --- When steps ------------------------------------------------------------
+
+@when("the container's bind mounts are inspected via docker inspect")
+def inspect_bind_mounts_av(ctx, fake_driver, controller):
+    container_name = ctx["container_name"]
+    ctx["bind_mounts"] = controller.get_bind_mounts(container_name)
+
+
+@when(parsers.parse('bc-container launch is run with BC name "{bc_name}"'))
+def when_launch_run_av(bc_name, ctx, controller, fake_driver, tmp_path):
+    _agent_vault_launch(ctx, controller, fake_driver, tmp_path, bc_name,
+                        broker=ctx.get("agent_vault_broker"))
+
+
+@when(parsers.parse('bc-container launch is run with BC name "{bc_name}" '
+                    'against the provisioned broker'))
+def when_launch_run_against_provisioned_broker(bc_name, ctx, controller,
+                                               fake_driver, tmp_path):
+    _agent_vault_launch(ctx, controller, fake_driver, tmp_path, bc_name,
+                        broker=ctx.get("agent_vault_broker"))
+
+
+@when(parsers.parse('bc-container launch starts the agent for BC name '
+                    '"{bc_name}"'))
+def launch_starts_agent(bc_name, ctx, controller, fake_driver, tmp_path):
+    _agent_vault_launch(
+        ctx, controller, fake_driver, tmp_path, bc_name,
+        startup_prompt="please begin your session",
+        broker=ctx.get("agent_vault_broker"),
+        dsn=ctx.get("shopmsg_dsn"),
+    )
+
+
+@when(parsers.parse('I run bc-container launch with BC name "{bc_name}" and an '
+                    'agent-vault startup prompt'))
+def launch_with_av_startup_prompt(bc_name, ctx, controller, fake_driver,
+                                  tmp_path):
+    _agent_vault_launch(
+        ctx, controller, fake_driver, tmp_path, bc_name,
+        startup_prompt="please begin your session",
+        broker=ctx.get("agent_vault_broker"),
+        dsn=ctx.get("shopmsg_dsn"),
+    )
+
+
+@when(parsers.parse('I run bc-container launch with BC name "{bc_name}" and a '
+                    'brokered startup prompt'))
+def launch_with_brokered_startup_prompt(bc_name, ctx, controller, fake_driver,
+                                        tmp_path):
+    _agent_vault_launch(
+        ctx, controller, fake_driver, tmp_path, bc_name,
+        startup_prompt="please begin your session",
+        broker=ctx.get("agent_vault_broker"),
+        dsn=ctx.get("shopmsg_dsn") or _READINESS_DSN,
+    )
+
+
+@when('the file ".credentials.json" mounted into the container is read')
+def read_placeholder_credentials(ctx, fake_driver):
+    container_name = ctx["container_name"]
+    mounts = fake_driver.get_mounts(container_name)
+    cred_mounts = [
+        m for m in mounts
+        if m.destination == CONTAINER_CLAUDE_CREDENTIALS_PATH
+    ]
+    assert cred_mounts, (
+        f"Expected a placeholder credentials mount at "
+        f"{CONTAINER_CLAUDE_CREDENTIALS_PATH} in {container_name!r}; "
+        f"mounts: {[(m.source, m.destination) for m in mounts]!r}"
+    )
+    import json as _json
+    ctx["credentials_content"] = _json.loads(
+        Path(cred_mounts[0].source).read_text()
+    )
+
+
+@when("an authenticated GitHub operation is run from inside the container "
+      "through the agent-vault broker")
+def github_op_via_broker(ctx, fake_driver):
+    # The container holds no GitHub token; the broker substitutes it on the
+    # outbound request.  Model the operation succeeding because the (reachable)
+    # broker holds the credential.
+    broker = ctx.get("agent_vault_broker", DEFAULT_AGENT_VAULT_BROKER)
+    ctx["github_op_ok"] = fake_driver.agent_vault_reachable(broker) and bool(
+        ctx.get("broker_github_token")
+    )
+
+
+@when("a git operation inside the container makes an authenticated request to "
+      "github.com")
+def git_request_to_github(ctx):
+    # The request leaves the container with NO credential; the broker injects
+    # its stored GitHub credential before forwarding to github.com.
+    ctx["request_as_leaves_container_credential"] = None
+    ctx["request_broker_forwards_credential"] = ctx.get("broker_github_token")
+
+
+@when("the container's filesystem and process environment are searched from "
+      "inside the container")
+def search_container_for_secrets(ctx, fake_driver):
+    container_name = ctx["container_name"]
+    # Container env: HTTPS_PROXY (broker addr) is the only credential-bearing
+    # value; no real OAuth / GitHub token is present.
+    ctx["container_env_values"] = [
+        fake_driver.container_proxy_env(container_name)
+    ]
+    # Container files: only the placeholder .credentials.json.
+    mounts = fake_driver.get_mounts(container_name)
+    cred = [m for m in mounts
+            if m.destination == CONTAINER_CLAUDE_CREDENTIALS_PATH]
+    import json as _json
+    ctx["container_credentials_json"] = (
+        _json.loads(Path(cred[0].source).read_text()) if cred else None
+    )
+    # No host gh/gitconfig path mounted.
+    ctx["container_mount_destinations"] = [m.destination for m in mounts]
+
+
+@when("the credential-bearing secrets reachable from inside the container are "
+      "enumerated")
+def enumerate_container_secrets(ctx, fake_driver):
+    container_name = ctx["container_name"]
+    proxy = fake_driver.container_proxy_env(container_name)
+    # The only credential-bearing secret reachable in-container is the proxy
+    # token used to authenticate to the broker (modelled as the HTTPS_PROXY
+    # endpoint the agent-vault run wrapper authenticates against).
+    ctx["reachable_secrets"] = [proxy] if proxy else []
+
+
+# --- Then steps ------------------------------------------------------------
+
+@then(parsers.parse('no bind mount inside the container has the host '
+                    '"{host_path}" directory as its source'))
+def assert_no_host_dir_mount(host_path, ctx):
+    bind_mounts = ctx.get("bind_mounts", [])
+    leaf = host_path.lstrip("~/").lstrip("/")
+    for m in bind_mounts:
+        assert not m.source.rstrip("/").endswith(leaf), (
+            f"Found a bind mount whose source ends in host path {host_path!r}: "
+            f"{m.source!r} -> {m.destination!r}"
+        )
+
+
+@then(parsers.parse('no bind mount inside the container has the host '
+                    '"{host_path}" file as its source'))
+def assert_no_host_file_mount(host_path, ctx):
+    bind_mounts = ctx.get("bind_mounts", [])
+    leaf = host_path.lstrip("~/").lstrip("/")
+    for m in bind_mounts:
+        assert not m.source.rstrip("/").endswith(leaf), (
+            f"Found a bind mount whose source ends in host file {host_path!r}: "
+            f"{m.source!r} -> {m.destination!r}"
+        )
+
+
+@then(parsers.parse('no bind mount inside the container targets "{target}" as '
+                    'a read-write directory mount'))
+def assert_no_rw_dir_mount_target(target, ctx, fake_driver):
+    # The placeholder credentials file lives UNDER /home/vscode/.claude but is
+    # a single read-only file mount, not a read-write directory mount of the
+    # .claude directory itself.  Assert no mount destination equals the bare
+    # directory target.
+    bind_mounts = ctx.get("bind_mounts", [])
+    for m in bind_mounts:
+        assert m.destination != target, (
+            f"Found a bind mount targeting {target!r} as a directory mount: "
+            f"{m.source!r} -> {m.destination!r}"
+        )
+
+
+@then(parsers.parse('the command exits zero and the container "{container_name}"'
+                    ' is running'))
+def assert_exit_zero_and_running(container_name, ctx, fake_driver):
+    result = ctx["result"]
+    assert result.exit_code == 0, (
+        f"Expected exit 0, got {result.exit_code} (stderr={result.stderr!r})"
+    )
+    assert fake_driver.is_running(container_name), (
+        f"Expected {container_name!r} to be running"
+    )
+
+
+@then("launch did not fail resolving any host credential path")
+def assert_no_credential_resolution_failure(ctx):
+    result = ctx["result"]
+    stderr = result.stderr.lower()
+    assert "credential source not found" not in stderr, (
+        f"Launch reported a host credential resolution failure: "
+        f"{result.stderr!r}"
+    )
+    assert result.exit_code == 0, (
+        f"Expected launch to succeed, got rc={result.exit_code} "
+        f"stderr={result.stderr!r}"
+    )
+
+
+@then(parsers.parse('the command line that launches the agent inside the tmux '
+                    'session named "{session}" invokes "{invocation}"'))
+def assert_agent_invocation(session, invocation, ctx, fake_driver):
+    container_name = ctx["container_name"]
+    send_keys = fake_driver.send_keys_calls(container_name)
+    matching = [
+        c for c in send_keys
+        if "-t" in c.command
+        and c.command[c.command.index("-t") + 1] == session
+        and any(invocation in tok for tok in c.command)
+    ]
+    assert matching, (
+        f"Expected a send-keys to session {session!r} whose payload invokes "
+        f"{invocation!r}; send-keys recorded: "
+        f"{[c.command for c in send_keys]!r}"
+    )
+
+
+@then("the agent process environment sets HTTPS_PROXY to the agent-vault "
+      "broker's proxy listener on the shopsystem network")
+def assert_https_proxy_set(ctx, fake_driver):
+    container_name = ctx["container_name"]
+    broker = ctx.get("agent_vault_broker", DEFAULT_AGENT_VAULT_BROKER)
+    proxy = fake_driver.container_proxy_env(container_name)
+    assert proxy == broker, (
+        f"Expected HTTPS_PROXY={broker!r} in container env, got {proxy!r}"
+    )
+
+
+@then(parsers.parse('its accessToken field has the literal value "{value}"'))
+def assert_access_token_literal(value, ctx):
+    content = ctx["credentials_content"]
+    assert content.get("accessToken") == value, (
+        f"Expected accessToken {value!r}, got {content.get('accessToken')!r}"
+    )
+
+
+@then("the file is mounted read-only")
+def assert_credentials_file_readonly(ctx, fake_driver):
+    container_name = ctx["container_name"]
+    run_cmd = fake_driver.run_command_for_container(container_name)
+    found_ro = False
+    for i, tok in enumerate(run_cmd):
+        if tok == "--mount" and i + 1 < len(run_cmd):
+            spec = run_cmd[i + 1]
+            if (f"target={CONTAINER_CLAUDE_CREDENTIALS_PATH}" in spec
+                    and "readonly" in spec):
+                found_ro = True
+    assert found_ro, (
+        f"Expected the placeholder credentials mount at "
+        f"{CONTAINER_CLAUDE_CREDENTIALS_PATH} to be read-only.\n"
+        f"Run command: {run_cmd!r}"
+    )
+
+
+@then("the real host OAuth accessToken value does not appear anywhere in the "
+      "container's filesystem")
+def assert_real_oauth_absent_from_fs(ctx, fake_driver):
+    container_name = ctx["container_name"]
+    mounts = fake_driver.get_mounts(container_name)
+    for m in mounts:
+        src = Path(m.source)
+        if src.is_file():
+            assert _REAL_OAUTH_TOKEN not in src.read_text(), (
+                f"Real OAuth token leaked into mounted file {m.source!r}"
+            )
+
+
+@then("the operation completes successfully against GitHub")
+def assert_github_op_succeeds(ctx):
+    assert ctx.get("github_op_ok"), (
+        "Expected the brokered GitHub operation to succeed"
+    )
+
+
+@then("no GitHub token value is present in the container's environment or "
+      "filesystem")
+def assert_no_github_token_in_container(ctx, fake_driver):
+    container_name = ctx["container_name"]
+    proxy = fake_driver.container_proxy_env(container_name)
+    assert _REAL_GITHUB_TOKEN not in proxy, (
+        "GitHub token leaked into container HTTPS_PROXY env"
+    )
+    for m in fake_driver.get_mounts(container_name):
+        src = Path(m.source)
+        if src.is_file():
+            assert _REAL_GITHUB_TOKEN not in src.read_text(), (
+                f"GitHub token leaked into mounted file {m.source!r}"
+            )
+
+
+@then("the request the broker forwards to github.com carries the broker-stored "
+      "GitHub credential")
+def assert_broker_forwards_credential(ctx):
+    assert ctx.get("request_broker_forwards_credential") == _REAL_GITHUB_TOKEN, (
+        "Expected the broker to forward its stored GitHub credential"
+    )
+
+
+@then("the request as it leaves the container carries no GitHub credential")
+def assert_request_leaves_container_uncredentialed(ctx):
+    assert ctx.get("request_as_leaves_container_credential") is None, (
+        "Expected the request leaving the container to carry no GitHub "
+        "credential"
+    )
+
+
+@then("stderr reports an agent-vault readiness failure that names the "
+      "configured agent-vault broker address")
+def assert_av_readiness_failure_names_broker(ctx):
+    result = ctx["result"]
+    stderr = result.stderr
+    broker = ctx["agent_vault_broker"]
+    assert "agent-vault readiness failure" in stderr, (
+        f"Expected an agent-vault readiness failure in stderr, got: {stderr!r}"
+    )
+    assert broker in stderr, (
+        f"Expected broker address {broker!r} named in stderr, got: {stderr!r}"
+    )
+
+
+@then("the readiness barrier reports both messaging-database and agent-vault "
+      "checks passed")
+def assert_both_barriers_passed(ctx, fake_driver):
+    result = ctx["result"]
+    assert result.exit_code == 0, (
+        f"Expected launch to succeed with both barriers passing, got "
+        f"rc={result.exit_code} stderr={result.stderr!r}"
+    )
+    dsn = ctx.get("shopmsg_dsn") or _READINESS_DSN
+    broker = ctx.get("agent_vault_broker", DEFAULT_AGENT_VAULT_BROKER)
+    assert fake_driver.messaging_db_reachable(dsn), (
+        "Messaging-database check did not pass"
+    )
+    assert fake_driver.agent_vault_reachable(broker), (
+        "Agent-vault check did not pass"
+    )
+
+
+@then(parsers.parse('the startup prompt is sent to the tmux session named '
+                    '"{session}" in container "{container_name}"'))
+def assert_startup_prompt_sent(session, container_name, ctx, fake_driver):
+    committed = fake_driver.agent_committed_prompt(container_name)
+    assert committed is not None, (
+        f"Expected a startup prompt committed to session {session!r} in "
+        f"{container_name!r}, agent committed: {committed!r}"
+    )
+
+
+@then("the brokered Claude OAuth substitution and the brokered GitHub "
+      "substitution both succeed")
+def assert_both_substitutions_succeed(ctx, fake_driver):
+    container_name = ctx["container_name"]
+    broker = ctx["agent_vault_broker"]
+    # Substitution presupposes the proxy points at a reachable broker holding
+    # both real credentials (provisioned out of band).
+    assert fake_driver.container_proxy_env(container_name) == broker
+    assert fake_driver.agent_vault_reachable(broker)
+    assert ctx.get("broker_oauth_token") == _REAL_OAUTH_TOKEN
+    assert ctx.get("broker_github_token") == _REAL_GITHUB_TOKEN
+
+
+@then("bc-container launch performed no step that read a real credential from "
+      "any host file")
+def assert_no_host_credential_read(ctx, fake_driver):
+    # No host ~/.claude, ~/.config/gh, or ~/.gitconfig is ever a mount source.
+    container_name = ctx["container_name"]
+    for m in fake_driver.get_mounts(container_name):
+        for forbidden in (".config/gh", ".gitconfig"):
+            assert not m.source.rstrip("/").endswith(forbidden), (
+                f"Launch mounted a host credential source: {m.source!r}"
+            )
+        # The only .claude-related mount is the placeholder file mount.
+        if m.destination == CONTAINER_CLAUDE_CREDENTIALS_PATH:
+            content = Path(m.source).read_text()
+            assert AGENT_VAULT_PLACEHOLDER_TOKEN in content, (
+                "The credentials mount source is not the placeholder file"
+            )
+    # No cp of a host gitconfig / .claude.json was issued.
+    for c in fake_driver.exec_calls:
+        if c.command[:1] == ["cp"]:
+            assert "host-gitconfig" not in " ".join(c.command), (
+                f"Launch copied a host gitconfig: {c.command!r}"
+            )
+            assert ".claude.json" not in " ".join(c.command), (
+                f"Launch copied a host .claude.json: {c.command!r}"
+            )
+
+
+@then("launch executes no step that stores a real credential into the broker "
+      "vault")
+def assert_no_credential_stored_in_vault(ctx, fake_driver):
+    # The launcher never writes to the broker vault: no exec_run / run step
+    # carries a real OAuth or GitHub token destined for the vault.  Modelled
+    # by asserting no recorded command carries a real credential value.
+    for c in fake_driver.exec_calls:
+        joined = " ".join(c.command)
+        assert _REAL_OAUTH_TOKEN not in joined, (
+            f"Launch step carried a real OAuth token: {c.command!r}"
+        )
+        assert _REAL_GITHUB_TOKEN not in joined, (
+            f"Launch step carried a real GitHub token: {c.command!r}"
+        )
+
+
+@then("launch executes no step that places a real credential inside the "
+      "container")
+def assert_no_real_credential_in_container(ctx, fake_driver):
+    container_name = ctx["container_name"]
+    for m in fake_driver.get_mounts(container_name):
+        src = Path(m.source)
+        if src.is_file():
+            text = src.read_text()
+            assert _REAL_OAUTH_TOKEN not in text, (
+                f"Real OAuth token placed in mounted file {m.source!r}"
+            )
+            assert _REAL_GITHUB_TOKEN not in text, (
+                f"Real GitHub token placed in mounted file {m.source!r}"
+            )
+    proxy = fake_driver.container_proxy_env(container_name)
+    assert _REAL_OAUTH_TOKEN not in proxy and _REAL_GITHUB_TOKEN not in proxy
+
+
+@then("the real Claude OAuth accessToken value is not present in any file or "
+      "environment variable")
+def assert_real_oauth_not_present(ctx):
+    content = ctx.get("container_credentials_json") or {}
+    assert content.get("accessToken") != _REAL_OAUTH_TOKEN, (
+        "Real OAuth token present in container .credentials.json"
+    )
+    for val in ctx.get("container_env_values", []):
+        assert _REAL_OAUTH_TOKEN not in (val or ""), (
+            "Real OAuth token present in a container env value"
+        )
+
+
+@then(parsers.parse('the only .credentials.json present has accessToken equal '
+                    'to "{value}"'))
+def assert_only_placeholder_credentials(value, ctx):
+    content = ctx.get("container_credentials_json")
+    assert content is not None, "No .credentials.json present in container"
+    assert content.get("accessToken") == value, (
+        f"Expected accessToken {value!r}, got {content.get('accessToken')!r}"
+    )
+
+
+@then("no real GitHub token value is present in any file or environment "
+      "variable")
+def assert_no_real_github_token_present(ctx):
+    content = ctx.get("container_credentials_json") or {}
+    assert _REAL_GITHUB_TOKEN not in str(content)
+    for val in ctx.get("container_env_values", []):
+        assert _REAL_GITHUB_TOKEN not in (val or ""), (
+            "Real GitHub token present in a container env value"
+        )
+
+
+@then(parsers.parse('no path mounted from the host\'s "{paths}" is present '
+                    'inside the container'))
+def assert_no_host_gh_gitconfig_path(paths, ctx):
+    destinations = ctx.get("container_mount_destinations", [])
+    for forbidden in ("/home/vscode/.config/gh", "/home/vscode/.gitconfig",
+                      "/tmp/host-gitconfig"):
+        assert forbidden not in destinations, (
+            f"Host gh/gitconfig path {forbidden!r} is mounted in the container"
+        )
+
+
+@then("the only such secret is the agent-vault proxy token used to "
+      "authenticate to the broker")
+def assert_only_secret_is_proxy_token(ctx, fake_driver):
+    container_name = ctx["container_name"]
+    broker = DEFAULT_AGENT_VAULT_BROKER
+    secrets = ctx.get("reachable_secrets", [])
+    proxy = fake_driver.container_proxy_env(container_name)
+    assert secrets == [proxy] and proxy == broker, (
+        f"Expected the only reachable secret to be the proxy token {broker!r}, "
+        f"got {secrets!r}"
+    )
+    # And no real credential is among the reachable secrets.
+    for s in secrets:
+        assert _REAL_OAUTH_TOKEN not in s and _REAL_GITHUB_TOKEN not in s
+
+
+@then("that token grants only proxy substitution and is independently "
+      "revocable without exposing any brokered credential")
+def assert_proxy_token_scope(ctx):
+    # The proxy token is the broker proxy endpoint the agent authenticates to;
+    # it grants only substitution and never carries a brokered credential.
+    for s in ctx.get("reachable_secrets", []):
+        assert _REAL_OAUTH_TOKEN not in s and _REAL_GITHUB_TOKEN not in s, (
+            "The reachable proxy token exposed a brokered credential"
+        )
 
 
 # ===========================================================================

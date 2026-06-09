@@ -32,6 +32,48 @@ AGENT_CONTAINER_USER = "vscode"
 BC_IMAGE = "ghcr.io/dstengle/shopsystem-bc-base:latest"
 SHOPMSG_DSN_ENV = "SHOPMSG_DSN"
 
+# ---------------------------------------------------------------------------
+# Agent-vault credential broker model (ADR-026, lead-hxb8 / lead-v4ih)
+# ---------------------------------------------------------------------------
+#
+# ADR-026 (accepted 2026-06-09) locks the credential disposition: ZERO
+# host-filesystem credential coupling reaches a BC container, for BOTH Claude
+# OAuth and GitHub.  The agent-vault broker is the SOLE credential path; there
+# is no launch-mode flag and no host-mount fallback.
+#
+# The launcher therefore:
+#   * mounts NO host ~/.claude, ~/.config/gh, or ~/.gitconfig into the
+#     container, and never consults BCLAUNCHER_HOST_HOME to resolve a
+#     credential mount source;
+#   * mounts a placeholder-only, read-only .credentials.json whose accessToken
+#     is the literal AGENT_VAULT_PLACEHOLDER_TOKEN — never a real OAuth token;
+#   * wraps the agent invocation as `agent-vault run -- claude`, with
+#     HTTPS_PROXY pointed at the broker's proxy listener on the shopsystem
+#     network, so the broker substitutes the real Claude OAuth and GitHub
+#     credentials on outbound requests (the container never holds them);
+#   * gates launch on an agent_vault_reachable readiness barrier alongside the
+#     messaging-database barrier: the agent engages only when BOTH are
+#     reachable.
+
+# The literal accessToken value baked into the container's placeholder
+# .credentials.json.  Scenarios 3931e43e / e4348b11 pin this exact string.
+AGENT_VAULT_PLACEHOLDER_TOKEN = "__PLACEHOLDER__"
+
+# Container path at which the placeholder Claude credential file lives and the
+# proxy env var the agent-vault run wrapper honours for outbound substitution.
+AGENT_VAULT_PROXY_ENV = "HTTPS_PROXY"
+
+# Default agent-vault broker proxy listener address on the shopsystem network.
+# The broker is provisioned out of band (scenario 2a4e9889); the launcher only
+# needs its proxy-listener address to point HTTPS_PROXY at it and to probe
+# readiness.  Overridable per-launch via the launch() ``agent_vault_broker``
+# argument or the BCLAUNCHER_AGENT_VAULT_BROKER env var.
+DEFAULT_AGENT_VAULT_BROKER = "http://agent-vault:8080"
+AGENT_VAULT_BROKER_ENV = "BCLAUNCHER_AGENT_VAULT_BROKER"
+
+# The container-internal path of the placeholder Claude credentials file.
+CONTAINER_CLAUDE_CREDENTIALS_PATH = "/home/vscode/.claude/.credentials.json"
+
 # Claude Code readiness markers used to sequence prompt injection inside
 # the agent tmux session.  The default tmux session command is bash, so a
 # naïve send-keys of the startup prompt lands in bash and fails as
@@ -283,6 +325,7 @@ class BcContainerController:
         network: str | None = None,
         manifest_path: Path | None = None,
         credential_home: Path | None = None,
+        agent_vault_broker: str | None = None,
         debug: bool = False,
     ) -> CommandResult:
         """
@@ -297,18 +340,25 @@ class BcContainerController:
            network name.  If the network does not yet exist, create it first.
         3. If neither source is available, return a non-zero error.
 
-        Credential propagation:
-        The following host paths are bind-mounted into the container so that
-        Claude and GitHub credentials are available to the agent:
-          - $HOME/.claude       → /home/vscode/.claude        (read-write)
-          - $HOME/.config/gh    → /home/vscode/.config/gh     (read-write)
-          - $HOME/.gitconfig    → /tmp/host-gitconfig          (read-only)
-        After container start, the controller copies:
-          - /tmp/host-gitconfig → /home/vscode/.gitconfig
-          - /home/vscode/.claude/.claude.json → /home/vscode/.claude.json
-        All three host paths must exist; if any is missing the launch fails fast.
-        ``credential_home`` overrides the home directory used for these paths
-        (useful in tests).
+        Credential model (ADR-026 — agent-vault broker, the SOLE path):
+        NO host credential directory or file is bind-mounted into the
+        container.  ``BCLAUNCHER_HOST_HOME`` is not consulted to resolve any
+        credential mount source.  Instead:
+          - a placeholder-only, read-only ``.credentials.json`` is mounted at
+            ``/home/vscode/.claude/.credentials.json`` whose ``accessToken`` is
+            the literal ``"__PLACEHOLDER__"`` (never a real OAuth token);
+          - the agent is invoked wrapped as ``agent-vault run -- claude`` with
+            ``HTTPS_PROXY`` pointed at the broker's proxy listener on the
+            shopsystem network, so the broker substitutes the real Claude OAuth
+            and GitHub credentials on outbound requests — the container itself
+            never holds them.
+        Launch is gated on an ``agent_vault_reachable`` readiness barrier
+        (alongside the messaging-database barrier): the agent is engaged only
+        when BOTH the messaging database AND the agent-vault broker are
+        reachable.  ``agent_vault_broker`` overrides the broker proxy address
+        (falling back to ``BCLAUNCHER_AGENT_VAULT_BROKER`` then the default).
+        ``credential_home`` is retained only for staging the placeholder file
+        in tests; no host credential is read from it.
         """
         container = _container_name(bc_name)
 
@@ -355,52 +405,55 @@ class BcContainerController:
         if auto_create_network and not self._driver.network_exists(resolved_network):
             self._driver.network_create(resolved_network)
 
-        # --- Credential path resolution ---
-        home = credential_home if credential_home is not None else Path.home()
-        claude_dir = home / ".claude"
-        gh_config_dir = home / ".config" / "gh"
-        # shopsystem-devcontainer bind-mounts the host's gitconfig at
-        # /tmp/host-gitconfig; prefer that when present so we have a path the
-        # host docker daemon can resolve via /proc/self/mountinfo translation.
-        _staged_gitconfig = Path("/tmp/host-gitconfig")
-        if credential_home is None and _staged_gitconfig.is_file():
-            gitconfig_file = _staged_gitconfig
-        else:
-            gitconfig_file = home / ".gitconfig"
-
-        # Fail fast if any default credential source is missing
-        for host_path, display_name in [
-            (claude_dir, "$HOME/.claude"),
-            (gh_config_dir, "$HOME/.config/gh"),
-            (gitconfig_file, "$HOME/.gitconfig"),
-        ]:
-            if not host_path.exists():
-                return CommandResult(
-                    exit_code=1,
-                    stdout="",
-                    stderr=f"credential source not found: {display_name}\n",
-                )
+        # --- Agent-vault broker resolution (ADR-026) ---
+        # No host credential path is resolved; the broker is the sole
+        # credential path.  Resolve the broker's proxy-listener address from
+        # the explicit arg, then the env override, then the default.
+        broker_address = (
+            agent_vault_broker
+            or os.environ.get(AGENT_VAULT_BROKER_ENV)
+            or DEFAULT_AGENT_VAULT_BROKER
+        )
 
         # Build environment
         env: dict[str, str] = {}
-        # The BC image runs as root by default, but credentials live under
-        # /home/vscode/.  Point HOME at vscode's home so gh / git find their
-        # configs without permission games.
         env["HOME"] = "/home/vscode"
+        # Route the agent's outbound HTTPS through the agent-vault broker's
+        # proxy listener so the broker substitutes the real Claude OAuth and
+        # GitHub credentials; the container itself carries none.
+        env[AGENT_VAULT_PROXY_ENV] = broker_address
         if shopmsg_dsn:
             env[SHOPMSG_DSN_ENV] = shopmsg_dsn
         elif dsn := os.environ.get(SHOPMSG_DSN_ENV):
             env[SHOPMSG_DSN_ENV] = dsn
 
-        # Mounts: credential mounts + optional SHOPMSG socket
+        # --- Placeholder Claude credential file (read-only) ---
+        # Stage a placeholder-only .credentials.json whose accessToken is the
+        # literal "__PLACEHOLDER__" and mount it READ-ONLY into the container.
+        # This satisfies any tooling that expects the file to exist while
+        # guaranteeing no real OAuth token is ever placed inside the container
+        # (scenarios 3931e43e / e4348b11).  The real credential is held only by
+        # the broker, provisioned out of band.
+        import json
+        import tempfile
+        staging_root = (
+            credential_home if credential_home is not None
+            else Path(tempfile.mkdtemp(prefix="bclauncher-placeholder-"))
+        )
+        placeholder_path = staging_root / ".agent-vault-credentials.json"
+        placeholder_path.write_text(
+            json.dumps({"accessToken": AGENT_VAULT_PLACEHOLDER_TOKEN})
+        )
+
+        # Mounts: placeholder credential file (read-only) + optional SHOPMSG socket
         # Each entry: (type, source, dest, readonly)
         mounts: list[tuple[str, str, str, bool]] = []
-
-        # Credential bind mounts — translate to host paths when running inside
-        # a devcontainer (the host docker daemon needs host-visible sources).
-        mounts.append(("bind", str(_resolve_host_path(claude_dir)), "/home/vscode/.claude", False))
-        mounts.append(("bind", str(_resolve_host_path(gh_config_dir)), "/home/vscode/.config/gh", False))
-        mounts.append(("bind", str(_resolve_host_path(gitconfig_file)), "/tmp/host-gitconfig", True))
+        mounts.append((
+            "bind",
+            str(_resolve_host_path(placeholder_path)),
+            CONTAINER_CLAUDE_CREDENTIALS_PATH,
+            True,
+        ))
 
         # SHOPMSG_DSN may be a postgres DSN (no socket mount needed) or a
         # unix socket path.  If the DSN value looks like a socket file, add a
@@ -445,34 +498,10 @@ class BcContainerController:
         out_lines: list[str] = [f"Started container {container}\n"]
         err_lines: list[str] = []
 
-        # Copy staged gitconfig into container user's home.
-        # Run as vscode so the destination file is owned by vscode — root-owned
-        # files under /home/vscode/ break vscode's gh / git credential reads
-        # (lead-d64 reproduction: `stat -c '%U' /home/vscode/.gitconfig` returned
-        # `root`, causing tooling that reads ~/.gitconfig to bypass it).
-        self._driver.exec_run(
-            container,
-            ["cp", "/tmp/host-gitconfig", "/home/vscode/.gitconfig"],
-            user=AGENT_CONTAINER_USER,
-        )
-        out_lines.append("Copied host gitconfig into container\n")
-
-        # Copy .claude.json from mounted ~/.claude into container user's home root,
-        # but only if the host file exists.  Missing .claude.json is non-fatal:
-        # warn to stderr and proceed (brief 007 minimum-friction posture).
-        # Same vscode-ownership requirement as the gitconfig copy above.
-        claude_json_file = home / ".claude" / ".claude.json"
-        if claude_json_file.exists():
-            self._driver.exec_run(
-                container,
-                ["cp", "/home/vscode/.claude/.claude.json", "/home/vscode/.claude.json"],
-                user=AGENT_CONTAINER_USER,
-            )
-            out_lines.append("Copied .claude.json into container home\n")
-        else:
-            err_lines.append(
-                f"warning: .claude.json not found; skipping copy into container\n"
-            )
+        # ADR-026: NO host gitconfig or .claude.json is copied into the
+        # container.  GitHub and git identity flow through the agent-vault
+        # broker on outbound requests; the only Claude credential file present
+        # is the placeholder .credentials.json mounted read-only above.
 
         # Clone repository if URL provided
         if repo_url:
@@ -601,15 +630,44 @@ class BcContainerController:
                     stderr="".join(err_lines),
                 )
 
-            # Step 1: start Claude Code with --dangerously-skip-permissions.
-            # The BC container is the isolation boundary the permission
-            # prompts are meant to substitute for; bypassing them inside
-            # this container prevents the agent from hanging on permission
-            # gates that have no operator at the other end.
+            # Readiness barrier — agent-vault broker reachability (ADR-026).
+            #
+            # The agent's Claude OAuth and GitHub credentials are substituted
+            # by the agent-vault broker on outbound requests; an agent whose
+            # broker is unreachable can authenticate to nothing.  This barrier
+            # fires BEFORE any Claude Code start / prompt injection: on failure
+            # we return non-zero with a stderr line naming the configured
+            # broker address and send NOTHING to the tmux session.  Combined
+            # with the messaging-DB barrier above, the agent engages only when
+            # BOTH the messaging database AND the agent-vault broker are
+            # reachable (scenarios f73afae0 / 64aaff80 / 6cb07698).
+            if not self._driver.agent_vault_reachable(broker_address):
+                err_lines.append(
+                    f"agent-vault readiness failure: agent-vault broker at "
+                    f"{broker_address} is not reachable; "
+                    f"startup prompt NOT injected\n"
+                )
+                return CommandResult(
+                    exit_code=1,
+                    stdout="".join(out_lines),
+                    stderr="".join(err_lines),
+                )
+
+            # Step 1: start Claude Code, wrapped as `agent-vault run -- claude`
+            # (ADR-026).  agent-vault run establishes the proxy substitution
+            # context (HTTPS_PROXY is already exported into the container env
+            # pointing at the broker) so the broker injects the real Claude
+            # OAuth / GitHub credentials on outbound requests; the container
+            # holds only the placeholder.  --dangerously-skip-permissions is
+            # passed through to claude: the BC container is the isolation
+            # boundary the permission prompts substitute for, so bypassing
+            # them inside the container prevents the agent from hanging on
+            # permission gates that have no operator at the other end.
             self._driver.exec_run(
                 container,
                 ["tmux", "send-keys", "-t", AGENT_TMUX_SESSION,
-                 "claude --dangerously-skip-permissions", "Enter"],
+                 "agent-vault run -- claude --dangerously-skip-permissions",
+                 "Enter"],
                 user=AGENT_CONTAINER_USER,
             )
             # Step 2: wait for the PRE-trust workspace-trust banner.
