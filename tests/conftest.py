@@ -4358,6 +4358,15 @@ def when_ca_trust_script_inspected(ctx):
     ctx["ca_trust_script"] = _ca_trust_script_path()
 
 
+# agent-vault is an EXTERNAL Infisical project distributed as a Go-binary
+# release tarball (NOT a pip package, NOT a dstengle repo).  The bc-base image
+# installs it from the Infisical/agent-vault releases mirroring the bd binary
+# block: arch case, curl download, checksum verification against checksums.txt,
+# tarball extract, install onto PATH.  The pin is EXPLICIT (v0.32.0) so the BC
+# binary stays compatible with the running broker (which reports 0.32.0).
+_AGENT_VAULT_AUTH_VERSION = "0.32.0"
+
+
 @then("the Dockerfile installs the agent-vault binary with a version pin present")
 def then_agent_vault_installed_pinned(ctx):
     dockerfile = ctx.get("bc_base_dockerfile")
@@ -4366,20 +4375,122 @@ def then_agent_vault_installed_pinned(ctx):
     assert "agent-vault" in text, (
         "bc-base Dockerfile does not install agent-vault"
     )
-    # Structural: assert a version pin is PRESENT alongside an agent-vault
-    # install line, regardless of the exact (PROVISIONAL) value.  Accept either
-    # the pip VCS-pin idiom (...@vMAJOR.MINOR.PATCH) or a Go-binary release pin
-    # (AGENT_VAULT_VERSION=MAJOR.MINOR.PATCH), mirroring the bd binary block.
-    pip_pin = re.search(
-        r"agent-vault[^\n]*@v\d+\.\d+\.\d+", text
+
+    ver = _AGENT_VAULT_AUTH_VERSION  # "0.32.0"
+
+    # (1) AUTHORITATIVE SOURCE: the Infisical/agent-vault GitHub releases — NOT
+    # a dstengle repo, NOT a pip/PyPI install.
+    assert "github.com/Infisical/agent-vault" in text, (
+        "bc-base Dockerfile does not install agent-vault from the authoritative "
+        "github.com/Infisical/agent-vault releases.\n"
+        f"Dockerfile content:\n{text}"
     )
-    version_var_pin = re.search(
-        r"AGENT_VAULT_VERSION\s*=\s*v?\d+\.\d+\.\d+", text
+    assert not re.search(r"github\.com/dstengle/agent-vault", text), (
+        "bc-base Dockerfile still installs agent-vault from a dstengle repo "
+        "(provisional pip VCS-pin); agent-vault is an external Infisical project."
     )
-    assert pip_pin or version_var_pin, (
-        "bc-base Dockerfile installs agent-vault WITHOUT a version pin present "
-        "(expected either '<pkg> @ ...@vMAJOR.MINOR.PATCH' or "
-        "'AGENT_VAULT_VERSION=MAJOR.MINOR.PATCH').\n"
+    assert not re.search(r"pip install[^\n]*agent-vault", text), (
+        "bc-base Dockerfile pip-installs agent-vault; it is a Go-binary release "
+        "tarball, not a pip package."
+    )
+
+    # (2) EXPLICIT v0.32.0 PIN (matches the running broker) — NOT 'latest'.
+    assert re.search(
+        r"AGENT_VAULT_VERSION\s*=\s*v?" + re.escape(ver) + r"\b", text
+    ), (
+        f"bc-base Dockerfile does not pin agent-vault to v{ver} explicitly "
+        "(expected 'AGENT_VAULT_VERSION=" + ver + "' matching the broker).\n"
+        f"Dockerfile content:\n{text}"
+    )
+    # The release download base must carry the explicit pin, and the
+    # arch-appropriate tarball names must be assembled from it.  Accept either a
+    # literal URL or the bd-style composed form (base + tarball name from shell
+    # vars), since the install block mirrors the bd binary block's structure.
+    assert (
+        f"github.com/Infisical/agent-vault/releases/download/v{ver}" in text
+    ), (
+        f"bc-base Dockerfile does not reference the explicit v{ver} agent-vault "
+        "release download base.\n"
+        f"Dockerfile content:\n{text}"
+    )
+    for arch in ("amd64", "arm64"):
+        # Either the literal pinned tarball name, or a composed
+        # agent-vault_${VERSION}_linux_${ARCH}.tar.gz form whose ARCH case maps
+        # the uname value to this arch.
+        literal = f"agent-vault_{ver}_linux_{arch}.tar.gz" in text
+        composed = (
+            re.search(r"agent-vault_\$\{?[A-Z_]*VERSION", text) is not None
+            and re.search(r"linux_\$\{?AV_ARCH", text) is not None
+            and re.search(rf'\b{arch}\b', text) is not None
+        )
+        assert literal or composed, (
+            f"bc-base Dockerfile is missing the explicit v{ver} {arch} release "
+            "tarball for agent-vault (neither a literal pinned URL nor a "
+            "composed agent-vault_${VERSION}_linux_${ARCH}.tar.gz with an "
+            f"{arch} arch case).\n"
+            f"Dockerfile content:\n{text}"
+        )
+    # 'latest' must NOT be used for the agent-vault install (broker-compat pin).
+    av_block = re.search(
+        r"agent-vault.*?(?=\n# |\Z)", text, re.DOTALL
+    )
+    assert av_block is not None
+    assert not re.search(
+        r"agent-vault[^\n]*releases/(latest|download/latest)", text
+    ), (
+        "bc-base Dockerfile uses 'latest' for the agent-vault release; the pin "
+        "must be explicit (v" + ver + ") to stay broker-compatible."
+    )
+
+    # (3) CHECKSUM VERIFICATION against checksums.txt BEFORE extraction.
+    # The checksums.txt must come from the same pinned v0.32.0 release (either a
+    # literal URL or composed from the pinned release base + "checksums.txt").
+    literal_checksums = (
+        f"github.com/Infisical/agent-vault/releases/download/v{ver}/checksums.txt"
+        in text
+    )
+    composed_checksums = "checksums.txt" in text and (
+        f"github.com/Infisical/agent-vault/releases/download/v{ver}" in text
+    )
+    assert literal_checksums or composed_checksums, (
+        "bc-base Dockerfile does not fetch the agent-vault checksums.txt for "
+        f"v{ver} to verify the tarball before extraction.\n"
+        f"Dockerfile content:\n{text}"
+    )
+    # Scope the verify/extract ordering check to the agent-vault RUN block so
+    # the bd binary block's own `tar -xz` is not mistaken for the agent-vault
+    # extraction.  The block runs from the AGENT_VAULT_VERSION assignment up to
+    # the build-time `agent-vault --version` sanity check.
+    block_m = re.search(
+        r"AGENT_VAULT_VERSION\s*=.*?agent-vault\s+--version", text, re.DOTALL
+    )
+    assert block_m is not None, (
+        "bc-base Dockerfile has no agent-vault install RUN block bounded by "
+        "AGENT_VAULT_VERSION=... and a build-time 'agent-vault --version' check."
+    )
+    block = block_m.group(0)
+    check_m = re.search(r"sha256sum[^\n]*(-c|--check)", block)
+    assert check_m, (
+        "bc-base Dockerfile does not verify the agent-vault tarball sha256 "
+        "against checksums.txt (expected a 'sha256sum -c' check) before extract."
+    )
+    # Ordering: the checksum verification must precede the tarball extraction.
+    extract_m = re.search(r"tar\s+-x", block)
+    assert extract_m is not None, (
+        "bc-base Dockerfile does not extract the agent-vault tarball."
+    )
+    assert check_m.start() < extract_m.start(), (
+        "bc-base Dockerfile extracts the agent-vault tarball BEFORE verifying "
+        "its sha256 against checksums.txt; verification must come first."
+    )
+
+    # (4) BINARY LANDS ON PATH: install the extracted agent-vault binary into a
+    # PATH dir (mirroring the bd block's install into /usr/local/bin).
+    assert re.search(
+        r"install\s+-m\s*0755[^\n]*agent-vault[^\n]*/usr/local/bin", text
+    ), (
+        "bc-base Dockerfile does not install the agent-vault binary onto PATH "
+        "(expected 'install -m 0755 <...>agent-vault /usr/local/bin').\n"
         f"Dockerfile content:\n{text}"
     )
 

@@ -32,18 +32,34 @@ RUN pip install --no-cache-dir \
 # agent-vault — the in-container broker client (bclaunch-9rr). The agent runs
 # wrapped as `agent-vault run -- claude`; agent-vault establishes the proxy
 # substitution context so the broker injects the real Claude OAuth / GitHub
-# credentials on outbound requests. Installed from the dstengle framework-CLI
-# VCS-pin idiom, version-pinned for content-addressable / reproducible images.
+# credentials on outbound requests.
 #
-# PROVISIONAL: confirm agent-vault source+version (held for operator confirmation)
-# The authoritative agent-vault source repo + released version are NOT yet
-# confirmed (no repo hints; broker exposes no version endpoint; docker CLI
-# absent; no GitHub access). This pin uses the dstengle VCS-pin shape as the
-# most plausible source and a placeholder version; the value is held for
-# operator confirmation. The structural test asserts only that a version pin is
-# PRESENT, so a legitimate confirmed value does not break the test.
-RUN pip install --no-cache-dir \
-    "agent-vault @ git+https://github.com/dstengle/agent-vault.git@v0.1.0"
+# agent-vault is an EXTERNAL Infisical project distributed as a Go-binary
+# release tarball (NOT pip-installable, NOT a dstengle repo). It is installed
+# from the Infisical/agent-vault releases exactly like the bd binary below:
+# uname -m → ARCH case, curl download, checksum verification against the
+# release checksums.txt, extract, install onto PATH, version sanity check.
+#
+# The pin is EXPLICIT (v0.32.0), matching the running broker, which reports
+# "agent-vault version 0.32.0" (also current latest). 'latest' is NOT used:
+# the in-container BC binary must stay broker-compatible.
+RUN set -e && \
+    ARCH=$(uname -m) && \
+    case "$ARCH" in \
+        x86_64)  AV_ARCH="amd64" ;; \
+        aarch64) AV_ARCH="arm64" ;; \
+        *)       echo "Unsupported architecture: $ARCH" && exit 1 ;; \
+    esac && \
+    AGENT_VAULT_VERSION=0.32.0 && \
+    AV_BASE="https://github.com/Infisical/agent-vault/releases/download/v0.32.0" && \
+    AV_TARBALL="agent-vault_${AGENT_VAULT_VERSION}_linux_${AV_ARCH}.tar.gz" && \
+    curl -fsSL "${AV_BASE}/${AV_TARBALL}" -o "/tmp/${AV_TARBALL}" && \
+    curl -fsSL "${AV_BASE}/checksums.txt" -o /tmp/agent-vault-checksums.txt && \
+    (cd /tmp && grep " ${AV_TARBALL}\$" agent-vault-checksums.txt | sha256sum -c -) && \
+    tar -xzf "/tmp/${AV_TARBALL}" -C /tmp && \
+    install -m 0755 /tmp/agent-vault /usr/local/bin/agent-vault && \
+    rm -f "/tmp/${AV_TARBALL}" /tmp/agent-vault-checksums.txt /tmp/agent-vault && \
+    agent-vault --version
 
 # beads (bd) — third-party Go binary from steveyegge/beads releases (NOT pip-installable)
 RUN set -e && \
