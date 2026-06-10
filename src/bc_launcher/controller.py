@@ -472,6 +472,17 @@ class BcContainerController:
         if resolved_av_vault:
             env[AGENT_VAULT_VAULT_ENV] = resolved_av_vault
 
+        # --- Broker CA TLS-trust env (bclaunch-7pf) ---
+        # When the operator supplies a broker CA, point node (claude), python
+        # and git at the fixed container path the CA will be mounted at below,
+        # so HTTPS calls through the broker's MITM proxy pass cert
+        # verification.  Only set these when a CA is supplied; the mount that
+        # backs them is added to ``mounts`` further down.
+        if agent_vault_ca is not None:
+            env[NODE_EXTRA_CA_CERTS_ENV] = CONTAINER_BROKER_CA_PATH
+            env[SSL_CERT_FILE_ENV] = CONTAINER_BROKER_CA_PATH
+            env[GIT_SSL_CAINFO_ENV] = CONTAINER_BROKER_CA_PATH
+
         if shopmsg_dsn:
             env[SHOPMSG_DSN_ENV] = shopmsg_dsn
         elif dsn := os.environ.get(SHOPMSG_DSN_ENV):
@@ -504,6 +515,19 @@ class BcContainerController:
             CONTAINER_CLAUDE_CREDENTIALS_PATH,
             True,
         ))
+
+        # Broker CA mount (bclaunch-7pf).  Bind-mount the operator-supplied
+        # broker CA file READ-ONLY at the fixed container path the TLS-trust
+        # env vars (set above) point at.  Use _resolve_host_path on the mount
+        # source so a CA path valid inside a bind-mounted devcontainer resolves
+        # to its host-visible source, exactly as the placeholder file does.
+        if agent_vault_ca is not None:
+            mounts.append((
+                "bind",
+                str(_resolve_host_path(Path(agent_vault_ca))),
+                CONTAINER_BROKER_CA_PATH,
+                True,
+            ))
 
         # SHOPMSG_DSN may be a postgres DSN (no socket mount needed) or a
         # unix socket path.  If the DSN value looks like a socket file, add a
