@@ -132,6 +132,21 @@ RUN chmod 0755 /usr/local/bin/agent-vault-ca.sh \
     && cp /usr/local/bin/agent-vault-ca.sh /etc/profile.d/agent-vault-ca.sh \
     && chmod 0644 /etc/profile.d/agent-vault-ca.sh
 
+# In-container HEALTHCHECK probe (bclaunch-wuo). The script TCP-probes the two
+# services a BC strictly depends on — the agent-vault broker (host:port parsed
+# from the in-container HTTPS_PROXY proxy-listener address, fallback
+# AGENT_VAULT_ADDR) and the messaging database (host:port parsed from
+# SHOPMSG_DSN) — and exits 0 (healthy) / 1 (unhealthy). Docker surfaces that
+# exit code as .State.Health.Status, which the host reads via docker inspect.
+# Without this instruction the image carried no .State.Health and docker
+# inspect reported "none", so the unhealthy-when-broker-down behavior was
+# fake-driver-only. The probe targets are RUNTIME env (operator-supplied at
+# `docker run -e`), so they are read at probe time, not baked.
+COPY bc-healthcheck.sh /usr/local/bin/bc-healthcheck.sh
+RUN chmod 0755 /usr/local/bin/bc-healthcheck.sh
+HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
+    CMD ["/usr/local/bin/bc-healthcheck.sh"]
+
 WORKDIR /workspace
 
 ENTRYPOINT ["/usr/local/bin/agent-vault-ca.sh"]

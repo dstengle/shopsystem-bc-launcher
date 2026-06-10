@@ -4731,3 +4731,225 @@ def then_dockerfile_declares_entrypoint(ctx):
     assert "agent-vault" in text, (
         "bc-base ENTRYPOINT does not reference the agent-vault CA script"
     )
+
+
+# ===========================================================================
+# bc-base HEALTHCHECK structural pinning (bclaunch-wuo)
+#
+# The real bc-base image previously carried NO HEALTHCHECK instruction, so
+# RealDockerDriver.health_status (docker inspect .State.Health.Status) always
+# read "none" — the broker-down / DB-down "unhealthy" behavior pinned by lead
+# scenario 3b2a81c1bfe2897e and the messaging-db health scenarios was fake-only.
+# These steps parse the COMMITTED Dockerfile HEALTHCHECK directive and the
+# committed bc-healthcheck.sh probe-script content (docker build is NOT run),
+# asserting on the ACTUAL probe targets so a no-op or wrong-target HEALTHCHECK
+# fails. Same structural-inspection idiom as the CA-trust / CLI-pin tests.
+# ===========================================================================
+
+# The in-container env vars the probe MUST read its targets from. These are the
+# same env keys controller.launch injects (HTTPS_PROXY = AGENT_VAULT_PROXY_ENV,
+# SHOPMSG_DSN). If the probe read a different/static target the assertions below
+# would fail — that is what keeps this pinning non-tautological.
+_HEALTHCHECK_BROKER_ENV = "HTTPS_PROXY"
+_HEALTHCHECK_DB_ENV = "SHOPMSG_DSN"
+
+
+def _healthcheck_script_path() -> Path | None:
+    """Return the committed bc-base HEALTHCHECK probe script, or None."""
+    candidate = _bc_base_dir() / "bc-healthcheck.sh"
+    return candidate if candidate.is_file() else None
+
+
+def _strip_sh_comments(body: str) -> str:
+    """Return the probe-script body with whole-line and trailing # comments
+    removed, so env-derivation assertions match EXECUTABLE code rather than a
+    mention of the env var in a comment. A heredoc-embedded python block uses
+    the same '#' comment char, so this is a coarse strip that drops any text
+    from an unquoted '#' to end-of-line; that is sufficient because the
+    assertions only need the var to appear in a real assignment/expansion, and
+    a wrong-target mutation that hard-codes the address would no longer have the
+    env var in executable code."""
+    out_lines = []
+    for line in body.splitlines():
+        stripped = line.lstrip()
+        if stripped.startswith("#"):
+            continue
+        # Drop trailing comments (best-effort; the probe script does not use
+        # '#' inside quoted strings on its executable lines).
+        hash_idx = line.find("#")
+        if hash_idx != -1:
+            line = line[:hash_idx]
+        out_lines.append(line)
+    return "\n".join(out_lines)
+
+
+def _dockerfile_healthcheck_directive(text: str) -> str | None:
+    """Extract the HEALTHCHECK instruction body (including line continuations).
+
+    Returns the full directive text after the HEALTHCHECK keyword (joining
+    backslash-continued lines), or None if no HEALTHCHECK instruction is
+    present.
+    """
+    lines = text.splitlines()
+    for i, line in enumerate(lines):
+        if re.match(r"^\s*HEALTHCHECK\b", line):
+            collected = [line]
+            j = i
+            while collected[-1].rstrip().endswith("\\") and j + 1 < len(lines):
+                j += 1
+                collected.append(lines[j])
+            joined = " ".join(c.rstrip().rstrip("\\").strip() for c in collected)
+            return re.sub(r"^\s*HEALTHCHECK\s*", "", joined)
+    return None
+
+
+@when("the bc-base healthcheck probe script content is inspected")
+def when_healthcheck_probe_script_inspected(ctx):
+    ctx["bc_base_dockerfile"] = _find_bc_base_dockerfile()
+    ctx["healthcheck_script"] = _healthcheck_script_path()
+
+
+@then("the Dockerfile declares a HEALTHCHECK instruction")
+def then_dockerfile_declares_healthcheck(ctx):
+    dockerfile = ctx.get("bc_base_dockerfile")
+    assert dockerfile is not None, "No bc-base Dockerfile found"
+    text = dockerfile.read_text()
+    directive = _dockerfile_healthcheck_directive(text)
+    assert directive is not None, (
+        "bc-base Dockerfile declares no HEALTHCHECK instruction; without one "
+        ".State.Health is absent and docker inspect reports 'none', so the "
+        "unhealthy-when-broker-down behavior is fake-driver-only."
+    )
+    ctx["healthcheck_directive"] = directive
+
+
+@then("the HEALTHCHECK command runs the in-container bc-healthcheck probe script")
+def then_healthcheck_runs_probe_script(ctx):
+    directive = ctx.get("healthcheck_directive")
+    if directive is None:
+        text = ctx["bc_base_dockerfile"].read_text()
+        directive = _dockerfile_healthcheck_directive(text)
+    assert directive is not None, "No HEALTHCHECK directive present"
+    # The HEALTHCHECK must invoke the committed probe script, not an inline
+    # one-liner that could silently drift from the script the script-content
+    # scenarios pin. Assert the actual probe-script path appears in the CMD.
+    assert "bc-healthcheck.sh" in directive, (
+        "bc-base HEALTHCHECK does not run the bc-healthcheck.sh probe script; "
+        f"directive was: {directive!r}"
+    )
+    # And the probe script must actually be present in the image (a COPY of it).
+    text = ctx["bc_base_dockerfile"].read_text()
+    assert re.search(r"COPY\s+bc-healthcheck\.sh\s+\S+", text), (
+        "bc-base Dockerfile HEALTHCHECK references bc-healthcheck.sh but the "
+        "Dockerfile never COPYs the script into the image."
+    )
+    script = _healthcheck_script_path()
+    assert script is not None, (
+        "bc-base HEALTHCHECK references bc-healthcheck.sh but no such committed "
+        "script exists under docker/bc-base/."
+    )
+
+
+@then("the HEALTHCHECK is not a no-op that always reports healthy")
+def then_healthcheck_not_noop(ctx):
+    directive = ctx.get("healthcheck_directive")
+    if directive is None:
+        text = ctx["bc_base_dockerfile"].read_text()
+        directive = _dockerfile_healthcheck_directive(text)
+    assert directive is not None, "No HEALTHCHECK directive present"
+    lowered = directive.lower()
+    # A HEALTHCHECK that hard-codes success (CMD true / CMD exit 0 / CMD :)
+    # would make the container report healthy unconditionally — defeating the
+    # broker-down / DB-down detection. Reject those no-op shapes outright.
+    assert not re.search(r"\bcmd\b\s+\[?\s*[\"']?(true|:|exit\s+0)\b", lowered), (
+        "bc-base HEALTHCHECK is a no-op that always succeeds; it must probe "
+        f"the broker and messaging-db reachability. Directive: {directive!r}"
+    )
+    # The probe script the directive runs must itself exercise a real probe.
+    script = _healthcheck_script_path()
+    assert script is not None, "No bc-healthcheck.sh probe script found"
+    body = script.read_text()
+    assert "exit 0" in body and "exit 1" in body, (
+        "bc-healthcheck.sh never differentiates healthy (exit 0) from "
+        "unhealthy (exit 1); a probe that cannot fail is a no-op."
+    )
+
+
+@then("the probe derives the agent-vault broker address from the in-container "
+      "HTTPS_PROXY env var")
+def then_probe_broker_from_https_proxy(ctx):
+    script = ctx.get("healthcheck_script") or _healthcheck_script_path()
+    assert script is not None, "No bc-healthcheck.sh probe script found"
+    code = _strip_sh_comments(script.read_text())
+    # The broker target must come from the runtime HTTPS_PROXY env var (the
+    # address the container actually routes outbound HTTPS through), NOT a
+    # baked literal. Assert EXECUTABLE code expands ${HTTPS_PROXY} — a comment
+    # mention is stripped, so a wrong-target probe that hard-codes a host:port
+    # would fail here even though its comment still says "HTTPS_PROXY".
+    assert re.search(r"\$\{?" + _HEALTHCHECK_BROKER_ENV + r"\b", code), (
+        f"bc-healthcheck.sh does not expand ${_HEALTHCHECK_BROKER_ENV} in "
+        "executable code; the broker target must be the runtime proxy-listener "
+        "address the container routes through, not a baked literal."
+    )
+
+
+@then("the probe attempts a TCP connect against the broker host and port")
+def then_probe_tcp_connect_broker(ctx):
+    script = ctx.get("healthcheck_script") or _healthcheck_script_path()
+    assert script is not None, "No bc-healthcheck.sh probe script found"
+    body = script.read_text()
+    # The reachability check must be a real TCP connect against the parsed
+    # host:port, mirroring RealDockerDriver.agent_vault_reachable. A probe that
+    # merely echoes a string is tautological.
+    assert "create_connection" in body, (
+        "bc-healthcheck.sh does not perform a TCP connect (socket."
+        "create_connection) against the broker host:port; a probe that does "
+        "not actually connect cannot detect an unreachable broker."
+    )
+    # The host:port must be PARSED out of the address (urlparse), not assumed.
+    assert "urlparse" in body or re.search(r"hostname|\.port\b", body), (
+        "bc-healthcheck.sh does not parse a host:port out of the broker "
+        "address; it must derive host and port from the env-supplied address."
+    )
+
+
+@then("the probe exits non-zero when the broker is unreachable")
+def then_probe_exits_nonzero_broker_down(ctx):
+    script = ctx.get("healthcheck_script") or _healthcheck_script_path()
+    assert script is not None, "No bc-healthcheck.sh probe script found"
+    body = script.read_text()
+    # A failed broker TCP connect must drive a non-zero exit (-> docker reports
+    # unhealthy). Assert the broker branch exits 1 on failure.
+    assert re.search(r"broker[^\n]*\n[^\n]*exit 1", body) or (
+        "broker unreachable" in body and "exit 1" in body
+    ), (
+        "bc-healthcheck.sh does not exit non-zero when the broker is "
+        "unreachable; docker would then report the container healthy with a "
+        "dead broker (the exact fake-only gap this pins)."
+    )
+
+
+@then("the probe derives the messaging database address from the SHOPMSG_DSN "
+      "env var")
+def then_probe_db_from_shopmsg_dsn(ctx):
+    script = ctx.get("healthcheck_script") or _healthcheck_script_path()
+    assert script is not None, "No bc-healthcheck.sh probe script found"
+    code = _strip_sh_comments(script.read_text())
+    assert re.search(r"\$\{?" + _HEALTHCHECK_DB_ENV + r"\b", code), (
+        f"bc-healthcheck.sh does not expand ${_HEALTHCHECK_DB_ENV} in "
+        "executable code; the DB target must be the runtime DSN, not a baked "
+        "literal."
+    )
+
+
+@then("the probe exits non-zero when the messaging database is unreachable")
+def then_probe_exits_nonzero_db_down(ctx):
+    script = ctx.get("healthcheck_script") or _healthcheck_script_path()
+    assert script is not None, "No bc-healthcheck.sh probe script found"
+    body = script.read_text()
+    assert re.search(r"database[^\n]*\n[^\n]*exit 1", body) or (
+        "messaging database unreachable" in body and "exit 1" in body
+    ), (
+        "bc-healthcheck.sh does not exit non-zero when the messaging database "
+        "is unreachable."
+    )
