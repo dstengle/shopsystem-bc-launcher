@@ -71,6 +71,32 @@ AGENT_VAULT_PROXY_ENV = "HTTPS_PROXY"
 DEFAULT_AGENT_VAULT_BROKER = "http://agent-vault:14321"
 AGENT_VAULT_BROKER_ENV = "BCLAUNCHER_AGENT_VAULT_BROKER"
 
+# ---------------------------------------------------------------------------
+# Operator-supplied agent-vault credential + TLS-trust injection
+# (bclaunch-5hi / bclaunch-7pf)
+# ---------------------------------------------------------------------------
+#
+# The in-container `agent-vault run` client authenticates to the broker using
+# an addr + token + vault triple.  These are OPERATOR-SUPPLIED at launch (from
+# the CLI --env-file / process env / launch() params) and are injected into
+# the container env under these names.  The TOKEN value is NEVER a literal
+# baked into source — the only credential literal permitted in src/ is the
+# AGENT_VAULT_PLACEHOLDER_TOKEN above.
+AGENT_VAULT_ADDR_ENV = "AGENT_VAULT_ADDR"
+AGENT_VAULT_TOKEN_ENV = "AGENT_VAULT_TOKEN"
+AGENT_VAULT_VAULT_ENV = "AGENT_VAULT_VAULT"
+
+# The fixed container path at which the operator-supplied broker CA file is
+# bind-mounted read-only.  The broker performs TLS MITM substitution on
+# outbound HTTPS (via HTTPS_PROXY); without this CA trusted inside the
+# container, node (claude), python and git HTTPS calls through the proxy fail
+# cert verification.  These three env vars point the respective runtimes'
+# trust stores at the mounted CA.
+CONTAINER_BROKER_CA_PATH = "/etc/agent-vault/broker-ca.pem"
+NODE_EXTRA_CA_CERTS_ENV = "NODE_EXTRA_CA_CERTS"  # claude / node
+SSL_CERT_FILE_ENV = "SSL_CERT_FILE"              # python / openssl
+GIT_SSL_CAINFO_ENV = "GIT_SSL_CAINFO"            # git
+
 # The container-internal path of the placeholder Claude credentials file.
 CONTAINER_CLAUDE_CREDENTIALS_PATH = "/home/vscode/.claude/.credentials.json"
 
@@ -326,6 +352,10 @@ class BcContainerController:
         manifest_path: Path | None = None,
         credential_home: Path | None = None,
         agent_vault_broker: str | None = None,
+        agent_vault_addr: str | None = None,
+        agent_vault_token: str | None = None,
+        agent_vault_vault: str | None = None,
+        agent_vault_ca: Path | None = None,
         debug: bool = False,
     ) -> CommandResult:
         """
@@ -422,6 +452,26 @@ class BcContainerController:
         # proxy listener so the broker substitutes the real Claude OAuth and
         # GitHub credentials; the container itself carries none.
         env[AGENT_VAULT_PROXY_ENV] = broker_address
+
+        # --- Operator-supplied agent-vault credentials (bclaunch-5hi) ---
+        # The in-container `agent-vault run` client authenticates to the broker
+        # with an addr + token + vault triple.  These are OPERATOR-SUPPLIED at
+        # launch (explicit launch() params, sourced from the CLI --env-file /
+        # flags / process env).  Each is injected only when supplied; the token
+        # value is NEVER a literal baked into source.  Each value also falls
+        # back to the like-named process-env var so an operator who exports
+        # AGENT_VAULT_* (e.g. via --env-file piped into the launcher's own env)
+        # does not have to also pass an explicit flag.
+        resolved_av_addr = agent_vault_addr or os.environ.get(AGENT_VAULT_ADDR_ENV)
+        resolved_av_token = agent_vault_token or os.environ.get(AGENT_VAULT_TOKEN_ENV)
+        resolved_av_vault = agent_vault_vault or os.environ.get(AGENT_VAULT_VAULT_ENV)
+        if resolved_av_addr:
+            env[AGENT_VAULT_ADDR_ENV] = resolved_av_addr
+        if resolved_av_token:
+            env[AGENT_VAULT_TOKEN_ENV] = resolved_av_token
+        if resolved_av_vault:
+            env[AGENT_VAULT_VAULT_ENV] = resolved_av_vault
+
         if shopmsg_dsn:
             env[SHOPMSG_DSN_ENV] = shopmsg_dsn
         elif dsn := os.environ.get(SHOPMSG_DSN_ENV):

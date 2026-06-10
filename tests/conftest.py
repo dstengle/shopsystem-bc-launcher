@@ -3401,6 +3401,198 @@ def assert_proxy_token_scope(ctx):
 
 
 # ===========================================================================
+# bclaunch-5hi / bclaunch-7pf / bclaunch-3le: operator-supplied agent-vault
+# credential + TLS-trust injection, and the CLI knobs that deliver them.
+# ===========================================================================
+
+from bc_launcher.controller import (
+    AGENT_VAULT_ADDR_ENV,
+    AGENT_VAULT_TOKEN_ENV,
+    AGENT_VAULT_VAULT_ENV,
+    CONTAINER_BROKER_CA_PATH,
+    NODE_EXTRA_CA_CERTS_ENV,
+    SSL_CERT_FILE_ENV,
+    GIT_SSL_CAINFO_ENV,
+)
+
+
+# --- bclaunch-5hi: AGENT_VAULT_* env injection -----------------------------
+
+@given(parsers.parse(
+    'the operator supplies agent-vault addr "{addr}" token "{token}" and '
+    'vault "{vault}"'
+))
+def operator_supplies_agent_vault_creds(addr, token, vault, ctx):
+    ctx["av_addr"] = addr
+    ctx["av_token"] = token
+    ctx["av_vault"] = vault
+
+
+@when(parsers.parse(
+    'bc-container launch is run for BC name "{bc_name}" with the '
+    'operator-supplied agent-vault credentials'
+))
+def launch_with_operator_av_creds(bc_name, ctx, controller, fake_driver,
+                                  tmp_path):
+    repo_url = f"https://github.com/shopsystem/{bc_name}.git"
+    manifest_path = tmp_path / "bc-manifest.yaml"
+    if not manifest_path.exists():
+        import yaml as _yaml
+        manifest_path.write_text(_yaml.dump({
+            "product": "shopsystem product",
+            "bcs": [{"name": bc_name, "remote": repo_url, "role": "bc"}],
+        }))
+    result = controller.launch(
+        bc_name=bc_name,
+        repo_url=repo_url,
+        manifest_path=manifest_path,
+        credential_home=ctx.get("credential_home"),
+        agent_vault_addr=ctx.get("av_addr"),
+        agent_vault_token=ctx.get("av_token"),
+        agent_vault_vault=ctx.get("av_vault"),
+        agent_vault_ca=ctx.get("av_ca"),
+    )
+    ctx["result"] = result
+    ctx["container_name"] = f"bc-{bc_name}"
+    ctx["bc_name"] = bc_name
+
+
+@then(parsers.parse('the container env has AGENT_VAULT_ADDR set to "{value}"'))
+def assert_av_addr_env(value, ctx, fake_driver):
+    env = fake_driver.container_env(ctx["container_name"])
+    assert env.get(AGENT_VAULT_ADDR_ENV) == value, (
+        f"Expected {AGENT_VAULT_ADDR_ENV}={value!r}, "
+        f"got {env.get(AGENT_VAULT_ADDR_ENV)!r}"
+    )
+
+
+@then(parsers.parse('the container env has AGENT_VAULT_TOKEN set to "{value}"'))
+def assert_av_token_env(value, ctx, fake_driver):
+    env = fake_driver.container_env(ctx["container_name"])
+    assert env.get(AGENT_VAULT_TOKEN_ENV) == value, (
+        f"Expected {AGENT_VAULT_TOKEN_ENV}={value!r}, "
+        f"got {env.get(AGENT_VAULT_TOKEN_ENV)!r}"
+    )
+
+
+@then(parsers.parse('the container env has AGENT_VAULT_VAULT set to "{value}"'))
+def assert_av_vault_env(value, ctx, fake_driver):
+    env = fake_driver.container_env(ctx["container_name"])
+    assert env.get(AGENT_VAULT_VAULT_ENV) == value, (
+        f"Expected {AGENT_VAULT_VAULT_ENV}={value!r}, "
+        f"got {env.get(AGENT_VAULT_VAULT_ENV)!r}"
+    )
+
+
+# The token literals an operator might realistically supply; none of these
+# may appear hard-coded anywhere in src/.  The placeholder is the SOLE
+# permitted credential literal in source.
+_SRC_ROOT = Path(__file__).resolve().parent.parent / "src"
+
+
+@when("the launcher source tree under src/ is scanned for credential literals")
+def scan_src_for_credential_literals(ctx):
+    sources = list(_SRC_ROOT.rglob("*.py"))
+    ctx["src_texts"] = {p: p.read_text() for p in sources}
+
+
+@then("no AGENT_VAULT_TOKEN value is hard-coded in src/")
+def assert_no_token_literal_in_src(ctx):
+    # A real agent-vault agent token carries the "av_agt_" prefix.  No such
+    # literal may appear in source: the token is operator-supplied at launch.
+    offenders = []
+    for path, text in ctx["src_texts"].items():
+        if "av_agt_" in text:
+            offenders.append(str(path))
+    assert not offenders, (
+        f"Hard-coded agent-vault token literal found in src/: {offenders}"
+    )
+
+
+@then(parsers.parse(
+    'the only credential literal present in src/ is the placeholder "{placeholder}"'
+))
+def assert_only_placeholder_literal(placeholder, ctx):
+    # The placeholder is allowed; assert it is present (sanity) and that no
+    # av_agt_ token literal coexists with it.
+    all_text = "\n".join(ctx["src_texts"].values())
+    assert placeholder in all_text, (
+        f"Expected the placeholder literal {placeholder!r} to be present in src/"
+    )
+    assert "av_agt_" not in all_text, (
+        "An agent-vault token literal coexists with the placeholder in src/"
+    )
+
+
+# --- bclaunch-7pf: broker CA mount + TLS-trust env -------------------------
+
+@given(parsers.parse('the operator supplies a broker CA file'))
+def operator_supplies_broker_ca(ctx, tmp_path):
+    ca_path = tmp_path / "broker-ca.pem"
+    # A fake PEM is sufficient: the controller only mounts whatever CA path it
+    # is handed; real broker CA content is not needed for red-green (docker
+    # CLI is absent in this environment so a live `agent-vault ca fetch` is
+    # impossible).
+    ca_path.write_text(
+        "-----BEGIN CERTIFICATE-----\nFAKEBROKERCAFORTESTS\n"
+        "-----END CERTIFICATE-----\n"
+    )
+    ctx["av_ca"] = ca_path
+    ctx["av_ca_path"] = ca_path
+
+
+@when(parsers.parse(
+    'bc-container launch is run for BC name "{bc_name}" with the operator '
+    'broker CA and agent-vault credentials'
+))
+def launch_with_ca_and_creds(bc_name, ctx, controller, fake_driver, tmp_path):
+    repo_url = f"https://github.com/shopsystem/{bc_name}.git"
+    manifest_path = tmp_path / "bc-manifest.yaml"
+    if not manifest_path.exists():
+        import yaml as _yaml
+        manifest_path.write_text(_yaml.dump({
+            "product": "shopsystem product",
+            "bcs": [{"name": bc_name, "remote": repo_url, "role": "bc"}],
+        }))
+    result = controller.launch(
+        bc_name=bc_name,
+        repo_url=repo_url,
+        manifest_path=manifest_path,
+        credential_home=ctx.get("credential_home"),
+        agent_vault_addr=ctx.get("av_addr"),
+        agent_vault_token=ctx.get("av_token"),
+        agent_vault_vault=ctx.get("av_vault"),
+        agent_vault_ca=ctx.get("av_ca"),
+    )
+    ctx["result"] = result
+    ctx["container_name"] = f"bc-{bc_name}"
+    ctx["bc_name"] = bc_name
+
+
+@then(parsers.parse(
+    'the broker CA is bind-mounted read-only into the container at "{path}"'
+))
+def assert_ca_mounted_ro(path, ctx, fake_driver):
+    mounts = fake_driver.container_mounts_full(ctx["container_name"])
+    ca_mounts = [m for m in mounts if m[2] == path]
+    assert ca_mounts, (
+        f"Expected a bind mount targeting {path!r}; mounts: {mounts!r}"
+    )
+    mount_type, source, dest, readonly = ca_mounts[0]
+    assert mount_type == "bind", f"Expected a bind mount, got {mount_type!r}"
+    assert readonly, f"Expected the broker CA mount at {path!r} to be read-only"
+    ctx["ca_mount_source"] = source
+
+
+@then(parsers.parse('the container env has {var} set to "{value}"'))
+def assert_named_env_var(var, value, ctx, fake_driver):
+    env = fake_driver.container_env(ctx["container_name"])
+    assert env.get(var) == value, (
+        f"Expected {var}={value!r}, got {env.get(var)!r}"
+    )
+
+
+# ===========================================================================
 # lead-yk3o (ruling on lead-yy30): bc-base build/publish artifacts + launch
 # digest resolution.
 #

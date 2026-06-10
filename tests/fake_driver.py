@@ -186,6 +186,18 @@ class FakeDockerDriver:
         # container, so security scenarios can assert the proxy points at the
         # broker rather than the container holding a real credential.
         self._container_proxy_env: dict[str, str] = {}
+        # The FULL env dict recorded from docker run -e for a container, so
+        # agent-vault scenarios (bclaunch-5hi / bclaunch-7pf) can assert the
+        # AGENT_VAULT_* and TLS-trust env vars the launcher injects.
+        self._container_env: dict[str, dict[str, str]] = {}
+        # The FULL mount list (type, source, dest, readonly) recorded from
+        # docker run --mount for a container, so the CA-mount scenario
+        # (bclaunch-7pf) can assert the broker CA is mounted read-only at the
+        # fixed container path.  ContainerMount drops the readonly flag, so
+        # this preserves it.
+        self._container_mounts_full: dict[
+            str, list[tuple[str, str, str, bool]]
+        ] = {}
 
         # --- shop-templates pour model (lead-dlrx, scenario 75ae95be0ecf1640) ---
         # The workspace's ".claude/skills/" directory, modelled per container as
@@ -265,6 +277,16 @@ class FakeDockerDriver:
         """Return the HTTPS_PROXY value recorded from the container's docker run."""
         return self._container_proxy_env.get(container_name, "")
 
+    def container_env(self, container_name: str) -> dict[str, str]:
+        """Return the full env dict recorded from the container's docker run."""
+        return dict(self._container_env.get(container_name, {}))
+
+    def container_mounts_full(
+        self, container_name: str
+    ) -> list[tuple[str, str, str, bool]]:
+        """Return the full mount tuples (incl. readonly) for a container's run."""
+        return list(self._container_mounts_full.get(container_name, []))
+
     def mark_ready(self, container_name: str) -> None:
         """Mark a container as having passed its readiness sequence."""
         self._ready_containers.add(container_name)
@@ -307,6 +329,8 @@ class FakeDockerDriver:
         cmd = ["docker", "run", "--name", container_name]
         if detach:
             cmd.append("-d")
+        self._container_env[container_name] = dict(env)
+        self._container_mounts_full[container_name] = list(mounts)
         for key, val in env.items():
             cmd += ["-e", f"{key}={val}"]
             if key == "SHOPMSG_DSN":
