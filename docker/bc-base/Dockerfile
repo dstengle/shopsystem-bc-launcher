@@ -29,6 +29,22 @@ RUN pip install --no-cache-dir \
     "shop-templates @ git+https://github.com/dstengle/shopsystem-templates.git@v0.2.0" \
     "shopsystem-bc-launcher @ git+https://github.com/dstengle/shopsystem-bc-launcher.git@v0.2.0"
 
+# agent-vault — the in-container broker client (bclaunch-9rr). The agent runs
+# wrapped as `agent-vault run -- claude`; agent-vault establishes the proxy
+# substitution context so the broker injects the real Claude OAuth / GitHub
+# credentials on outbound requests. Installed from the dstengle framework-CLI
+# VCS-pin idiom, version-pinned for content-addressable / reproducible images.
+#
+# PROVISIONAL: confirm agent-vault source+version (held for operator confirmation)
+# The authoritative agent-vault source repo + released version are NOT yet
+# confirmed (no repo hints; broker exposes no version endpoint; docker CLI
+# absent; no GitHub access). This pin uses the dstengle VCS-pin shape as the
+# most plausible source and a placeholder version; the value is held for
+# operator confirmation. The structural test asserts only that a version pin is
+# PRESENT, so a legitimate confirmed value does not break the test.
+RUN pip install --no-cache-dir \
+    "agent-vault @ git+https://github.com/dstengle/agent-vault.git@v0.1.0"
+
 # beads (bd) — third-party Go binary from steveyegge/beads releases (NOT pip-installable)
 RUN set -e && \
     ARCH=$(uname -m) && \
@@ -77,6 +93,30 @@ RUN curl -fsSL https://claude.ai/install.sh | bash
 USER root
 ENV PATH="/home/vscode/.local/bin:${PATH}"
 
+# Bake the placeholder Claude credential into the image (bclaunch-9rr,
+# lead-v4ih 3931e43e REVISED). Under the operator no-bind-mount directive the
+# controller mounts NO credential file; the image instead carries a
+# placeholder-only .credentials.json whose accessToken is the literal
+# "__PLACEHOLDER__" (NEVER a real OAuth token — the real credential is held
+# only by the agent-vault broker, provisioned out of band and substituted on
+# outbound requests). vscode-owned so the agent (running as vscode) can read it.
+RUN mkdir -p /home/vscode/.claude \
+    && printf '%s\n' '{"accessToken":"__PLACEHOLDER__"}' \
+       > /home/vscode/.claude/.credentials.json \
+    && chown -R vscode:vscode /home/vscode/.claude
+
+# agent-vault broker CA materialization entrypoint (bclaunch-9rr). The script
+# is wired BOTH as the image ENTRYPOINT (runs once on container start as PID 1)
+# AND installed into /etc/profile.d/ so login/exec shells — notably the
+# `docker exec ... agent-vault run -- claude` path, which does NOT inherit the
+# entrypoint PID 1's process-local exports — re-materialize the CA from
+# AGENT_VAULT_CA_PEM if missing and re-export the five TLS-trust vars.
+COPY agent-vault-ca.sh /usr/local/bin/agent-vault-ca.sh
+RUN chmod 0755 /usr/local/bin/agent-vault-ca.sh \
+    && cp /usr/local/bin/agent-vault-ca.sh /etc/profile.d/agent-vault-ca.sh \
+    && chmod 0644 /etc/profile.d/agent-vault-ca.sh
+
 WORKDIR /workspace
 
+ENTRYPOINT ["/usr/local/bin/agent-vault-ca.sh"]
 CMD ["sleep", "infinity"]
