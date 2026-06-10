@@ -68,7 +68,7 @@ AGENT_VAULT_PROXY_ENV = "HTTPS_PROXY"
 # needs its proxy-listener address to point HTTPS_PROXY at it and to probe
 # readiness.  Overridable per-launch via the launch() ``agent_vault_broker``
 # argument or the BCLAUNCHER_AGENT_VAULT_BROKER env var.
-DEFAULT_AGENT_VAULT_BROKER = "http://agent-vault:8080"
+DEFAULT_AGENT_VAULT_BROKER = "http://agent-vault:14321"
 AGENT_VAULT_BROKER_ENV = "BCLAUNCHER_AGENT_VAULT_BROKER"
 
 # The container-internal path of the placeholder Claude credentials file.
