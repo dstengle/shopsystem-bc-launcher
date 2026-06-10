@@ -258,6 +258,55 @@ def _build_clone_proxy_url(
     return f"http://{user}:{secret}@{host}"
 
 
+def _build_runtime_proxy_url(
+    agent_vault_broker: str | None,
+    agent_vault_addr: str | None,
+    agent_vault_token: str | None,
+    agent_vault_vault: str | None,
+) -> str | None:
+    """Build the CONTAINER's runtime HTTPS_PROXY value (bclaunch-3q12).
+
+    bclaunch-3q12 DEFECT: ``controller.launch`` previously set the container's
+    persistent ``HTTPS_PROXY`` to ``broker_address``, which DEFAULTS to
+    ``DEFAULT_AGENT_VAULT_BROKER`` (``http://agent-vault:14321`` — the agent-vault
+    *control API*) whenever the operator did not hand-build an explicit
+    ``--agent-vault-broker`` URL.  At runtime claude-the-agent then inherited a
+    proxy pointed at the control API (:14321), not the credential-substituting
+    MITM HTTPS proxy (:14322), and its brokered Anthropic calls failed
+    (``CONNECT tunnel failed`` / 405).
+
+    The runtime proxy is the same shape the brokered CLONE already derives
+    (``_build_clone_proxy_url``): ``http://<token>:<vault>@<host>:14322``.  This
+    completes the runtime half of the lead-5fji DEFECT 1 fix so a plain
+    ``bc-container launch`` with NO hand-built ``--agent-vault-broker`` URL sets
+    the runtime proxy at the MITM listener automatically.
+
+    Precedence (decided cleanly, bclaunch-3q12):
+
+      1. An explicit ``agent_vault_broker`` (operator passed ``--agent-vault-broker``
+         a full URL, or set ``BCLAUNCHER_AGENT_VAULT_BROKER``) WINS — it is used
+         verbatim.  This preserves the pre-existing operator workaround/override:
+         an operator may still pass any explicit proxy URL.
+      2. Otherwise the proxy is DERIVED (:14322 + ``<token>:<vault>`` userinfo,
+         the operator's agent-token used verbatim) from the env-file
+         ``AGENT_VAULT_ADDR`` / ``AGENT_VAULT_TOKEN`` / ``AGENT_VAULT_VAULT``
+         triple — the default for a plain brokered launch.
+
+    Returns ``None`` only when neither path yields a value (no explicit broker
+    AND the addr/token/vault triple is incomplete), so the caller can fall back
+    to the control-API default address for readiness probing without claiming a
+    derived runtime proxy that does not exist.
+    """
+    # (1) Explicit operator-supplied broker URL wins verbatim.
+    if agent_vault_broker:
+        return agent_vault_broker
+    # (2) Else derive the :14322 MITM proxy from the env-file triple — the same
+    #     derivation the clone exec already uses.
+    return _build_clone_proxy_url(
+        agent_vault_addr, agent_vault_token, agent_vault_vault
+    )
+
+
 def _resolve_host_path(devcontainer_path: Path) -> Path:
     """
     If running inside a devcontainer where ``devcontainer_path`` lies on a bind
@@ -535,21 +584,20 @@ class BcContainerController:
 
         # --- Agent-vault broker resolution (ADR-026) ---
         # No host credential path is resolved; the broker is the sole
-        # credential path.  Resolve the broker's proxy-listener address from
-        # the explicit arg, then the env override, then the default.
-        broker_address = (
-            agent_vault_broker
-            or os.environ.get(AGENT_VAULT_BROKER_ENV)
-            or DEFAULT_AGENT_VAULT_BROKER
+        # credential path.  Resolve the broker's CONTROL-API address from the
+        # explicit arg, then the env override, then the default.  This address
+        # is used for the readiness PROBE (agent_vault_reachable) below — the
+        # control API on :14321 is the right target for a reachability check.
+        # It is NOT, by itself, the container's runtime HTTPS_PROXY: that is
+        # derived separately (bclaunch-3q12) to point at the :14322 MITM proxy.
+        explicit_broker = agent_vault_broker or os.environ.get(
+            AGENT_VAULT_BROKER_ENV
         )
+        broker_address = explicit_broker or DEFAULT_AGENT_VAULT_BROKER
 
         # Build environment
         env: dict[str, str] = {}
         env["HOME"] = "/home/vscode"
-        # Route the agent's outbound HTTPS through the agent-vault broker's
-        # proxy listener so the broker substitutes the real Claude OAuth and
-        # GitHub credentials; the container itself carries none.
-        env[AGENT_VAULT_PROXY_ENV] = broker_address
 
         # --- Operator-supplied agent-vault credentials (bclaunch-5hi) ---
         # The in-container `agent-vault run` client authenticates to the broker
@@ -569,6 +617,32 @@ class BcContainerController:
             env[AGENT_VAULT_TOKEN_ENV] = resolved_av_token
         if resolved_av_vault:
             env[AGENT_VAULT_VAULT_ENV] = resolved_av_vault
+
+        # --- Container runtime HTTPS_PROXY (bclaunch-3q12) ---
+        # Route the agent's outbound HTTPS through the broker's MITM proxy
+        # (:14322) so the broker substitutes the real Claude OAuth and GitHub
+        # credentials; the container itself carries none.  Precedence: an
+        # explicit operator-supplied broker URL (--agent-vault-broker /
+        # BCLAUNCHER_AGENT_VAULT_BROKER) wins verbatim; otherwise the proxy is
+        # DERIVED (:14322 + <token>:<vault> userinfo) from the env-file
+        # AGENT_VAULT_ADDR/TOKEN/VAULT triple — the SAME derivation the brokered
+        # clone uses.  Pre-3q12 this was set to the bare control-API address
+        # (:14321), which is not an HTTPS-CONNECT MITM proxy, so the agent's
+        # brokered calls failed (CONNECT tunnel failed / 405).
+        runtime_proxy = _build_runtime_proxy_url(
+            explicit_broker,
+            resolved_av_addr,
+            resolved_av_token,
+            resolved_av_vault,
+        )
+        if runtime_proxy is not None:
+            env[AGENT_VAULT_PROXY_ENV] = runtime_proxy
+        else:
+            # Neither an explicit broker nor a complete addr/token/vault triple
+            # was supplied: fall back to the control-API default so the env var
+            # is still present (e.g. for the HEALTHCHECK probe target), matching
+            # the pre-3q12 behaviour for the no-credentials case.
+            env[AGENT_VAULT_PROXY_ENV] = broker_address
 
         # --- Broker CA via env var (bclaunch-7pf REVISED) ---
         # The operator supplies the PUBLIC broker CA PEM as an AGENT_VAULT_CA_PEM

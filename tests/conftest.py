@@ -2749,6 +2749,7 @@ def assert_health_status(status, ctx):
 # ===========================================================================
 
 from bc_launcher.controller import (
+    AGENT_VAULT_MITM_PROXY_PORT,
     AGENT_VAULT_PLACEHOLDER_TOKEN,
     CONTAINER_CLAUDE_CREDENTIALS_PATH,
     DEFAULT_AGENT_VAULT_BROKER,
@@ -2771,19 +2772,83 @@ _UNREACHABLE_BROKER = "http://no-such-agent-vault.invalid:9999"
 _BAKED_CREDENTIALS_PATH = "/home/vscode/.claude/.credentials.json"
 
 
-def _baked_placeholder_credentials() -> dict:
-    """Read the placeholder accessToken baked into the bc-base Dockerfile.
+def _baked_credentials_json() -> dict:
+    """Parse the FULL .credentials.json JSON the bc-base Dockerfile bakes.
 
-    The Dockerfile bakes a literal {"accessToken":"__PLACEHOLDER__"} file at
-    /home/vscode/.claude/.credentials.json.  We parse the committed Dockerfile
-    content (docker build is NOT run — docker is unavailable) to recover the
-    baked accessToken, so this models exactly what the image will carry.
+    bclaunch-2s6y: the Dockerfile now bakes the NESTED claudeAiOauth stanza at
+    /home/vscode/.claude/.credentials.json (the prior bare {"accessToken":...}
+    shape was wrong — claude never recognized itself as logged in).  We recover
+    the EXACT JSON object the image will carry by locating the
+    `> /home/vscode/.claude/.credentials.json` redirect in the committed
+    Dockerfile and JSON-parsing the single-quoted JSON literal that precedes it
+    (docker build is NOT run — docker is unavailable).  Parsing the real JSON
+    (not regexing one field) gives the nested-shape assertions teeth: a bare
+    top-level accessToken would fail to expose the nested claudeAiOauth path.
     """
+    import json as _json
+    import re as _re
+
     dockerfile = _find_bc_base_dockerfile()
     text = dockerfile.read_text() if dockerfile else ""
+    # Find the printf '<json>' ... > .../.credentials.json bake line.  The JSON
+    # literal is single-quoted in the Dockerfile.
+    m = _re.search(
+        r"printf\s+'%s\\n'\s+'(\{.*?\})'\s*\\?\s*\n\s*>\s*"
+        r"/home/vscode/\.claude/\.credentials\.json\b",
+        text,
+    )
+    if not m:
+        return {}
+    try:
+        return _json.loads(m.group(1))
+    except _json.JSONDecodeError:
+        return {}
+
+
+def _baked_claude_json() -> dict:
+    """Parse the FULL ~/.claude.json JSON the bc-base Dockerfile bakes.
+
+    bclaunch-2s6y: the Dockerfile now also seeds ~/.claude.json with the
+    onboarding/trust state that skips the first-run wizard (theme ->
+    login-method -> folder-trust -> bypass-permissions).  Recover the exact
+    object by locating the `> /home/vscode/.claude.json` redirect and parsing
+    the single-quoted JSON literal that precedes it.
+    """
+    import json as _json
     import re as _re
-    m = _re.search(r'"accessToken"\s*:\s*"([^"]+)"', text)
-    return {"accessToken": m.group(1)} if m else {}
+
+    dockerfile = _find_bc_base_dockerfile()
+    text = dockerfile.read_text() if dockerfile else ""
+    m = _re.search(
+        r"printf\s+'%s\\n'\s+'(\{.*?\})'\s*\\?\s*\n\s*>\s*"
+        r"/home/vscode/\.claude\.json\b",
+        text,
+    )
+    if not m:
+        return {}
+    try:
+        return _json.loads(m.group(1))
+    except _json.JSONDecodeError:
+        return {}
+
+
+def _baked_placeholder_credentials() -> dict:
+    """Back-compat shim: the baked .credentials.json as a dict.
+
+    Returns the FULL nested credential object (bclaunch-2s6y).  Callers that
+    previously read a top-level ``accessToken`` are updated to read the nested
+    ``claudeAiOauth.accessToken`` path; this remains the single parse point.
+    """
+    return _baked_credentials_json()
+
+
+def _baked_oauth_access_token() -> str | None:
+    """The accessToken INSIDE the nested claudeAiOauth stanza, or None."""
+    creds = _baked_credentials_json()
+    oauth = creds.get("claudeAiOauth")
+    if isinstance(oauth, dict):
+        return oauth.get("accessToken")
+    return None
 
 
 def _agent_vault_launch(ctx, controller, fake_driver, tmp_path, bc_name,
@@ -2965,6 +3030,44 @@ def launch_starts_agent(bc_name, ctx, controller, fake_driver, tmp_path):
     )
 
 
+@when(parsers.parse('bc-container launch starts the agent for BC name '
+                    '"{bc_name}" with the operator-supplied agent-vault '
+                    'credentials'))
+def launch_starts_agent_with_av_creds(bc_name, ctx, controller, fake_driver,
+                                      tmp_path):
+    # bclaunch-3q12: like launch_starts_agent, but threads the operator-supplied
+    # addr/token/vault triple through so the controller derives the runtime
+    # HTTPS_PROXY at the :14322 MITM listener.  NO explicit --agent-vault-broker
+    # is passed — this models a plain brokered launch, exercising the derivation
+    # path (not the override path).
+    repo_url = f"https://github.com/shopsystem/{bc_name}.git"
+    manifest_path = ctx.get("launch_manifest_path")
+    if manifest_path is None:
+        default_manifest = tmp_path / "bc-manifest.yaml"
+        if not default_manifest.exists():
+            import yaml as _yaml
+            default_manifest.write_text(_yaml.dump({
+                "product": "shopsystem product",
+                "bcs": [{"name": bc_name, "remote": repo_url, "role": "bc"}],
+            }))
+        manifest_path = default_manifest
+    result = controller.launch(
+        bc_name=bc_name,
+        repo_url=repo_url,
+        shopmsg_dsn=ctx.get("shopmsg_dsn"),
+        startup_prompt="please begin your session",
+        network=None,
+        manifest_path=manifest_path,
+        credential_home=ctx.get("credential_home"),
+        agent_vault_addr=ctx.get("av_addr"),
+        agent_vault_token=ctx.get("av_token"),
+        agent_vault_vault=ctx.get("av_vault"),
+    )
+    ctx["result"] = result
+    ctx["container_name"] = f"bc-{bc_name}"
+    ctx["bc_name"] = bc_name
+
+
 @when(parsers.parse('I run bc-container launch with BC name "{bc_name}" and an '
                     'agent-vault startup prompt'))
 def launch_with_av_startup_prompt(bc_name, ctx, controller, fake_driver,
@@ -3132,21 +3235,89 @@ def assert_agent_invocation(session, invocation, ctx, fake_driver):
 
 
 @then("the agent process environment sets HTTPS_PROXY to the agent-vault "
-      "broker's proxy listener on the shopsystem network")
-def assert_https_proxy_set(ctx, fake_driver):
+      "broker's MITM proxy listener on port 14322 with token:vault basic-auth")
+def assert_https_proxy_mitm_listener(ctx, fake_driver):
+    # bclaunch-3q12: the "broker's proxy listener" the runtime agent must use is
+    # the credential-substituting MITM HTTPS proxy on :14322 with the
+    # token:vault basic-auth userinfo — NOT the bare :14321 control API.  Derive
+    # the EXPECTED value from the operator-supplied addr/token/vault triple in
+    # ctx (the same derivation the controller performs) and assert the ACTUAL
+    # runtime HTTPS_PROXY matches it.  A bare-:14321 runtime proxy fails here.
+    from urllib.parse import urlparse, unquote
+
     container_name = ctx["container_name"]
-    broker = ctx.get("agent_vault_broker", DEFAULT_AGENT_VAULT_BROKER)
     proxy = fake_driver.container_proxy_env(container_name)
-    assert proxy == broker, (
-        f"Expected HTTPS_PROXY={broker!r} in container env, got {proxy!r}"
+    parsed = urlparse(proxy)
+    assert parsed.port == AGENT_VAULT_MITM_PROXY_PORT, (
+        f"Expected runtime HTTPS_PROXY on the MITM port "
+        f"{AGENT_VAULT_MITM_PROXY_PORT} (bclaunch-3q12 — must NOT be the bare "
+        f":14321 control API); got proxy {proxy!r}"
+    )
+    expected_userinfo = f"{ctx['av_token']}:{ctx['av_vault']}"
+    got = f"{unquote(parsed.username or '')}:{unquote(parsed.password or '')}"
+    assert got == expected_userinfo, (
+        f"Expected runtime HTTPS_PROXY basic-auth userinfo "
+        f"{expected_userinfo!r}, got {got!r} (proxy: {proxy!r})"
     )
 
 
-@then(parsers.parse('its accessToken field has the literal value "{value}"'))
-def assert_access_token_literal(value, ctx):
+# --- bclaunch-2s6y: nested-claudeAiOauth credential shape assertions ---------
+#
+# These read the ACTUAL JSON object the bc-base Dockerfile bakes (parsed by
+# _baked_credentials_json), NOT an echoed string — so a regression to the bare
+# {"accessToken":...} shape (no top-level claudeAiOauth) fails them.
+
+@then('the baked .credentials.json has a top-level "claudeAiOauth" object')
+def assert_creds_has_claudeaioauth(ctx):
     content = ctx["credentials_content"]
-    assert content.get("accessToken") == value, (
-        f"Expected accessToken {value!r}, got {content.get('accessToken')!r}"
+    oauth = content.get("claudeAiOauth")
+    assert isinstance(oauth, dict), (
+        f"Expected a top-level 'claudeAiOauth' object in the baked "
+        f".credentials.json (the nested shape claude recognizes as logged in); "
+        f"got {content!r}"
+    )
+
+
+@then(parsers.parse(
+    'the accessToken inside claudeAiOauth has the literal value "{value}"'
+))
+def assert_nested_access_token(value, ctx):
+    content = ctx["credentials_content"]
+    oauth = content.get("claudeAiOauth")
+    assert isinstance(oauth, dict), (
+        f"No claudeAiOauth object in baked credentials: {content!r}"
+    )
+    assert oauth.get("accessToken") == value, (
+        f"Expected claudeAiOauth.accessToken {value!r}, "
+        f"got {oauth.get('accessToken')!r}"
+    )
+
+
+@then(parsers.parse(
+    'the refreshToken inside claudeAiOauth has the literal value "{value}"'
+))
+def assert_nested_refresh_token(value, ctx):
+    content = ctx["credentials_content"]
+    oauth = content.get("claudeAiOauth")
+    assert isinstance(oauth, dict), (
+        f"No claudeAiOauth object in baked credentials: {content!r}"
+    )
+    assert oauth.get("refreshToken") == value, (
+        f"Expected claudeAiOauth.refreshToken {value!r}, "
+        f"got {oauth.get('refreshToken')!r}"
+    )
+
+
+@then('the baked .credentials.json has no top-level "accessToken" field')
+def assert_no_top_level_access_token(ctx):
+    # Guards against the bare-shape regression: the OLD wrong shape was
+    # {"accessToken":"__PLACEHOLDER__"} at top level.  The nested shape must NOT
+    # carry a top-level accessToken.
+    content = ctx["credentials_content"]
+    assert "accessToken" not in content, (
+        f"Baked .credentials.json carries a TOP-LEVEL 'accessToken' field — "
+        f"that is the superseded bare shape (bclaunch-2s6y); the accessToken "
+        f"must live INSIDE claudeAiOauth. Content: {content!r}"
     )
 
 
@@ -3165,9 +3336,11 @@ def assert_credentials_baked_into_image(path, ctx):
         f"file at {path!r}; not present in Dockerfile content."
     )
     content = ctx.get("credentials_content") or {}
-    assert content.get("accessToken") == AGENT_VAULT_PLACEHOLDER_TOKEN, (
-        f"Expected baked accessToken {AGENT_VAULT_PLACEHOLDER_TOKEN!r}, "
-        f"got {content.get('accessToken')!r}"
+    # bclaunch-2s6y: the accessToken lives INSIDE the nested claudeAiOauth stanza.
+    oauth = content.get("claudeAiOauth") or {}
+    assert oauth.get("accessToken") == AGENT_VAULT_PLACEHOLDER_TOKEN, (
+        f"Expected baked claudeAiOauth.accessToken "
+        f"{AGENT_VAULT_PLACEHOLDER_TOKEN!r}, got {oauth.get('accessToken')!r}"
     )
 
 
@@ -3355,7 +3528,11 @@ def assert_no_real_credential_in_container(ctx, fake_driver):
       "environment variable")
 def assert_real_oauth_not_present(ctx):
     content = ctx.get("container_credentials_json") or {}
-    assert content.get("accessToken") != _REAL_OAUTH_TOKEN, (
+    # bclaunch-2s6y: the credential is now nested under claudeAiOauth — search
+    # the ENTIRE serialized object (top-level + nested) for the real token so
+    # the invariant survives the shape change.
+    import json as _json
+    assert _REAL_OAUTH_TOKEN not in _json.dumps(content), (
         "Real OAuth token present in container .credentials.json"
     )
     for val in ctx.get("container_env_values", []):
@@ -3364,13 +3541,20 @@ def assert_real_oauth_not_present(ctx):
         )
 
 
-@then(parsers.parse('the only .credentials.json present has accessToken equal '
-                    'to "{value}"'))
-def assert_only_placeholder_credentials(value, ctx):
+@then(parsers.parse('the only .credentials.json present has its claudeAiOauth '
+                    'accessToken equal to "{value}"'))
+def assert_only_nested_placeholder_credentials(value, ctx):
+    # bclaunch-2s6y: re-pinned against the nested shape. The only baked
+    # credential is the placeholder INSIDE claudeAiOauth; no real token anywhere.
     content = ctx.get("container_credentials_json")
     assert content is not None, "No .credentials.json present in container"
-    assert content.get("accessToken") == value, (
-        f"Expected accessToken {value!r}, got {content.get('accessToken')!r}"
+    oauth = content.get("claudeAiOauth")
+    assert isinstance(oauth, dict), (
+        f"Expected the nested claudeAiOauth shape; got {content!r}"
+    )
+    assert oauth.get("accessToken") == value, (
+        f"Expected claudeAiOauth.accessToken {value!r}, "
+        f"got {oauth.get('accessToken')!r}"
     )
 
 
@@ -3607,6 +3791,110 @@ def assert_clone_proxy_username_exact(username, ctx, fake_driver):
     assert got == username, (
         f"Expected clone proxy username {username!r} (token used verbatim, "
         f"NOT re-prefixed); got {got!r} (proxy: {proxy!r})"
+    )
+
+
+# --- bclaunch-3q12: container RUNTIME HTTPS_PROXY derivation + precedence ----
+#
+# These steps read the ACTUAL HTTPS_PROXY value the controller injected into the
+# container's `docker run` env (recorded by FakeDockerDriver.container_proxy_env
+# from the real env dict passed to .run()), NOT a static echoed-back string — so
+# they have teeth against the real 3q12 defect: a runtime proxy pointed at the
+# :14321 control API instead of the :14322 MITM proxy fails these assertions.
+
+@when(parsers.parse(
+    'bc-container launch is run for BC name "{bc_name}" with the '
+    'operator-supplied agent-vault credentials and an explicit '
+    'agent-vault broker URL "{broker}"'
+))
+def launch_with_explicit_broker_override(broker, bc_name, ctx, controller,
+                                         fake_driver, tmp_path):
+    repo_url = f"https://github.com/shopsystem/{bc_name}.git"
+    manifest_path = tmp_path / "bc-manifest.yaml"
+    if not manifest_path.exists():
+        import yaml as _yaml
+        manifest_path.write_text(_yaml.dump({
+            "product": "shopsystem product",
+            "bcs": [{"name": bc_name, "remote": repo_url, "role": "bc"}],
+        }))
+    result = controller.launch(
+        bc_name=bc_name,
+        repo_url=repo_url,
+        manifest_path=manifest_path,
+        credential_home=ctx.get("credential_home"),
+        agent_vault_addr=ctx.get("av_addr"),
+        agent_vault_token=ctx.get("av_token"),
+        agent_vault_vault=ctx.get("av_vault"),
+        agent_vault_broker=broker,
+    )
+    ctx["result"] = result
+    ctx["container_name"] = f"bc-{bc_name}"
+    ctx["bc_name"] = bc_name
+
+
+def _runtime_proxy(ctx, fake_driver) -> str:
+    """The HTTPS_PROXY value the container was actually launched with."""
+    return fake_driver.container_proxy_env(ctx["container_name"])
+
+
+@then(parsers.parse(
+    'the container runtime HTTPS_PROXY is set to "{value}"'
+))
+def assert_runtime_proxy_exact(value, ctx, fake_driver):
+    proxy = _runtime_proxy(ctx, fake_driver)
+    assert proxy == value, (
+        f"Expected the container runtime HTTPS_PROXY to be {value!r}, "
+        f"got {proxy!r}"
+    )
+
+
+@then(parsers.parse(
+    'the container runtime HTTPS_PROXY host is "{host}" on port {port:d}'
+))
+def assert_runtime_proxy_host_port(host, port, ctx, fake_driver):
+    from urllib.parse import urlparse
+
+    proxy = _runtime_proxy(ctx, fake_driver)
+    parsed = urlparse(proxy)
+    assert parsed.hostname == host, (
+        f"Expected runtime proxy host {host!r}, got {parsed.hostname!r} "
+        f"(proxy: {proxy!r})"
+    )
+    assert parsed.port == port, (
+        f"Expected runtime proxy port {port}, got {parsed.port!r} "
+        f"(proxy: {proxy!r})"
+    )
+
+
+@then(parsers.parse(
+    'the container runtime HTTPS_PROXY is not the control API on port {port:d}'
+))
+def assert_runtime_proxy_not_control_api(port, ctx, fake_driver):
+    from urllib.parse import urlparse
+
+    proxy = _runtime_proxy(ctx, fake_driver)
+    parsed = urlparse(proxy)
+    assert parsed.port != port, (
+        f"Container runtime HTTPS_PROXY points at the control-API port {port} "
+        f"(bclaunch-3q12 DEFECT — must be the :14322 MITM proxy); "
+        f"proxy: {proxy!r}"
+    )
+
+
+@then(parsers.parse(
+    'the container runtime HTTPS_PROXY carries basic-auth userinfo "{userinfo}"'
+))
+def assert_runtime_proxy_userinfo(userinfo, ctx, fake_driver):
+    from urllib.parse import urlparse, unquote
+
+    proxy = _runtime_proxy(ctx, fake_driver)
+    parsed = urlparse(proxy)
+    got_user = unquote(parsed.username or "")
+    got_pass = unquote(parsed.password or "")
+    got = f"{got_user}:{got_pass}"
+    assert got == userinfo, (
+        f"Expected runtime proxy basic-auth userinfo {userinfo!r}, "
+        f"got {got!r} (proxy: {proxy!r})"
     )
 
 
@@ -4700,21 +4988,115 @@ def then_profile_d_script_installed(ctx):
 
 
 @then(parsers.parse(
-    'the Dockerfile bakes a placeholder .credentials.json at "{path}" with '
-    'accessToken "{token}"'
+    'the Dockerfile bakes a nested-claudeAiOauth .credentials.json at "{path}" '
+    'whose claudeAiOauth accessToken is "{token}"'
 ))
-def then_dockerfile_bakes_placeholder(path, token, ctx):
+def then_dockerfile_bakes_nested_credential(path, token, ctx):
     dockerfile = ctx.get("bc_base_dockerfile")
     assert dockerfile is not None, "No bc-base Dockerfile found"
     text = dockerfile.read_text()
     assert path in text, (
-        f"bc-base Dockerfile does not bake the placeholder credential at {path!r}"
+        f"bc-base Dockerfile does not bake the credential at {path!r}"
     )
-    assert re.search(
-        rf'"accessToken"\s*:\s*"{re.escape(token)}"', text
-    ), (
-        f"bc-base Dockerfile does not bake accessToken {token!r}"
+    creds = _baked_credentials_json()
+    oauth = creds.get("claudeAiOauth")
+    assert isinstance(oauth, dict), (
+        f"bc-base Dockerfile does not bake the NESTED claudeAiOauth shape "
+        f"(bclaunch-2s6y); parsed: {creds!r}"
     )
+    assert oauth.get("accessToken") == token, (
+        f"bc-base Dockerfile claudeAiOauth.accessToken is "
+        f"{oauth.get('accessToken')!r}, expected {token!r}"
+    )
+    assert "accessToken" not in creds, (
+        "bc-base Dockerfile bakes a TOP-LEVEL accessToken (the superseded bare "
+        "shape); it must live inside claudeAiOauth."
+    )
+
+
+@then("the baked .credentials.json claudeAiOauth expiresAt is far in the future")
+def then_credential_expiry_far_future(ctx):
+    # Far-future expiry so claude never attempts a refresh (the broker swaps the
+    # Authorization header regardless).  Assert expiresAt is well beyond now
+    # (epoch-millis) — concretely past the year 2100.
+    creds = _baked_credentials_json()
+    oauth = creds.get("claudeAiOauth") or {}
+    expires = oauth.get("expiresAt")
+    assert isinstance(expires, (int, float)), (
+        f"claudeAiOauth.expiresAt is not numeric: {expires!r}"
+    )
+    # 2100-01-01 in epoch-millis ~= 4102444800000.
+    assert expires >= 4_000_000_000_000, (
+        f"claudeAiOauth.expiresAt {expires!r} is not far-future; a near expiry "
+        f"would make claude attempt a token refresh."
+    )
+
+
+@then(parsers.parse(
+    'the Dockerfile seeds a ~/.claude.json at "{path}" with hasCompletedOnboarding '
+    'true and bypassPermissionsModeAccepted true'
+))
+def then_dockerfile_seeds_claude_json(path, ctx):
+    dockerfile = ctx.get("bc_base_dockerfile")
+    assert dockerfile is not None, "No bc-base Dockerfile found"
+    text = dockerfile.read_text()
+    assert path in text, (
+        f"bc-base Dockerfile does not seed a ~/.claude.json at {path!r}"
+    )
+    claude_json = _baked_claude_json()
+    assert claude_json.get("hasCompletedOnboarding") is True, (
+        f"seeded ~/.claude.json hasCompletedOnboarding is not true: "
+        f"{claude_json.get('hasCompletedOnboarding')!r}"
+    )
+    # The bypass-permissions acceptance gate key — confirmed against the claude
+    # 2.1.170 binary (read as !S$().bypassPermissionsModeAccepted from the global
+    # ~/.claude.json config).  Without it claude stops at the
+    # --dangerously-skip-permissions warning gate.
+    assert claude_json.get("bypassPermissionsModeAccepted") is True, (
+        f"seeded ~/.claude.json bypassPermissionsModeAccepted is not true: "
+        f"{claude_json.get('bypassPermissionsModeAccepted')!r} — claude would "
+        f"stop at the --dangerously-skip-permissions warning gate."
+    )
+
+
+@then(parsers.parse(
+    'the seeded ~/.claude.json pre-trusts the "{project}" project'
+))
+def then_claude_json_pretrusts_project(project, ctx):
+    claude_json = _baked_claude_json()
+    proj = (claude_json.get("projects") or {}).get(project)
+    assert isinstance(proj, dict), (
+        f"seeded ~/.claude.json has no projects[{project!r}] stanza: "
+        f"{claude_json.get('projects')!r}"
+    )
+    assert proj.get("hasTrustDialogAccepted") is True, (
+        f"projects[{project!r}].hasTrustDialogAccepted is not true — the "
+        f"folder-trust prompt would fire: {proj!r}"
+    )
+    assert proj.get("hasCompletedProjectOnboarding") is True, (
+        f"projects[{project!r}].hasCompletedProjectOnboarding is not true: "
+        f"{proj!r}"
+    )
+
+
+@then("the seeded ~/.claude.json bakes no real Claude OAuth token")
+def then_claude_json_no_real_token(ctx):
+    import json as _json
+    claude_json = _baked_claude_json()
+    creds = _baked_credentials_json()
+    blob = _json.dumps(claude_json) + _json.dumps(creds)
+    assert _REAL_OAUTH_TOKEN not in blob, (
+        "A real Claude OAuth token is baked into the bc-base image."
+    )
+    # Defensive: assert the only token-shaped values are the synthetic
+    # placeholder.  Every accessToken/refreshToken in the credential is the
+    # literal placeholder.
+    oauth = creds.get("claudeAiOauth") or {}
+    for field in ("accessToken", "refreshToken"):
+        assert oauth.get(field) == AGENT_VAULT_PLACEHOLDER_TOKEN, (
+            f"claudeAiOauth.{field} is not the synthetic placeholder: "
+            f"{oauth.get(field)!r}"
+        )
 
 
 @then("the Dockerfile declares an ENTRYPOINT that runs the agent-vault CA "

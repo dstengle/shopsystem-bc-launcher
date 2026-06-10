@@ -109,17 +109,40 @@ RUN curl -fsSL https://claude.ai/install.sh | bash
 USER root
 ENV PATH="/home/vscode/.local/bin:${PATH}"
 
-# Bake the placeholder Claude credential into the image (bclaunch-9rr,
-# lead-v4ih 3931e43e REVISED). Under the operator no-bind-mount directive the
-# controller mounts NO credential file; the image instead carries a
-# placeholder-only .credentials.json whose accessToken is the literal
-# "__PLACEHOLDER__" (NEVER a real OAuth token — the real credential is held
-# only by the agent-vault broker, provisioned out of band and substituted on
-# outbound requests). vscode-owned so the agent (running as vscode) can read it.
+# Bake the synthetic logged-in Claude state into the image (bclaunch-2s6y,
+# supersedes the bare-shape bake of bclaunch-9rr / lead-v4ih 3931e43e). Under
+# the operator no-bind-mount brokered model the controller mounts NO credential
+# file; the image carries a placeholder-only, SYNTHETIC logged-in state so
+# claude boots STRAIGHT to the agent (no first-run wizard) — the broker
+# substitutes the real Authorization on the wire, so NO real OAuth token is ever
+# baked here.
+#
+# Two files, ALL placeholder/synthetic:
+#
+# (1) ~/.claude/.credentials.json — the NESTED claudeAiOauth stanza claude
+#     actually recognizes as logged-in. The prior BARE {"accessToken":...} shape
+#     was wrong: claude never recognized itself as logged in and sat at the
+#     login-method picker. accessToken/refreshToken are the literal
+#     "__PLACEHOLDER__"; expiresAt is far-future (year ~2099) so claude never
+#     attempts a refresh; the broker swaps the Authorization header regardless.
+#
+# (2) ~/.claude.json — the onboarding/trust state that skips the first-run
+#     wizard gates (theme -> login-method -> folder-trust -> bypass-permissions).
+#     hasCompletedOnboarding ALONE does NOT skip the login-method picker, hence
+#     (1). The bypass-permissions acceptance gate (the
+#     `claude --dangerously-skip-permissions` warning) is the top-level key
+#     "bypassPermissionsModeAccepted" — confirmed by grepping the claude
+#     2.1.170 binary (read as !S$().bypassPermissionsModeAccepted from the global
+#     ~/.claude.json config). lastOnboardingVersion is pinned to the installed
+#     claude version (2.1.170). oauthAccount + userID are synthetic placeholders.
+#     The /workspace project stanza is pre-trusted so no folder-trust prompt
+#     fires. vscode-owned so the agent (running as vscode) can read it.
 RUN mkdir -p /home/vscode/.claude \
-    && printf '%s\n' '{"accessToken":"__PLACEHOLDER__"}' \
+    && printf '%s\n' '{"claudeAiOauth":{"accessToken":"__PLACEHOLDER__","refreshToken":"__PLACEHOLDER__","expiresAt":4070908800000,"scopes":["user:file_upload","user:inference","user:mcp_servers","user:profile","user:sessions:claude_code"],"subscriptionType":"max"}}' \
        > /home/vscode/.claude/.credentials.json \
-    && chown -R vscode:vscode /home/vscode/.claude
+    && printf '%s\n' '{"hasCompletedOnboarding":true,"bypassPermissionsModeAccepted":true,"theme":"dark","lastOnboardingVersion":"2.1.170","userID":"__PLACEHOLDER__","oauthAccount":{"accountUuid":"__PLACEHOLDER__","emailAddress":"__PLACEHOLDER__","organizationUuid":"__PLACEHOLDER__","organizationName":"__PLACEHOLDER__","organizationRole":"admin","subscriptionType":"max"},"projects":{"/workspace":{"hasTrustDialogAccepted":true,"hasCompletedProjectOnboarding":true,"projectOnboardingSeenCount":0,"allowedTools":[]}}}' \
+       > /home/vscode/.claude.json \
+    && chown -R vscode:vscode /home/vscode/.claude /home/vscode/.claude.json
 
 # agent-vault broker CA materialization entrypoint (bclaunch-9rr). The script
 # is wired BOTH as the image ENTRYPOINT (runs once on container start as PID 1)

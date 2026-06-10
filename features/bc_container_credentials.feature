@@ -32,26 +32,43 @@ Feature: bc-container launch brokers BC-container credentials through agent-vaul
     Then the command exits zero and the container "bc-shopsystem-messaging" is running
     And launch did not fail resolving any host credential path
 
-  @scenario_hash:c4e88075a0b4bd00 @bc:shopsystem-bc-launcher
-  Scenario: the launched Claude agent is invoked wrapped in agent-vault run
+  # bclaunch-3q12 (canary-found v0.2.5, fixed v0.2.6): TIGHTENED. The runtime
+  # HTTPS_PROXY the launched agent inherits must be the credential-substituting
+  # MITM HTTPS proxy on :14322 with token:vault basic-auth — NOT the bare
+  # :14321 control API. Pre-3q12 the controller set the runtime proxy to the
+  # bare control-API broker_address, so claude's brokered Anthropic calls failed
+  # (CONNECT tunnel failed / 405). The Then now names the :14322 MITM listener
+  # explicitly so a future bare-:14321 regression is caught. Asserts on the
+  # ACTUAL runtime HTTPS_PROXY value injected into `docker run`, not an echoed
+  # string (bclaunch-7ys / 5hl tautology guard).
+  @scenario_hash:46c636684004bde3 @bc:shopsystem-bc-launcher
+  Scenario: the launched Claude agent is invoked wrapped in agent-vault run with its runtime proxy at the broker MITM listener
     Given the shopsystem-bc-launcher BC is installed
     And an agent-vault broker is running on the shopsystem network and is reachable
-    When bc-container launch starts the agent for BC name "shopsystem-messaging"
+    And the operator supplies agent-vault addr "https://agent-vault:14321" token "av_agt_canary_xyz" and vault "shopsystem"
+    When bc-container launch starts the agent for BC name "shopsystem-messaging" with the operator-supplied agent-vault credentials
     Then the command line that launches the agent inside the tmux session named "agent" invokes "agent-vault run -- claude"
-    And the agent process environment sets HTTPS_PROXY to the agent-vault broker's proxy listener on the shopsystem network
+    And the agent process environment sets HTTPS_PROXY to the agent-vault broker's MITM proxy listener on port 14322 with token:vault basic-auth
 
-  # REVISED under operator design directive (no controller bind mounts): the
-  # placeholder .credentials.json is now BAKED INTO the bc-base image rather
-  # than mounted read-only by the controller. The negative-security invariant
-  # is PRESERVED (no real OAuth token anywhere in the container); only the
-  # delivery mechanism changes mount -> baked.
-  @scenario_hash:3931e43e01824a3c @bc:shopsystem-bc-launcher
-  Scenario: the container's Claude credential file is a placeholder baked into the image, never the real OAuth credential
+  # bclaunch-2s6y (canary-found v0.2.5, fixed v0.2.6): SUPERSEDES the bare
+  # {"accessToken":...} shape (old @scenario_hash 3931e43e01824a3c). The bare
+  # shape was wrong: claude wants the NESTED claudeAiOauth stanza, so with the
+  # bare file claude never recognized itself as logged in and sat at its
+  # first-run login-method picker instead of becoming the agent. Re-pinned
+  # against the nested shape: the accessToken INSIDE claudeAiOauth is still the
+  # literal "__PLACEHOLDER__" (no real OAuth token anywhere — the broker
+  # substitutes the real Authorization on the wire). The delivery mechanism
+  # (baked into the bc-base image, no controller mount) is unchanged.
+  @scenario_hash:8dfad9acd7503b3f @bc:shopsystem-bc-launcher
+  Scenario: the container's Claude credential file is a nested-claudeAiOauth placeholder baked into the image, never the real OAuth credential
     Given the shopsystem-bc-launcher BC is installed
     And bc-container launch is run with BC name "shopsystem-messaging"
     And the container "bc-shopsystem-messaging" is running
     When the placeholder ".credentials.json" baked into the bc-base image is read
-    Then its accessToken field has the literal value "__PLACEHOLDER__"
+    Then the baked .credentials.json has a top-level "claudeAiOauth" object
+    And the accessToken inside claudeAiOauth has the literal value "__PLACEHOLDER__"
+    And the refreshToken inside claudeAiOauth has the literal value "__PLACEHOLDER__"
+    And the baked .credentials.json has no top-level "accessToken" field
     And the placeholder credentials file is baked into the image at "/home/vscode/.claude/.credentials.json"
     And the controller builds no credential bind-mount into the container
     And the real host OAuth accessToken value does not appear anywhere in the container's filesystem
@@ -125,12 +142,16 @@ Feature: bc-container launch brokers BC-container credentials through agent-vaul
     Then launch executes no step that stores a real credential into the broker vault
     And launch executes no step that places a real credential inside the container
 
-  @scenario_hash:e4348b11e0b38d4f @bc:shopsystem-bc-launcher
-  Scenario: no real Claude OAuth credential is observable from inside the container
+  # bclaunch-2s6y: SUPERSEDES the bare-shape assertion (old @scenario_hash
+  # e4348b11e0b38d4f). Re-pinned against the NESTED claudeAiOauth shape; the
+  # no-real-credential invariant SURVIVES (every baked value is "__PLACEHOLDER__"
+  # or synthetic), only the JSON shape changes mount-of-bare -> baked-nested.
+  @scenario_hash:0c90e2234954ccc4 @bc:shopsystem-bc-launcher
+  Scenario: no real Claude OAuth credential is observable from inside the container under the nested-claudeAiOauth shape
     Given the container "bc-shopsystem-messaging" is running under the agent-vault model
     When the container's filesystem and process environment are searched from inside the container
     Then the real Claude OAuth accessToken value is not present in any file or environment variable
-    And the only .credentials.json present has accessToken equal to "__PLACEHOLDER__"
+    And the only .credentials.json present has its claudeAiOauth accessToken equal to "__PLACEHOLDER__"
 
   @scenario_hash:b8f2e121a5fd77ba @bc:shopsystem-bc-launcher
   Scenario: no real GitHub credential and no host gh or gitconfig path is observable from inside the container

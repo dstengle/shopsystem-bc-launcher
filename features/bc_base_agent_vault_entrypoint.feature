@@ -43,11 +43,19 @@ Feature: bc-base installs agent-vault, materializes the broker CA from AGENT_VAU
     When the bc-base CA-trust script content is inspected
     Then a /etc/profile.d agent-vault CA script is installed that materializes the CA if missing and exports the five trust vars
 
+  # bclaunch-2s6y: the bake is the SYNTHETIC logged-in state (nested
+  # claudeAiOauth .credentials.json + ~/.claude.json wizard-skip seed) so claude
+  # boots straight to the agent. All values placeholder/synthetic; broker
+  # supplies the real token on the wire.
   @bc_internal @bc:shopsystem-bc-launcher
-  Scenario: the bc-base Dockerfile bakes the placeholder Claude credential
+  Scenario: the bc-base Dockerfile bakes the synthetic logged-in Claude state
     Given the shopsystem-bc-launcher BC repository
     When the bc-base Dockerfile in that repository is inspected
-    Then the Dockerfile bakes a placeholder .credentials.json at "/home/vscode/.claude/.credentials.json" with accessToken "__PLACEHOLDER__"
+    Then the Dockerfile bakes a nested-claudeAiOauth .credentials.json at "/home/vscode/.claude/.credentials.json" whose claudeAiOauth accessToken is "__PLACEHOLDER__"
+    And the baked .credentials.json claudeAiOauth expiresAt is far in the future
+    And the Dockerfile seeds a ~/.claude.json at "/home/vscode/.claude.json" with hasCompletedOnboarding true and bypassPermissionsModeAccepted true
+    And the seeded ~/.claude.json pre-trusts the "/workspace" project
+    And the seeded ~/.claude.json bakes no real Claude OAuth token
 
   @bc_internal @bc:shopsystem-bc-launcher
   Scenario: an ENTRYPOINT is wired so the CA-materialization runs on container start
