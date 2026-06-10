@@ -40,6 +40,32 @@ DEFAULT_STARTUP_PROMPT_TEMPLATE = (
 )
 
 
+def _parse_env_file(path: Path) -> dict[str, str]:
+    """Parse a KEY=VALUE env file into a dict.
+
+    Tolerates blank lines, '#' comments, an optional leading 'export ', and
+    single/double-quoted values.  Surrounding whitespace around the key and the
+    (unquoted) value is stripped.  Lines without '=' are skipped.
+    """
+    result: dict[str, str] = {}
+    for raw in path.read_text().splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export "):].lstrip()
+        if "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        value = value.strip()
+        if (len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"')):
+            value = value[1:-1]
+        if key:
+            result[key] = value
+    return result
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="bc-container",
@@ -61,6 +87,40 @@ def build_parser() -> argparse.ArgumentParser:
             "would otherwise be translated to a clean stderr line "
             "(e.g. malformed bc-manifest.yaml fields).  Equivalent to "
             "setting BCLAUNCHER_DEBUG=1 in the environment."
+        ),
+    )
+    p_launch.add_argument(
+        "--agent-vault-broker",
+        default=None,
+        help=(
+            "Agent-vault broker proxy-listener address (HTTPS_PROXY target / "
+            "readiness probe). Overrides the BCLAUNCHER_AGENT_VAULT_BROKER env "
+            "var and the built-in default. An explicit flag wins over any "
+            "AGENT_VAULT_ADDR supplied via --env-file."
+        ),
+    )
+    p_launch.add_argument(
+        "--env-file",
+        default=None,
+        help=(
+            "Path to a KEY=VALUE env file supplying operator agent-vault "
+            "credentials. AGENT_VAULT_ADDR / AGENT_VAULT_TOKEN / "
+            "AGENT_VAULT_VAULT lines are read and injected into the container "
+            "env; other keys are ignored. Blank lines, '#' comments, an "
+            "optional 'export ' prefix, and single/double-quoted values are "
+            "tolerated. The token is operator-supplied here and never baked "
+            "into source."
+        ),
+    )
+    p_launch.add_argument(
+        "--agent-vault-ca",
+        default=None,
+        help=(
+            "Path to the operator-supplied broker CA file. Bind-mounted "
+            "read-only into the container at a fixed path; "
+            "NODE_EXTRA_CA_CERTS / SSL_CERT_FILE / GIT_SSL_CAINFO are pointed "
+            "at it so HTTPS through the broker's MITM proxy passes cert "
+            "verification."
         ),
     )
     p_launch.add_argument(
@@ -190,12 +250,33 @@ def main(argv: list[str] | None = None) -> int:
         debug = bool(getattr(args, "debug", False)) or bool(
             os.environ.get("BCLAUNCHER_DEBUG")
         )
+
+        # Resolve operator agent-vault credentials (bclaunch-3le).
+        #
+        # --env-file supplies AGENT_VAULT_ADDR / AGENT_VAULT_TOKEN /
+        # AGENT_VAULT_VAULT; the broker has a dedicated --agent-vault-broker
+        # flag.  Precedence (documented): for the broker, an explicit
+        # --agent-vault-broker flag wins over AGENT_VAULT_ADDR from the
+        # env-file.  For ADDR/TOKEN/VAULT the env-file is the supply channel
+        # (no dedicated per-value flags).  controller.launch() further falls
+        # back to the like-named process-env vars when a value is None.
+        env_file_path = getattr(args, "env_file", None)
+        env_vals: dict[str, str] = {}
+        if env_file_path:
+            env_vals = _parse_env_file(Path(env_file_path))
+        ca_arg = getattr(args, "agent_vault_ca", None)
+
         result = controller.launch(
             bc_name=args.bc_name,
             repo_url=getattr(args, "repo_url", None),
             shopmsg_dsn=getattr(args, "shopmsg_dsn", None),
             startup_prompt=startup_prompt,
             network=getattr(args, "network", None),
+            agent_vault_broker=getattr(args, "agent_vault_broker", None),
+            agent_vault_addr=env_vals.get("AGENT_VAULT_ADDR"),
+            agent_vault_token=env_vals.get("AGENT_VAULT_TOKEN"),
+            agent_vault_vault=env_vals.get("AGENT_VAULT_VAULT"),
+            agent_vault_ca=Path(ca_arg) if ca_arg else None,
             debug=debug,
         )
         sys.stdout.write(result.stdout)
