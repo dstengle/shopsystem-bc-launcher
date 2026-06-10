@@ -105,22 +105,13 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Path to a KEY=VALUE env file supplying operator agent-vault "
             "credentials. AGENT_VAULT_ADDR / AGENT_VAULT_TOKEN / "
-            "AGENT_VAULT_VAULT lines are read and injected into the container "
-            "env; other keys are ignored. Blank lines, '#' comments, an "
+            "AGENT_VAULT_VAULT / AGENT_VAULT_CA_PEM lines are read and injected "
+            "into the container env (the broker CA travels as the public "
+            "AGENT_VAULT_CA_PEM env var, materialized by the bc-base "
+            "entrypoint); other keys are ignored. Blank lines, '#' comments, an "
             "optional 'export ' prefix, and single/double-quoted values are "
             "tolerated. The token is operator-supplied here and never baked "
             "into source."
-        ),
-    )
-    p_launch.add_argument(
-        "--agent-vault-ca",
-        default=None,
-        help=(
-            "Path to the operator-supplied broker CA file. Bind-mounted "
-            "read-only into the container at a fixed path; "
-            "NODE_EXTRA_CA_CERTS / SSL_CERT_FILE / GIT_SSL_CAINFO are pointed "
-            "at it so HTTPS through the broker's MITM proxy passes cert "
-            "verification."
         ),
     )
     p_launch.add_argument(
@@ -264,7 +255,16 @@ def main(argv: list[str] | None = None) -> int:
         env_vals: dict[str, str] = {}
         if env_file_path:
             env_vals = _parse_env_file(Path(env_file_path))
-        ca_arg = getattr(args, "agent_vault_ca", None)
+
+        # Export any AGENT_VAULT_* keys the env-file supplied (notably the
+        # public AGENT_VAULT_CA_PEM broker CA) into the process env so
+        # controller.launch()'s AGENT_VAULT_* pass-through forwards them into
+        # the container env.  The broker CA now travels as this env var (no
+        # --agent-vault-ca path flag, no controller bind-mount).  The token
+        # remains operator-supplied and is never baked into source.
+        for key, value in env_vals.items():
+            if key.startswith("AGENT_VAULT_"):
+                os.environ.setdefault(key, value)
 
         result = controller.launch(
             bc_name=args.bc_name,
@@ -276,7 +276,6 @@ def main(argv: list[str] | None = None) -> int:
             agent_vault_addr=env_vals.get("AGENT_VAULT_ADDR"),
             agent_vault_token=env_vals.get("AGENT_VAULT_TOKEN"),
             agent_vault_vault=env_vals.get("AGENT_VAULT_VAULT"),
-            agent_vault_ca=Path(ca_arg) if ca_arg else None,
             debug=debug,
         )
         sys.stdout.write(result.stdout)

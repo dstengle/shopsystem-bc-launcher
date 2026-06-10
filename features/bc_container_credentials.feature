@@ -40,14 +40,20 @@ Feature: bc-container launch brokers BC-container credentials through agent-vaul
     Then the command line that launches the agent inside the tmux session named "agent" invokes "agent-vault run -- claude"
     And the agent process environment sets HTTPS_PROXY to the agent-vault broker's proxy listener on the shopsystem network
 
+  # REVISED under operator design directive (no controller bind mounts): the
+  # placeholder .credentials.json is now BAKED INTO the bc-base image rather
+  # than mounted read-only by the controller. The negative-security invariant
+  # is PRESERVED (no real OAuth token anywhere in the container); only the
+  # delivery mechanism changes mount -> baked.
   @scenario_hash:3931e43e01824a3c @bc:shopsystem-bc-launcher
-  Scenario: the container's Claude credential file is a placeholder, never the real OAuth credential
+  Scenario: the container's Claude credential file is a placeholder baked into the image, never the real OAuth credential
     Given the shopsystem-bc-launcher BC is installed
     And bc-container launch is run with BC name "shopsystem-messaging"
     And the container "bc-shopsystem-messaging" is running
-    When the file ".credentials.json" mounted into the container is read
+    When the placeholder ".credentials.json" baked into the bc-base image is read
     Then its accessToken field has the literal value "__PLACEHOLDER__"
-    And the file is mounted read-only
+    And the placeholder credentials file is baked into the image at "/home/vscode/.claude/.credentials.json"
+    And the controller builds no credential bind-mount into the container
     And the real host OAuth accessToken value does not appear anywhere in the container's filesystem
 
   @scenario_hash:97734ca69a510e37 @bc:shopsystem-bc-launcher

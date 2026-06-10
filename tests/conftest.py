@@ -2762,6 +2762,29 @@ _REAL_GITHUB_TOKEN = "ghp_REAL_github_token_DO_NOT_LEAK"
 # An unreachable broker address used by the broker-down readiness/health paths.
 _UNREACHABLE_BROKER = "http://no-such-agent-vault.invalid:9999"
 
+# The placeholder .credentials.json is now BAKED INTO the bc-base image
+# (docker/bc-base/Dockerfile, bclaunch-9rr) rather than mounted read-only by
+# the controller.  This models the file that the image carries at
+# /home/vscode/.claude/.credentials.json.  The bake content is authoritatively
+# pinned by the Dockerfile; tests read it the same way the bc-base structural
+# tests do (parse the committed Dockerfile content).
+_BAKED_CREDENTIALS_PATH = "/home/vscode/.claude/.credentials.json"
+
+
+def _baked_placeholder_credentials() -> dict:
+    """Read the placeholder accessToken baked into the bc-base Dockerfile.
+
+    The Dockerfile bakes a literal {"accessToken":"__PLACEHOLDER__"} file at
+    /home/vscode/.claude/.credentials.json.  We parse the committed Dockerfile
+    content (docker build is NOT run — docker is unavailable) to recover the
+    baked accessToken, so this models exactly what the image will carry.
+    """
+    dockerfile = _find_bc_base_dockerfile()
+    text = dockerfile.read_text() if dockerfile else ""
+    import re as _re
+    m = _re.search(r'"accessToken"\s*:\s*"([^"]+)"', text)
+    return {"accessToken": m.group(1)} if m else {}
+
 
 def _agent_vault_launch(ctx, controller, fake_driver, tmp_path, bc_name,
                         *, startup_prompt=None, broker=None, dsn=None):
@@ -2966,23 +2989,12 @@ def launch_with_brokered_startup_prompt(bc_name, ctx, controller, fake_driver,
     )
 
 
-@when('the file ".credentials.json" mounted into the container is read')
-def read_placeholder_credentials(ctx, fake_driver):
-    container_name = ctx["container_name"]
-    mounts = fake_driver.get_mounts(container_name)
-    cred_mounts = [
-        m for m in mounts
-        if m.destination == CONTAINER_CLAUDE_CREDENTIALS_PATH
-    ]
-    assert cred_mounts, (
-        f"Expected a placeholder credentials mount at "
-        f"{CONTAINER_CLAUDE_CREDENTIALS_PATH} in {container_name!r}; "
-        f"mounts: {[(m.source, m.destination) for m in mounts]!r}"
-    )
-    import json as _json
-    ctx["credentials_content"] = _json.loads(
-        Path(cred_mounts[0].source).read_text()
-    )
+@when('the placeholder ".credentials.json" baked into the bc-base image is read')
+def read_baked_placeholder_credentials(ctx):
+    # REVISED (lead-v4ih 3931e43e): the placeholder is now baked into the
+    # bc-base image, not mounted by the controller.  Read what the image
+    # carries by parsing the committed Dockerfile bake.
+    ctx["credentials_content"] = _baked_placeholder_credentials()
 
 
 @when("an authenticated GitHub operation is run from inside the container "
@@ -3015,15 +3027,11 @@ def search_container_for_secrets(ctx, fake_driver):
     ctx["container_env_values"] = [
         fake_driver.container_proxy_env(container_name)
     ]
-    # Container files: only the placeholder .credentials.json.
-    mounts = fake_driver.get_mounts(container_name)
-    cred = [m for m in mounts
-            if m.destination == CONTAINER_CLAUDE_CREDENTIALS_PATH]
-    import json as _json
-    ctx["container_credentials_json"] = (
-        _json.loads(Path(cred[0].source).read_text()) if cred else None
-    )
+    # Container files: the only .credentials.json present is the placeholder
+    # BAKED INTO the bc-base image (no longer a controller mount).
+    ctx["container_credentials_json"] = _baked_placeholder_credentials()
     # No host gh/gitconfig path mounted.
+    mounts = fake_driver.get_mounts(container_name)
     ctx["container_mount_destinations"] = [m.destination for m in mounts]
 
 
@@ -3142,21 +3150,36 @@ def assert_access_token_literal(value, ctx):
     )
 
 
-@then("the file is mounted read-only")
-def assert_credentials_file_readonly(ctx, fake_driver):
-    container_name = ctx["container_name"]
-    run_cmd = fake_driver.run_command_for_container(container_name)
-    found_ro = False
-    for i, tok in enumerate(run_cmd):
-        if tok == "--mount" and i + 1 < len(run_cmd):
-            spec = run_cmd[i + 1]
-            if (f"target={CONTAINER_CLAUDE_CREDENTIALS_PATH}" in spec
-                    and "readonly" in spec):
-                found_ro = True
-    assert found_ro, (
-        f"Expected the placeholder credentials mount at "
-        f"{CONTAINER_CLAUDE_CREDENTIALS_PATH} to be read-only.\n"
-        f"Run command: {run_cmd!r}"
+@then(parsers.parse(
+    'the placeholder credentials file is baked into the image at "{path}"'
+))
+def assert_credentials_baked_into_image(path, ctx):
+    # The Dockerfile bakes the placeholder at the fixed container path; assert
+    # the committed Dockerfile both bakes the placeholder accessToken AND
+    # targets the expected path.
+    dockerfile = _find_bc_base_dockerfile()
+    assert dockerfile is not None, "No bc-base Dockerfile found"
+    text = dockerfile.read_text()
+    assert path in text, (
+        f"Expected the bc-base Dockerfile to bake the placeholder credentials "
+        f"file at {path!r}; not present in Dockerfile content."
+    )
+    content = ctx.get("credentials_content") or {}
+    assert content.get("accessToken") == AGENT_VAULT_PLACEHOLDER_TOKEN, (
+        f"Expected baked accessToken {AGENT_VAULT_PLACEHOLDER_TOKEN!r}, "
+        f"got {content.get('accessToken')!r}"
+    )
+
+
+@then("the controller builds no credential bind-mount into the container")
+def assert_no_credential_mount(ctx, fake_driver):
+    mounts = fake_driver.container_mounts_full(ctx["container_name"])
+    offenders = [
+        m for m in mounts if m[2] == CONTAINER_CLAUDE_CREDENTIALS_PATH
+    ]
+    assert not offenders, (
+        f"Expected the controller to build NO credential bind-mount at "
+        f"{CONTAINER_CLAUDE_CREDENTIALS_PATH}; found {offenders!r}"
     )
 
 
@@ -3410,9 +3433,6 @@ from bc_launcher.controller import (
     AGENT_VAULT_TOKEN_ENV,
     AGENT_VAULT_VAULT_ENV,
     CONTAINER_BROKER_CA_PATH,
-    NODE_EXTRA_CA_CERTS_ENV,
-    SSL_CERT_FILE_ENV,
-    GIT_SSL_CAINFO_ENV,
 )
 
 
@@ -3450,7 +3470,6 @@ def launch_with_operator_av_creds(bc_name, ctx, controller, fake_driver,
         agent_vault_addr=ctx.get("av_addr"),
         agent_vault_token=ctx.get("av_token"),
         agent_vault_vault=ctx.get("av_vault"),
-        agent_vault_ca=ctx.get("av_ca"),
     )
     ctx["result"] = result
     ctx["container_name"] = f"bc-{bc_name}"
@@ -3524,21 +3543,22 @@ def assert_only_placeholder_literal(placeholder, ctx):
     )
 
 
-# --- bclaunch-7pf: broker CA mount + TLS-trust env -------------------------
+# --- bclaunch-7pf (REVISED): broker CA travels as AGENT_VAULT_CA_PEM env, ---
+# --- controller builds NO CA bind-mount and sets NO controller-side trust env
 
-@given(parsers.parse('the operator supplies a broker CA file'))
-def operator_supplies_broker_ca(ctx, tmp_path):
-    ca_path = tmp_path / "broker-ca.pem"
-    # A fake PEM is sufficient: the controller only mounts whatever CA path it
-    # is handed; real broker CA content is not needed for red-green (docker
-    # CLI is absent in this environment so a live `agent-vault ca fetch` is
-    # impossible).
-    ca_path.write_text(
-        "-----BEGIN CERTIFICATE-----\nFAKEBROKERCAFORTESTS\n"
-        "-----END CERTIFICATE-----\n"
-    )
-    ctx["av_ca"] = ca_path
-    ctx["av_ca_path"] = ca_path
+# A fake PEM (~the real CA is ~574 bytes, PUBLIC not secret).  The operator
+# supplies it as a line in --env-file; the controller injects it into the
+# container env under AGENT_VAULT_CA_PEM and the bc-base entrypoint
+# (bclaunch-9rr) materializes it to a file + trust env vars.
+_FAKE_BROKER_CA_PEM = (
+    "-----BEGIN CERTIFICATE-----\nFAKEBROKERCAFORTESTS\n"
+    "-----END CERTIFICATE-----\n"
+)
+
+
+@given(parsers.parse('the operator supplies the broker CA PEM via AGENT_VAULT_CA_PEM'))
+def operator_supplies_broker_ca_pem(ctx):
+    ctx["av_ca_pem"] = _FAKE_BROKER_CA_PEM
 
 
 @when(parsers.parse(
@@ -3554,34 +3574,72 @@ def launch_with_ca_and_creds(bc_name, ctx, controller, fake_driver, tmp_path):
             "product": "shopsystem product",
             "bcs": [{"name": bc_name, "remote": repo_url, "role": "bc"}],
         }))
-    result = controller.launch(
-        bc_name=bc_name,
-        repo_url=repo_url,
-        manifest_path=manifest_path,
-        credential_home=ctx.get("credential_home"),
-        agent_vault_addr=ctx.get("av_addr"),
-        agent_vault_token=ctx.get("av_token"),
-        agent_vault_vault=ctx.get("av_vault"),
-        agent_vault_ca=ctx.get("av_ca"),
-    )
+    # The broker CA PEM is supplied to the launcher as an AGENT_VAULT_CA_PEM
+    # process-env line (as if sourced from --env-file).  The controller widens
+    # its AGENT_VAULT_* injection to carry it through into the container env.
+    monkey = ctx.get("_monkeypatch")
+    env_overrides = {
+        "AGENT_VAULT_ADDR": ctx.get("av_addr"),
+        "AGENT_VAULT_TOKEN": ctx.get("av_token"),
+        "AGENT_VAULT_VAULT": ctx.get("av_vault"),
+        "AGENT_VAULT_CA_PEM": ctx.get("av_ca_pem"),
+    }
+    import os as _os
+    saved = {}
+    for k, v in env_overrides.items():
+        saved[k] = _os.environ.get(k)
+        if v is not None:
+            _os.environ[k] = v
+    try:
+        result = controller.launch(
+            bc_name=bc_name,
+            repo_url=repo_url,
+            manifest_path=manifest_path,
+            credential_home=ctx.get("credential_home"),
+        )
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                _os.environ.pop(k, None)
+            else:
+                _os.environ[k] = v
     ctx["result"] = result
     ctx["container_name"] = f"bc-{bc_name}"
     ctx["bc_name"] = bc_name
 
 
 @then(parsers.parse(
-    'the broker CA is bind-mounted read-only into the container at "{path}"'
+    'the container env has AGENT_VAULT_CA_PEM set to the operator-supplied '
+    'broker CA PEM'
 ))
-def assert_ca_mounted_ro(path, ctx, fake_driver):
-    mounts = fake_driver.container_mounts_full(ctx["container_name"])
-    ca_mounts = [m for m in mounts if m[2] == path]
-    assert ca_mounts, (
-        f"Expected a bind mount targeting {path!r}; mounts: {mounts!r}"
+def assert_ca_pem_env(ctx, fake_driver):
+    env = fake_driver.container_env(ctx["container_name"])
+    assert env.get("AGENT_VAULT_CA_PEM") == ctx["av_ca_pem"], (
+        f"Expected AGENT_VAULT_CA_PEM to carry the operator-supplied broker "
+        f"CA PEM into the container env; got {env.get('AGENT_VAULT_CA_PEM')!r}"
     )
-    mount_type, source, dest, readonly = ca_mounts[0]
-    assert mount_type == "bind", f"Expected a bind mount, got {mount_type!r}"
-    assert readonly, f"Expected the broker CA mount at {path!r} to be read-only"
-    ctx["ca_mount_source"] = source
+
+
+@then(parsers.parse(
+    'no bind mount inside the container targets "{path}"'
+))
+def assert_no_mount_targets(path, ctx, fake_driver):
+    mounts = fake_driver.container_mounts_full(ctx["container_name"])
+    offenders = [m for m in mounts if m[2] == path]
+    assert not offenders, (
+        f"Expected NO bind mount targeting {path!r}; found {offenders!r}"
+    )
+
+
+@then(parsers.parse(
+    'the container env has no {var} key set by the controller'
+))
+def assert_env_var_absent(var, ctx, fake_driver):
+    env = fake_driver.container_env(ctx["container_name"])
+    assert var not in env, (
+        f"Expected the controller to set NO {var} env key (the bc-base "
+        f"entrypoint owns trust vars now); got {var}={env.get(var)!r}"
+    )
 
 
 @then(parsers.parse('the container env has {var} set to "{value}"'))
@@ -4263,4 +4321,195 @@ def then_container_runs_from_new_digest(container_name, new_digest, old_digest, 
         f"Container {container_name} started from the moving :latest tag (the "
         f"cached {old_digest!r}) instead of the resolved digest pin: "
         f"{image_ref!r}."
+    )
+
+
+# ===========================================================================
+# bclaunch-9rr: bc-base agent-vault install + CA-materialization entrypoint +
+# baked placeholder credential.  BC-INTERNAL structural inspection of the
+# COMMITTED Dockerfile and CA-trust script content (docker build is NOT run).
+# ===========================================================================
+
+# The five TLS-trust env var names are FIXED by the operator design.
+_AGENT_VAULT_TRUST_VARS = (
+    "GIT_SSL_CAINFO",
+    "SSL_CERT_FILE",
+    "NODE_EXTRA_CA_CERTS",
+    "REQUESTS_CA_BUNDLE",
+    "CURL_CA_BUNDLE",
+)
+# The container CA path is FIXED by the operator design.
+_AGENT_VAULT_CONTAINER_CA_PATH = "/home/vscode/.config/agent-vault/ca.pem"
+
+
+def _bc_base_dir() -> Path:
+    return _REPO_ROOT / "docker" / "bc-base"
+
+
+def _ca_trust_script_path() -> Path | None:
+    """Return the committed CA-trust entrypoint/profile script, or None."""
+    candidate = _bc_base_dir() / "agent-vault-ca.sh"
+    return candidate if candidate.is_file() else None
+
+
+@when("the bc-base CA-trust script content is inspected")
+def when_ca_trust_script_inspected(ctx):
+    ctx["bc_base_dockerfile"] = _find_bc_base_dockerfile()
+    ctx["ca_trust_script"] = _ca_trust_script_path()
+
+
+@then("the Dockerfile installs the agent-vault binary with a version pin present")
+def then_agent_vault_installed_pinned(ctx):
+    dockerfile = ctx.get("bc_base_dockerfile")
+    assert dockerfile is not None, "No bc-base Dockerfile found"
+    text = dockerfile.read_text()
+    assert "agent-vault" in text, (
+        "bc-base Dockerfile does not install agent-vault"
+    )
+    # Structural: assert a version pin is PRESENT alongside an agent-vault
+    # install line, regardless of the exact (PROVISIONAL) value.  Accept either
+    # the pip VCS-pin idiom (...@vMAJOR.MINOR.PATCH) or a Go-binary release pin
+    # (AGENT_VAULT_VERSION=MAJOR.MINOR.PATCH), mirroring the bd binary block.
+    pip_pin = re.search(
+        r"agent-vault[^\n]*@v\d+\.\d+\.\d+", text
+    )
+    version_var_pin = re.search(
+        r"AGENT_VAULT_VERSION\s*=\s*v?\d+\.\d+\.\d+", text
+    )
+    assert pip_pin or version_var_pin, (
+        "bc-base Dockerfile installs agent-vault WITHOUT a version pin present "
+        "(expected either '<pkg> @ ...@vMAJOR.MINOR.PATCH' or "
+        "'AGENT_VAULT_VERSION=MAJOR.MINOR.PATCH').\n"
+        f"Dockerfile content:\n{text}"
+    )
+
+
+@then("the script is conditional on AGENT_VAULT_CA_PEM being set")
+def then_script_conditional_on_ca_pem(ctx):
+    script = ctx.get("ca_trust_script")
+    assert script is not None, (
+        "No CA-trust script found at docker/bc-base/agent-vault-ca.sh"
+    )
+    text = script.read_text()
+    assert "AGENT_VAULT_CA_PEM" in text, (
+        "CA-trust script does not reference AGENT_VAULT_CA_PEM"
+    )
+    # A guard must gate the materialization on the var being set/non-empty.
+    assert re.search(
+        r'(-n\s+"?\$\{?AGENT_VAULT_CA_PEM|if\s+\[\s+-n.*AGENT_VAULT_CA_PEM'
+        r'|\$\{AGENT_VAULT_CA_PEM:[-+])',
+        text,
+    ), (
+        "CA-trust script does not guard materialization on AGENT_VAULT_CA_PEM "
+        "being set"
+    )
+
+
+@then(parsers.parse('the script writes the CA to "{path}"'))
+def then_script_writes_ca(path, ctx):
+    script = ctx.get("ca_trust_script")
+    assert script is not None, "No CA-trust script found"
+    text = script.read_text()
+    assert path == _AGENT_VAULT_CONTAINER_CA_PATH, (
+        f"Feature names CA path {path!r} but the fixed design path is "
+        f"{_AGENT_VAULT_CONTAINER_CA_PATH!r}"
+    )
+    assert path in text, (
+        f"CA-trust script does not write the CA to {path!r}"
+    )
+
+
+@then(parsers.parse('the script exports {var} pointing at the container CA path'))
+def then_script_exports_trust_var(var, ctx):
+    script = ctx.get("ca_trust_script")
+    assert script is not None, "No CA-trust script found"
+    text = script.read_text()
+    assert var in _AGENT_VAULT_TRUST_VARS, (
+        f"{var!r} is not one of the five fixed trust vars "
+        f"{_AGENT_VAULT_TRUST_VARS!r}"
+    )
+    # The var must be exported AND resolve to the fixed container CA path.
+    assert re.search(rf"export\s+{re.escape(var)}=", text), (
+        f"CA-trust script does not export {var}"
+    )
+    # Find the assignment value.  Accept either the literal CA path OR a shell
+    # variable (e.g. AGENT_VAULT_CA_PATH) that is itself defined to the fixed
+    # container CA path elsewhere in the script.
+    m = re.search(rf"{re.escape(var)}=([^\n]+)", text)
+    assert m, f"CA-trust script has no {var}= assignment"
+    value = m.group(1)
+    points_at_path = _AGENT_VAULT_CONTAINER_CA_PATH in value
+    if not points_at_path:
+        # Resolve a single ${VARNAME} / $VARNAME indirection to its definition.
+        ref = re.search(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?", value)
+        if ref:
+            ref_var = ref.group(1)
+            defn = re.search(rf'{re.escape(ref_var)}=("?){re.escape(_AGENT_VAULT_CONTAINER_CA_PATH)}',
+                             text)
+            points_at_path = defn is not None
+    assert points_at_path, (
+        f"{var} is not pointed at the container CA path "
+        f"{_AGENT_VAULT_CONTAINER_CA_PATH!r} (value: {value!r})"
+    )
+
+
+@then("a /etc/profile.d agent-vault CA script is installed that materializes "
+      "the CA if missing and exports the five trust vars")
+def then_profile_d_script_installed(ctx):
+    # The Dockerfile must install the CA-trust script into /etc/profile.d so
+    # exec/login shells (the `docker exec ... agent-vault run -- claude` path,
+    # which does NOT inherit the entrypoint's process-local exports) see the
+    # trust vars.  The script itself must materialize the CA file if missing
+    # and export all five trust vars.
+    dockerfile = ctx.get("bc_base_dockerfile")
+    assert dockerfile is not None, "No bc-base Dockerfile found"
+    df_text = dockerfile.read_text()
+    assert "/etc/profile.d" in df_text and "agent-vault" in df_text, (
+        "bc-base Dockerfile does not install an agent-vault CA script under "
+        "/etc/profile.d for exec/login-shell durability"
+    )
+    script = ctx.get("ca_trust_script")
+    assert script is not None, "No CA-trust script found"
+    text = script.read_text()
+    # Materialize-if-missing: a guard that (re)writes the CA file when absent.
+    assert _AGENT_VAULT_CONTAINER_CA_PATH in text, (
+        "CA-trust script does not materialize the CA file path"
+    )
+    for var in _AGENT_VAULT_TRUST_VARS:
+        assert re.search(rf"export\s+{re.escape(var)}=", text), (
+            f"CA-trust script does not export {var} for login/exec shells"
+        )
+
+
+@then(parsers.parse(
+    'the Dockerfile bakes a placeholder .credentials.json at "{path}" with '
+    'accessToken "{token}"'
+))
+def then_dockerfile_bakes_placeholder(path, token, ctx):
+    dockerfile = ctx.get("bc_base_dockerfile")
+    assert dockerfile is not None, "No bc-base Dockerfile found"
+    text = dockerfile.read_text()
+    assert path in text, (
+        f"bc-base Dockerfile does not bake the placeholder credential at {path!r}"
+    )
+    assert re.search(
+        rf'"accessToken"\s*:\s*"{re.escape(token)}"', text
+    ), (
+        f"bc-base Dockerfile does not bake accessToken {token!r}"
+    )
+
+
+@then("the Dockerfile declares an ENTRYPOINT that runs the agent-vault CA "
+      "entrypoint script")
+def then_dockerfile_declares_entrypoint(ctx):
+    dockerfile = ctx.get("bc_base_dockerfile")
+    assert dockerfile is not None, "No bc-base Dockerfile found"
+    text = dockerfile.read_text()
+    assert re.search(r"^\s*ENTRYPOINT", text, re.MULTILINE), (
+        "bc-base Dockerfile declares no ENTRYPOINT (the image previously had "
+        "only CMD); the CA-materialization entrypoint must run on container "
+        "start"
+    )
+    assert "agent-vault" in text, (
+        "bc-base ENTRYPOINT does not reference the agent-vault CA script"
     )

@@ -86,16 +86,22 @@ AGENT_VAULT_ADDR_ENV = "AGENT_VAULT_ADDR"
 AGENT_VAULT_TOKEN_ENV = "AGENT_VAULT_TOKEN"
 AGENT_VAULT_VAULT_ENV = "AGENT_VAULT_VAULT"
 
-# The fixed container path at which the operator-supplied broker CA file is
-# bind-mounted read-only.  The broker performs TLS MITM substitution on
-# outbound HTTPS (via HTTPS_PROXY); without this CA trusted inside the
-# container, node (claude), python and git HTTPS calls through the proxy fail
-# cert verification.  These three env vars point the respective runtimes'
-# trust stores at the mounted CA.
+# The broker CA travels as an env var (bclaunch-7pf REVISED, operator design
+# directive — supersedes the 9ca2e05 CA bind-mount).  The CA is a PUBLIC
+# ~574-byte cert (NOT secret).  A controller-side CA bind-mount is UNSAFE under
+# nested-docker / host-path mismatch and the design goal is to eliminate
+# controller bind mounts entirely.  So the operator supplies the CA PEM via
+# --env-file as AGENT_VAULT_CA_PEM; the controller injects it into the
+# container env, and the bc-base entrypoint (bclaunch-9rr) materializes it to a
+# file and exports the TLS-trust vars.  The controller does NO CA handling and
+# builds NO CA bind-mount.
+AGENT_VAULT_CA_PEM_ENV = "AGENT_VAULT_CA_PEM"
+
+# The fixed container path at which the bc-base entrypoint materializes the CA
+# from AGENT_VAULT_CA_PEM.  Retained here only so tests/scenarios can name the
+# (former) controller-side path and assert the controller builds NO mount at
+# it; the controller itself no longer references it.
 CONTAINER_BROKER_CA_PATH = "/etc/agent-vault/broker-ca.pem"
-NODE_EXTRA_CA_CERTS_ENV = "NODE_EXTRA_CA_CERTS"  # claude / node
-SSL_CERT_FILE_ENV = "SSL_CERT_FILE"              # python / openssl
-GIT_SSL_CAINFO_ENV = "GIT_SSL_CAINFO"            # git
 
 # The container-internal path of the placeholder Claude credentials file.
 CONTAINER_CLAUDE_CREDENTIALS_PATH = "/home/vscode/.claude/.credentials.json"
@@ -355,7 +361,6 @@ class BcContainerController:
         agent_vault_addr: str | None = None,
         agent_vault_token: str | None = None,
         agent_vault_vault: str | None = None,
-        agent_vault_ca: Path | None = None,
         debug: bool = False,
     ) -> CommandResult:
         """
@@ -370,13 +375,20 @@ class BcContainerController:
            network name.  If the network does not yet exist, create it first.
         3. If neither source is available, return a non-zero error.
 
-        Credential model (ADR-026 — agent-vault broker, the SOLE path):
+        Credential model (ADR-026 — agent-vault broker, the SOLE path; CA via
+        env var per the operator no-bind-mount directive):
         NO host credential directory or file is bind-mounted into the
-        container.  ``BCLAUNCHER_HOST_HOME`` is not consulted to resolve any
-        credential mount source.  Instead:
-          - a placeholder-only, read-only ``.credentials.json`` is mounted at
-            ``/home/vscode/.claude/.credentials.json`` whose ``accessToken`` is
-            the literal ``"__PLACEHOLDER__"`` (never a real OAuth token);
+        container, and the controller builds ZERO credential/CA bind mounts.
+        ``BCLAUNCHER_HOST_HOME`` is not consulted to resolve any credential
+        mount source.  Instead:
+          - the placeholder-only ``.credentials.json`` whose ``accessToken`` is
+            the literal ``"__PLACEHOLDER__"`` is BAKED INTO the bc-base image at
+            ``/home/vscode/.claude/.credentials.json`` (never a real OAuth
+            token; no controller mount);
+          - the operator-supplied broker CA PEM travels as the
+            ``AGENT_VAULT_CA_PEM`` container env var (supplied via
+            ``--env-file``); the bc-base entrypoint materializes it to a file
+            and exports the TLS-trust vars.  The controller does NO CA handling;
           - the agent is invoked wrapped as ``agent-vault run -- claude`` with
             ``HTTPS_PROXY`` pointed at the broker's proxy listener on the
             shopsystem network, so the broker substitutes the real Claude OAuth
@@ -472,62 +484,34 @@ class BcContainerController:
         if resolved_av_vault:
             env[AGENT_VAULT_VAULT_ENV] = resolved_av_vault
 
-        # --- Broker CA TLS-trust env (bclaunch-7pf) ---
-        # When the operator supplies a broker CA, point node (claude), python
-        # and git at the fixed container path the CA will be mounted at below,
-        # so HTTPS calls through the broker's MITM proxy pass cert
-        # verification.  Only set these when a CA is supplied; the mount that
-        # backs them is added to ``mounts`` further down.
-        if agent_vault_ca is not None:
-            env[NODE_EXTRA_CA_CERTS_ENV] = CONTAINER_BROKER_CA_PATH
-            env[SSL_CERT_FILE_ENV] = CONTAINER_BROKER_CA_PATH
-            env[GIT_SSL_CAINFO_ENV] = CONTAINER_BROKER_CA_PATH
+        # --- Broker CA via env var (bclaunch-7pf REVISED) ---
+        # The operator supplies the PUBLIC broker CA PEM as an AGENT_VAULT_CA_PEM
+        # line in --env-file (sourced into the launcher's process env).  Carry
+        # it through into the container env so the bc-base entrypoint
+        # (bclaunch-9rr) can materialize it to a file and export the TLS-trust
+        # vars.  No CA bind-mount and no controller-side trust env are built —
+        # the controller does ZERO CA handling beyond this pass-through.
+        #
+        # General rule: inject every AGENT_VAULT_* key present in the process
+        # env into the container env (without clobbering an explicit-param
+        # value set above), keeping the "token never baked / operator-supplied"
+        # property — the launcher only forwards what the operator supplied.
+        for key, value in os.environ.items():
+            if key.startswith("AGENT_VAULT_") and key not in env:
+                env[key] = value
 
         if shopmsg_dsn:
             env[SHOPMSG_DSN_ENV] = shopmsg_dsn
         elif dsn := os.environ.get(SHOPMSG_DSN_ENV):
             env[SHOPMSG_DSN_ENV] = dsn
 
-        # --- Placeholder Claude credential file (read-only) ---
-        # Stage a placeholder-only .credentials.json whose accessToken is the
-        # literal "__PLACEHOLDER__" and mount it READ-ONLY into the container.
-        # This satisfies any tooling that expects the file to exist while
-        # guaranteeing no real OAuth token is ever placed inside the container
-        # (scenarios 3931e43e / e4348b11).  The real credential is held only by
-        # the broker, provisioned out of band.
-        import json
-        import tempfile
-        staging_root = (
-            credential_home if credential_home is not None
-            else Path(tempfile.mkdtemp(prefix="bclauncher-placeholder-"))
-        )
-        placeholder_path = staging_root / ".agent-vault-credentials.json"
-        placeholder_path.write_text(
-            json.dumps({"accessToken": AGENT_VAULT_PLACEHOLDER_TOKEN})
-        )
-
-        # Mounts: placeholder credential file (read-only) + optional SHOPMSG socket
-        # Each entry: (type, source, dest, readonly)
+        # --- Mounts (bclaunch-7pf REVISED: ZERO credential/CA bind mounts) ---
+        # The placeholder .credentials.json is BAKED INTO the bc-base image
+        # (no controller mount) and the broker CA travels as AGENT_VAULT_CA_PEM
+        # (no controller mount).  The ONLY conditional mount remaining is the
+        # SHOPMSG unix-socket mount below, which is functional transport, not
+        # credential coupling.  Each entry: (type, source, dest, readonly).
         mounts: list[tuple[str, str, str, bool]] = []
-        mounts.append((
-            "bind",
-            str(_resolve_host_path(placeholder_path)),
-            CONTAINER_CLAUDE_CREDENTIALS_PATH,
-            True,
-        ))
-
-        # Broker CA mount (bclaunch-7pf).  Bind-mount the operator-supplied
-        # broker CA file READ-ONLY at the fixed container path the TLS-trust
-        # env vars (set above) point at.  Use _resolve_host_path on the mount
-        # source so a CA path valid inside a bind-mounted devcontainer resolves
-        # to its host-visible source, exactly as the placeholder file does.
-        if agent_vault_ca is not None:
-            mounts.append((
-                "bind",
-                str(_resolve_host_path(Path(agent_vault_ca))),
-                CONTAINER_BROKER_CA_PATH,
-                True,
-            ))
 
         # SHOPMSG_DSN may be a postgres DSN (no socket mount needed) or a
         # unix socket path.  If the DSN value looks like a socket file, add a

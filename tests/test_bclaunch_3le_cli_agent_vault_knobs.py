@@ -8,7 +8,12 @@ never passed it; the launch subparser had no agent-vault flags and no
   * --agent-vault-broker  -> threaded through to launch(agent_vault_broker=)
   * --env-file            -> parsed KEY=VALUE; AGENT_VAULT_ADDR/TOKEN/VAULT
                              supplied to launch()
-  * --agent-vault-ca      -> launch(agent_vault_ca=)
+
+  REVISED (operator design directive, broker-CA via env var): the
+  --agent-vault-ca path flag is REMOVED — the broker CA now travels as the
+  AGENT_VAULT_CA_PEM container env var (operator-supplied via --env-file),
+  materialized by the bc-base entrypoint.  This file no longer asserts a
+  --agent-vault-ca flag or an agent_vault_ca launch() param.
 
 Precedence (documented): an explicit flag wins over the env-file value for the
 broker; for ADDR/TOKEN/VAULT the env-file is the supply channel (there are no
@@ -62,11 +67,12 @@ def test_launch_parser_accepts_env_file():
     assert args.env_file == "/tmp/x.env"
 
 
-def test_launch_parser_accepts_agent_vault_ca():
-    args = build_parser().parse_args(
-        ["launch", "shopsystem-messaging", "--agent-vault-ca", "/tmp/ca.pem"]
-    )
-    assert args.agent_vault_ca == "/tmp/ca.pem"
+def test_launch_parser_rejects_removed_agent_vault_ca_flag():
+    """The --agent-vault-ca path flag is REMOVED (superseded by AGENT_VAULT_CA_PEM)."""
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(
+            ["launch", "shopsystem-messaging", "--agent-vault-ca", "/tmp/ca.pem"]
+        )
 
 
 # --- dispatch threads the broker through -----------------------------------
@@ -121,16 +127,6 @@ def test_env_file_tolerates_quotes_and_export_prefix(recording_controller, tmp_p
     assert call["agent_vault_vault"] == "shopsystem"
 
 
-# --- --agent-vault-ca is threaded as a Path --------------------------------
-
-def test_agent_vault_ca_flag_is_threaded_to_launch(recording_controller):
-    exit_code = cli_main(
-        ["launch", "shopsystem-messaging", "--agent-vault-ca", "/tmp/ca.pem"]
-    )
-    assert exit_code == 0
-    assert recording_controller.calls[0]["agent_vault_ca"] == Path("/tmp/ca.pem")
-
-
 # --- precedence: explicit flag wins over env-file for the broker -----------
 
 def test_no_av_flags_passes_none(recording_controller):
@@ -142,4 +138,5 @@ def test_no_av_flags_passes_none(recording_controller):
     assert call["agent_vault_addr"] is None
     assert call["agent_vault_token"] is None
     assert call["agent_vault_vault"] is None
-    assert call["agent_vault_ca"] is None
+    # agent_vault_ca is no longer a launch() param (superseded by env var).
+    assert "agent_vault_ca" not in call
