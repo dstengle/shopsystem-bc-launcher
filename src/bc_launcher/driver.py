@@ -90,6 +90,7 @@ class DockerDriver(Protocol):
         container_name: str,
         command: list[str],
         user: str | None = None,
+        env: dict[str, str] | None = None,
     ) -> subprocess.CompletedProcess:
         """Execute a command inside a running container.
 
@@ -99,6 +100,15 @@ class DockerDriver(Protocol):
         tmux refuses cross-user attach, so every send-keys / capture-pane
         / has-session call against a vscode-owned tmux session must also
         run as vscode.
+
+        If ``env`` is provided, each key=value pair is injected into the
+        exec's environment (``docker exec -e KEY=VALUE``).  This is REQUIRED
+        for the launch-time auto-clone (bclaunch-5fji): the clone runs in a
+        non-login shell that does NOT source ``/etc/profile.d/agent-vault-ca.sh``,
+        so it inherits neither ``GIT_SSL_CAINFO`` nor a usable proxy.  The
+        controller passes the broker MITM ``HTTPS_PROXY`` and ``GIT_SSL_CAINFO``
+        explicitly on the clone exec so the brokered clone reaches the broker
+        and trusts its CA without depending on a login shell.
         """
         ...
 
@@ -245,10 +255,14 @@ class RealDockerDriver:
         container_name: str,
         command: list[str],
         user: str | None = None,
+        env: dict[str, str] | None = None,
     ) -> subprocess.CompletedProcess:
         cmd = ["docker", "exec"]
         if user is not None:
             cmd += ["-u", user]
+        if env:
+            for key, val in env.items():
+                cmd += ["-e", f"{key}={val}"]
         cmd += [container_name] + command
         self._last_command = cmd
         return subprocess.run(cmd, capture_output=True, text=True, check=False)

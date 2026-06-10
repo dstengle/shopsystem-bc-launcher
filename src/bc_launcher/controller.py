@@ -72,6 +72,33 @@ DEFAULT_AGENT_VAULT_BROKER = "http://agent-vault:14321"
 AGENT_VAULT_BROKER_ENV = "BCLAUNCHER_AGENT_VAULT_BROKER"
 
 # ---------------------------------------------------------------------------
+# Agent-vault MITM proxy port + clone-time trust env (bclaunch-5fji)
+# ---------------------------------------------------------------------------
+#
+# DEFECT 1 (bclaunch-5fji): the agent-vault *control API* listens on :14321
+# (the DEFAULT_AGENT_VAULT_BROKER above and AGENT_VAULT_ADDR carry it).  But
+# the credential-substituting MITM HTTPS proxy listens on a SEPARATE port,
+# :14322, and requires basic-auth whose userinfo is the agent token + vault
+# (``http://<token>:<vault>@<host>:14322`` — the same shape ``agent-vault run``
+# itself uses).  Pointing a clone's HTTPS_PROXY at the bare control-API address
+# reaches a listener that does not proxy, so the brokered clone fails.  The
+# clone-time proxy URL must therefore be built against the MITM port with the
+# agent credentials as userinfo.  The agent token already carries its
+# operator-supplied agent-token prefix (see the AGENT_VAULT_TOKEN scenarios),
+# so it is used verbatim as the userinfo username — NOT re-prefixed.
+AGENT_VAULT_MITM_PROXY_PORT = 14322
+
+# DEFECT 2 (bclaunch-5fji): the launch-time clone runs in a NON-LOGIN shell, so
+# it never sources /etc/profile.d/agent-vault-ca.sh and therefore lacks
+# GIT_SSL_CAINFO, producing 'unable to get local issuer certificate' when git
+# verifies the broker's MITM cert.  The container CA path the bc-base entrypoint
+# materializes the broker CA to is FIXED by the operator design (bclaunch-9rr);
+# the controller sets GIT_SSL_CAINFO to that same path explicitly on the clone
+# exec so the brokered clone trusts the broker CA without a login shell.
+AGENT_VAULT_CONTAINER_CA_PATH = "/home/vscode/.config/agent-vault/ca.pem"
+GIT_SSL_CAINFO_ENV = "GIT_SSL_CAINFO"
+
+# ---------------------------------------------------------------------------
 # Operator-supplied agent-vault credential + TLS-trust injection
 # (bclaunch-5hi / bclaunch-7pf)
 # ---------------------------------------------------------------------------
@@ -170,6 +197,65 @@ def beads_prefix_for(bc_name: str) -> str:
 def _slugify(text: str) -> str:
     """Lowercase and replace runs of spaces with hyphens."""
     return re.sub(r"\s+", "-", text.strip().lower())
+
+
+def _mitm_proxy_host(agent_vault_addr: str) -> str | None:
+    """Derive the broker's MITM-proxy host:port from AGENT_VAULT_ADDR.
+
+    bclaunch-5fji DEFECT 1: ``AGENT_VAULT_ADDR`` names the broker's *control
+    API* (e.g. ``https://agent-vault:14321`` — it carries a scheme and the
+    control-API port).  The credential-substituting MITM HTTPS proxy lives on
+    the SAME host but a DIFFERENT port (:14322).  This extracts the host from
+    the addr (stripping any scheme and the control-API port) and returns
+    ``<host>:14322``.  Returns ``None`` when no host can be derived (so the
+    caller skips building a proxy URL).
+    """
+    if not agent_vault_addr:
+        return None
+    from urllib.parse import urlparse
+
+    addr = agent_vault_addr.strip()
+    # urlparse needs a scheme to populate ``hostname``; add a throwaway one
+    # when the operator supplied a bare host:port.
+    parsed = urlparse(addr if "://" in addr else "tcp://" + addr)
+    host = parsed.hostname
+    if not host:
+        return None
+    return f"{host}:{AGENT_VAULT_MITM_PROXY_PORT}"
+
+
+def _build_clone_proxy_url(
+    agent_vault_addr: str | None,
+    agent_vault_token: str | None,
+    agent_vault_vault: str | None,
+) -> str | None:
+    """Build the brokered-clone HTTPS_PROXY URL (bclaunch-5fji DEFECT 1).
+
+    Shape (matching what ``agent-vault run`` uses):
+        http://<token>:<vault>@<host>:14322
+
+    * ``<host>`` is derived from ``agent_vault_addr`` with the MITM port
+      (:14322) substituted for the control-API port.
+    * userinfo is ``<token>:<vault>``, URL-encoded.  The agent token already
+      carries its operator-supplied agent-token prefix (per the
+      AGENT_VAULT_TOKEN scenarios), so it is used verbatim — NOT re-prefixed.
+
+    Returns ``None`` when addr / token / vault are not all available (no
+    operator credentials supplied), so the caller leaves the clone proxy unset
+    rather than constructing a half-formed URL.
+    """
+    if not (agent_vault_addr and agent_vault_token and agent_vault_vault):
+        return None
+    host = _mitm_proxy_host(agent_vault_addr)
+    if host is None:
+        return None
+    from urllib.parse import quote
+
+    # ``safe=""`` so any ``@`` / ``:`` / ``/`` inside the token or vault is
+    # percent-encoded and cannot corrupt the userinfo / authority boundary.
+    user = quote(agent_vault_token, safe="")
+    secret = quote(agent_vault_vault, safe="")
+    return f"http://{user}:{secret}@{host}"
 
 
 def _resolve_host_path(devcontainer_path: Path) -> Path:
@@ -563,9 +649,31 @@ class BcContainerController:
 
         # Clone repository if URL provided
         if repo_url:
+            # --- Launch-time clone trust env (bclaunch-5fji) ---
+            # DEFECT 1: route the clone's HTTPS through the broker's MITM proxy
+            # (:14322 with token:vault basic-auth) — NOT the bare control-API
+            # address (:14321) that the container's HTTPS_PROXY env carries.
+            # DEFECT 2: the clone runs in a non-login shell that never sources
+            # /etc/profile.d/agent-vault-ca.sh, so set GIT_SSL_CAINFO explicitly
+            # to the container CA path the bc-base entrypoint materializes.
+            # Both are passed on the clone exec's own environment so the
+            # brokered auto-clone succeeds without the operator-side
+            # --agent-vault-broker full-URL workaround.
+            clone_env: dict[str, str] = {}
+            clone_proxy_url = _build_clone_proxy_url(
+                resolved_av_addr, resolved_av_token, resolved_av_vault
+            )
+            if clone_proxy_url:
+                clone_env[AGENT_VAULT_PROXY_ENV] = clone_proxy_url
+                # http_proxy/https_proxy lowercase variants are honoured by some
+                # libcurl/git builds; set the canonical HTTPS_PROXY plus the
+                # lowercase https_proxy so the clone routes regardless.
+                clone_env["https_proxy"] = clone_proxy_url
+            clone_env[GIT_SSL_CAINFO_ENV] = AGENT_VAULT_CONTAINER_CA_PATH
             clone_result = self._driver.exec_run(
                 container,
                 ["git", "clone", repo_url, CONTAINER_WORKSPACE],
+                env=clone_env,
             )
             if clone_result.returncode != 0:
                 return CommandResult(

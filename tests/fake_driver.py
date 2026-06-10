@@ -24,6 +24,10 @@ class ExecCall:
     container: str
     command: list[str]
     user: str | None = None
+    # Per-exec environment injected via ``docker exec -e KEY=VALUE`` (or None
+    # when the exec carries no extra env).  bclaunch-5fji uses this to pin the
+    # launch-time clone's brokered HTTPS_PROXY + GIT_SSL_CAINFO trust env.
+    env: dict[str, str] | None = None
 
 
 class FakeRegistryDriver:
@@ -434,9 +438,15 @@ class FakeDockerDriver:
         container_name: str,
         command: list[str],
         user: str | None = None,
+        env: dict[str, str] | None = None,
     ) -> subprocess.CompletedProcess:
         self.exec_calls.append(
-            ExecCall(container=container_name, command=command, user=user)
+            ExecCall(
+                container=container_name,
+                command=command,
+                user=user,
+                env=dict(env) if env else None,
+            )
         )
         prefix = ["docker", "exec"]
         if user is not None:
@@ -641,3 +651,15 @@ class FakeDockerDriver:
             c for c in self.exec_calls
             if c.container == container_name and c.command[:2] == ["tmux", "send-keys"]
         ]
+
+    def clone_exec_call(self, container_name: str) -> ExecCall | None:
+        """Return the recorded launch-time `git clone` exec call (bclaunch-5fji).
+
+        Returns the first ExecCall against ``container_name`` whose command is a
+        ``git clone`` so tests can assert on the env (HTTPS_PROXY / GIT_SSL_CAINFO)
+        the controller injected onto the clone exec.
+        """
+        for c in self.exec_calls:
+            if c.container == container_name and c.command[:2] == ["git", "clone"]:
+                return c
+        return None

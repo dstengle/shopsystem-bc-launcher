@@ -3503,6 +3503,113 @@ def assert_av_vault_env(value, ctx, fake_driver):
     )
 
 
+# --- bclaunch-5fji: launch-time auto-clone broker-wiring ------------------
+#
+# These steps read the ACTUAL env the controller injected onto the `git clone`
+# exec (recorded by FakeDockerDriver.clone_exec_call), not a static echoed-back
+# string — so they have teeth against the real defect: a clone whose HTTPS_PROXY
+# points at the :14321 control API instead of the :14322 MITM proxy, or a clone
+# that lacks GIT_SSL_CAINFO, fails these assertions.
+
+def _clone_exec_env(ctx, fake_driver) -> dict:
+    call = fake_driver.clone_exec_call(ctx["container_name"])
+    assert call is not None, (
+        "Expected a launch-time `git clone` exec call to have been recorded; "
+        "none found."
+    )
+    return call.env or {}
+
+
+@then(parsers.parse(
+    'the launch-time clone exec has HTTPS_PROXY set to "{value}"'
+))
+def assert_clone_https_proxy(value, ctx, fake_driver):
+    env = _clone_exec_env(ctx, fake_driver)
+    assert env.get("HTTPS_PROXY") == value, (
+        f"Expected the clone exec HTTPS_PROXY to be {value!r}, "
+        f"got {env.get('HTTPS_PROXY')!r} (full clone env: {env!r})"
+    )
+
+
+@then(parsers.parse(
+    'the launch-time clone exec has GIT_SSL_CAINFO set to "{value}"'
+))
+def assert_clone_git_ssl_cainfo(value, ctx, fake_driver):
+    env = _clone_exec_env(ctx, fake_driver)
+    assert env.get("GIT_SSL_CAINFO") == value, (
+        f"Expected the clone exec GIT_SSL_CAINFO to be {value!r}, "
+        f"got {env.get('GIT_SSL_CAINFO')!r} (full clone env: {env!r})"
+    )
+
+
+@then(parsers.parse(
+    'the launch-time clone exec HTTPS_PROXY host is "{host}" on port {port:d}'
+))
+def assert_clone_proxy_host_port(host, port, ctx, fake_driver):
+    from urllib.parse import urlparse
+
+    env = _clone_exec_env(ctx, fake_driver)
+    proxy = env.get("HTTPS_PROXY", "")
+    parsed = urlparse(proxy)
+    assert parsed.hostname == host, (
+        f"Expected clone proxy host {host!r}, got {parsed.hostname!r} "
+        f"(proxy: {proxy!r})"
+    )
+    assert parsed.port == port, (
+        f"Expected clone proxy port {port}, got {parsed.port!r} "
+        f"(proxy: {proxy!r})"
+    )
+
+
+@then(parsers.parse(
+    'the launch-time clone exec HTTPS_PROXY is not the control API on port {port:d}'
+))
+def assert_clone_proxy_not_control_api(port, ctx, fake_driver):
+    from urllib.parse import urlparse
+
+    env = _clone_exec_env(ctx, fake_driver)
+    proxy = env.get("HTTPS_PROXY", "")
+    parsed = urlparse(proxy)
+    assert parsed.port != port, (
+        f"Clone proxy points at the control-API port {port} "
+        f"(DEFECT 1 — must be the :14322 MITM proxy); proxy: {proxy!r}"
+    )
+
+
+@then(parsers.parse(
+    'the launch-time clone exec HTTPS_PROXY carries basic-auth userinfo "{userinfo}"'
+))
+def assert_clone_proxy_userinfo(userinfo, ctx, fake_driver):
+    from urllib.parse import urlparse, unquote
+
+    env = _clone_exec_env(ctx, fake_driver)
+    proxy = env.get("HTTPS_PROXY", "")
+    parsed = urlparse(proxy)
+    got_user = unquote(parsed.username or "")
+    got_pass = unquote(parsed.password or "")
+    got = f"{got_user}:{got_pass}"
+    assert got == userinfo, (
+        f"Expected clone proxy basic-auth userinfo {userinfo!r}, "
+        f"got {got!r} (proxy: {proxy!r})"
+    )
+
+
+@then(parsers.parse(
+    'the launch-time clone exec HTTPS_PROXY userinfo username is exactly "{username}"'
+))
+def assert_clone_proxy_username_exact(username, ctx, fake_driver):
+    from urllib.parse import urlparse, unquote
+
+    env = _clone_exec_env(ctx, fake_driver)
+    proxy = env.get("HTTPS_PROXY", "")
+    parsed = urlparse(proxy)
+    got = unquote(parsed.username or "")
+    assert got == username, (
+        f"Expected clone proxy username {username!r} (token used verbatim, "
+        f"NOT re-prefixed); got {got!r} (proxy: {proxy!r})"
+    )
+
+
 # The token literals an operator might realistically supply; none of these
 # may appear hard-coded anywhere in src/.  The placeholder is the SOLE
 # permitted credential literal in source.
