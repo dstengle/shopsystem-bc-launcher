@@ -194,19 +194,33 @@ class FakeDockerDriver:
         # registry imported).  Empty working set => `bd ready` lists nothing
         # and `bd create` cannot adopt the committed issues.
         #
-        # lead-kjv7 DEFECT 2 / DEFECT 4 — TEST-FIDELITY.  The v0.2.7 fake
-        # MODELLED `bd config set issue_prefix` as side-effect-importing the
-        # committed registry into the Dolt working set.  Empirically that is
-        # FALSE: a real container left the `embeddeddolt/` working set ABSENT
-        # and `bd ready`/`bd create` failed with "no beads database found".
-        # The corrected model:
-        #   * `bd config set issue_prefix` adopts the prefix but does NOT
-        #     create the Dolt working set / `embeddeddolt/` dir.
-        #   * ONLY an explicit `bd import` of the materialized registry
-        #     provisions the working set (creates `embeddeddolt/`).
-        # So a launcher that merely sets the prefix (the broken v0.2.7 shape)
-        # now reads RED here, modelling the real empty-working-set failure.
+        # lead-ezzr — TEST-FIDELITY.  SUPERSEDES the lead-kjv7 model of
+        # `bd dolt pull` → `bd config set issue_prefix` → `bd import`, which
+        # passed green on a fix that was EMPIRICALLY broken.  The corrected
+        # model pins the REAL `bd bootstrap` mechanism:
+        #   * `bd bootstrap` imports the git-tracked JSONL, creates the Dolt
+        #     working set (`embeddeddolt/`), derives the prefix from the
+        #     imported registry, and yields WRITE-READY — but ONLY when no
+        #     bd-created Dolt DB already exists.
+        #   * `bd dolt pull` FIRST pre-creates an EMPTY bd-created Dolt DB,
+        #     which makes a subsequent `bd bootstrap` a NO-OP ("database
+        #     already exists, nothing to do") that leaves the BC WEDGED:
+        #     prefix unset, working set unprovisioned.  This is the
+        #     self-inflicted lead-vlsu deadlock.
+        #   * a separate `bd import` ALSO pre-creates the Dolt DB without
+        #     deriving a usable prefix, so it does NOT yield write-ready and
+        #     wedges a later bootstrap the same way.
+        # So a launcher that reverts to the pull+config+import mechanism now
+        # reads RED here (revert-teeth), modelling the real wedged state.
         self._beads_working_set_provisioned: set[str] = set()
+
+        # lead-ezzr — whether a bd-created Dolt DB already exists for the
+        # container.  Set by `bd dolt pull` (empty DB) or by a `bd import`
+        # that pre-creates the DB.  Its PRESENCE makes a later `bd bootstrap`
+        # a no-op ("already exists, nothing to do"), the self-inflicted
+        # deadlock.  Bootstrap on a container WITHOUT a pre-existing bd-created
+        # DB is the only path that yields write-ready.
+        self._beads_db_precreated: set[str] = set()
 
         # lead-kjv7 DEFECT 4 — whether the embedded-Dolt working-set directory
         # (`/workspace/.beads/embeddeddolt/`) exists.  It is ABSENT after clone
@@ -732,62 +746,90 @@ class FakeDockerDriver:
             self._beads_owner[container_name] = user or "root"
             return subprocess.CompletedProcess(command, 0, "", "")
 
-        # Simulate bd dolt pull
-        if command[:3] == ["bd", "dolt", "pull"]:
-            # lead-kjv7 DEFECT 3 — touches `.beads`, owned by the running user.
-            self._beads_owner[container_name] = user or "root"
-            return subprocess.CompletedProcess(command, 0, "", "")
-
-        # Simulate `bd config set issue_prefix <prefix>` — the launcher's
-        # prefix-adoption step.  Records the configured prefix.
-        #
-        # lead-kjv7 DEFECT 2 RE-MODELLED.  The v0.2.7 fake treated this command
-        # as ALSO side-effect-importing the committed registry into the Dolt
-        # working set (when materialized + prefix matched).  Empirically that
-        # is FALSE: the real container had a configured prefix but an ABSENT
-        # `embeddeddolt/` working set, and `bd ready`/`bd create` failed with
-        # "no beads database found".  Correct the model: setting the prefix
-        # records the prefix ONLY; it does NOT create the Dolt working set and
-        # does NOT create `embeddeddolt/`.  Provisioning the working set now
-        # requires an EXPLICIT `bd import` (handled below).  A launcher that
-        # only sets the prefix (the broken v0.2.7 shape) therefore leaves the
-        # working set unprovisioned → `bd ready`/`bd create` RED.
-        if command[:3] == ["bd", "config", "set"] and len(command) >= 5 \
-                and command[3] == "issue_prefix":
-            configured = command[4]
-            self._beads_prefix[container_name] = configured
-            # lead-kjv7 DEFECT 3 — writes the prefix into `.beads/config`,
-            # owned by the running user (root by default).
-            self._beads_owner[container_name] = user or "root"
-            return subprocess.CompletedProcess(command, 0, "", "")
-
-        # Simulate `bd import [<path>]` — lead-kjv7 DEFECT 2.  This is the step
-        # that ACTUALLY imports the materialized committed registry into the
-        # (empty) embedded-Dolt working set, creating `embeddeddolt/` and
-        # making `bd ready`/`bd create` succeed.  It provisions the working set
-        # ONLY when the committed registry has been MATERIALIZED into the
-        # worktree first (otherwise there is nothing on disk to import); an
-        # import attempted before materialization exits non-zero, mirroring a
-        # missing source file.
-        if command[:2] == ["bd", "import"]:
+        # Simulate `bd bootstrap` — lead-ezzr, the PROVEN provisioning
+        # mechanism.  On a fresh clone with committed `.beads/issues.jsonl`
+        # MATERIALIZED in the worktree and NO pre-existing bd-created Dolt DB,
+        # bootstrap imports the git-tracked JSONL, creates `embeddeddolt/`,
+        # DERIVES the prefix from the imported registry, and yields
+        # WRITE-READY.  If a bd-created Dolt DB ALREADY exists (a prior
+        # `bd dolt pull` or `bd import` pre-created it), bootstrap is a NO-OP
+        # ("database already exists, nothing to do") and leaves the BC WEDGED
+        # — prefix unset, working set unprovisioned — modelling the
+        # self-inflicted lead-vlsu deadlock.
+        if command[:2] == ["bd", "bootstrap"]:
+            if container_name in self._beads_db_precreated:
+                # Deadlock: a pre-existing bd-created DB makes bootstrap a
+                # no-op.  Nothing is provisioned; the BC stays wedged.
+                return subprocess.CompletedProcess(
+                    command, 0,
+                    "Bootstrap: database already exists, nothing to do\n",
+                    "",
+                )
             materialized = container_name in self._beads_registry_materialized
             committed = self._committed_beads_prefix.get(container_name, "")
             if committed and not materialized:
+                # No git-tracked JSONL on disk to import.
                 return subprocess.CompletedProcess(
                     command, 1, "",
-                    "import source .beads/issues.jsonl not found\n",
+                    "no JSONL to bootstrap from: .beads/issues.jsonl not "
+                    "found\n",
                 )
-            # Import succeeds: provision the Dolt working set and create the
-            # embeddeddolt/ directory.  (For a BC with no committed registry,
-            # import is a no-op that still yields an initialised working set.)
+            # Bootstrap succeeds: import the committed registry, provision the
+            # working set, create embeddeddolt/, and DERIVE the prefix from the
+            # imported registry (no `bd config set` needed).
             self._beads_working_set_provisioned.add(container_name)
             self._beads_embeddeddolt_present.add(container_name)
-            # lead-kjv7 DEFECT 3 — creating `embeddeddolt/` under `.beads`
-            # lands owned by the running user (root by default).  This is the
-            # step most likely to re-root the tree if it runs AFTER a chown,
-            # so the launcher must chown LAST (or import as vscode).
+            self._beads_db_precreated.add(container_name)
+            if committed:
+                self._beads_prefix[container_name] = committed
+            # Bootstrap ran as the running user (root by default), so the
+            # `.beads` tree it creates lands owned by that user; a later vscode
+            # chown is required to leave the tree usable by the agent.
+            self._beads_owner[container_name] = user or "root"
+            return subprocess.CompletedProcess(
+                command, 0,
+                f"Imported issues from "
+                f"{CONTAINER_WORKSPACE}/.beads/issues.jsonl\n",
+                "",
+            )
+
+        # Simulate bd dolt pull — lead-ezzr revert-teeth.  This is the
+        # SUPERSEDED mechanism's first step.  It pre-creates an EMPTY bd-created
+        # Dolt DB but does NOT provision a usable working set or derive a
+        # prefix.  Its side effect is the deadlock: a subsequent `bd bootstrap`
+        # sees the pre-created DB and no-ops, leaving the BC wedged.
+        if command[:3] == ["bd", "dolt", "pull"]:
+            self._beads_db_precreated.add(container_name)
             self._beads_owner[container_name] = user or "root"
             return subprocess.CompletedProcess(command, 0, "", "")
+
+        # Simulate `bd config set issue_prefix <prefix>` — the SUPERSEDED
+        # prefix-adoption step (lead-ezzr: bd rejects it).  bd refuses to set
+        # the prefix on a registry it manages, exiting non-zero; the prefix is
+        # NOT recorded.  A launcher that relies on it therefore leaves the
+        # prefix unset (revert-teeth).
+        if command[:3] == ["bd", "config", "set"] and len(command) >= 5 \
+                and command[3] == "issue_prefix":
+            return subprocess.CompletedProcess(
+                command, 1, "",
+                "bd config set issue_prefix is not permitted: the prefix is "
+                "derived from the registry\n",
+            )
+
+        # Simulate `bd import [<path>]` — the SUPERSEDED import step
+        # (lead-ezzr).  It pre-creates the Dolt DB but does NOT derive a usable
+        # prefix and does NOT leave the BC write-ready; worse, the pre-created
+        # DB wedges a later `bd bootstrap` into a no-op.  So a launcher that
+        # runs `bd import` to provision (the broken v0.2.7 / lead-kjv7 shape)
+        # does NOT reach write-ready (revert-teeth).
+        if command[:2] == ["bd", "import"]:
+            self._beads_db_precreated.add(container_name)
+            self._beads_embeddeddolt_present.add(container_name)
+            self._beads_owner[container_name] = user or "root"
+            return subprocess.CompletedProcess(
+                command, 0, "",
+                "imported into pre-created DB; prefix not derived\n",
+            )
 
         # Simulate `bd create ...` — exits zero and emits a new issue id
         # carrying the configured prefix ONLY when beads is functionally

@@ -788,46 +788,48 @@ class BcContainerController:
                 )
             out_lines.append(f"Cloned {repo_url} into {CONTAINER_WORKSPACE}\n")
 
-            # bd dolt pull
-            bd_result = self._driver.exec_run(
-                container,
-                ["bd", "dolt", "pull"],
-            )
-            out_lines.append("Ran bd dolt pull\n")
-
             # Provision the in-container beads tracker so the BC boots
-            # WRITE-READY with NO manual heal (lead-rply → lead-kjv7).
+            # WRITE-READY with NO manual heal (lead-ezzr — SUPERSEDES the
+            # lead-kjv7 pull+config+import mechanism).
             #
             # A freshly cloned BC lands WEDGED: `.beads/issues.jsonl` is
-            # git-tracked at HEAD but ABSENT from the working tree, the Dolt
-            # working set is empty (no `embeddeddolt/`), and no usable
-            # issue_prefix is set — so `bd ready` / `bd create` fail with
-            # "no beads database found".  `bd dolt pull` alone does NOT
-            # provision the working set.
+            # git-tracked at HEAD but may be ABSENT from the working tree
+            # (a gitignore hook), the Dolt working set is empty (no
+            # `embeddeddolt/`), and no usable issue_prefix is set — so
+            # `bd ready` / `bd create` fail.
             #
-            # lead-kjv7 RE-DISPATCH — the v0.2.7 fix was green-on-fake but
-            # EMPIRICALLY BROKEN.  Four defects, all fixed here:
+            # lead-ezzr ROOT CAUSE + FIX.  The lead-kjv7 mechanism
+            # (`bd dolt pull` → `bd config set issue_prefix` → `bd import`)
+            # was EMPIRICALLY BROKEN: the launched BC came up with
+            # issue_prefix '(not set)' and `bd create` failed "database not
+            # initialized: issue_prefix config is missing".  The explicit
+            # `bd import` pushed embedded-Dolt into the lead-vlsu deadlock
+            # ('database already exists' + no prefix) where every documented
+            # non-destructive recovery refuses.  The deadlock was
+            # SELF-INFLICTED: `bd dolt pull` FIRST creates an empty local DB
+            # that makes a later `bd bootstrap` say "already exists, nothing
+            # to do".
             #
-            #   DEFECT 1 — WRONG PREFIX VIA FALLBACK TIMING.  v0.2.7 read the
-            #   committed prefix from `git show HEAD:.beads/issues.jsonl`,
-            #   which returned EMPTY in a real container, so it fell back to
-            #   name-derivation ('scenarios' instead of the committed
-            #   'shopsystem-scenarios').  FIX: read the committed prefix from
-            #   the MATERIALIZED worktree file, AFTER the checkout below.
+            # PROVEN RECIPE (lead-verified in a real v0.2.7 container, per
+            # bd's own `bd help init-safety` "ADOPTING A REMOTE ... use
+            # `bd bootstrap`"): on a fresh clone with committed
+            # `.beads/issues.jsonl` present and NO pre-existing bd-created
+            # Dolt working set, `bd bootstrap` imports the git-tracked JSONL,
+            # creates `.beads/embeddeddolt/`, and `bd create` / `bd ready`
+            # then SUCCEED.  Fully NON-DESTRUCTIVE.  So:
             #
-            #   DEFECT 2 — NO DOLT WORKING SET.  v0.2.7 assumed
-            #   `bd config set issue_prefix` side-effect-imports the registry.
-            #   Empirically it does NOT: `embeddeddolt/` was absent and
-            #   `bd ready`/`bd create` failed.  FIX: explicitly `bd import`
-            #   the materialized registry into the Dolt working set.
+            #   * Do NOT run `bd dolt pull` first (it pre-creates the empty DB
+            #     that deadlocks bootstrap).
+            #   * Do NOT `bd config set issue_prefix` (bd rejects it; bootstrap
+            #     derives the prefix from the imported registry).
+            #   * Do NOT run a separate `bd import` that pre-creates the DB
+            #     (that is the wedged lead-vlsu path).
             #
-            #   DEFECT 3 — ROOT OWNERSHIP.  v0.2.7 chowned /workspace but the
-            #   chown ran BEFORE the beads steps (and/or did not cover
-            #   `.beads`), leaving `/workspace/.beads` root-owned so the
-            #   vscode agent could not use the backend.  FIX: chown `.beads`
-            #   (recursively, to vscode) AFTER all beads writes have run.
-
-            # (1) Materialize the committed registry into the working tree.
+            # (1) Ensure the committed registry is present in the working
+            # tree.  A git clone normally provides it, but a gitignore hook
+            # can leave it absent; `git checkout HEAD -- .beads/issues.jsonl`
+            # materializes it FIRST so bootstrap has git-tracked JSONL to
+            # import.
             self._driver.exec_run(
                 container,
                 ["git", "-C", CONTAINER_WORKSPACE,
@@ -838,54 +840,27 @@ class BcContainerController:
                 "working tree\n"
             )
 
-            # (2) DEFECT 1 — read the COMMITTED prefix from the MATERIALIZED
-            # worktree file (NOT `git show`, which read empty in a real
-            # container and triggered the name-derived fallback).  This read
-            # MUST happen AFTER the checkout above.  Fall back to
-            # name-derivation ONLY when the materialized registry carries no
-            # parseable issue id.
-            registry_result = self._driver.exec_run(
-                container,
-                ["cat", f"{CONTAINER_WORKSPACE}/.beads/issues.jsonl"],
-            )
-            registry_text = (
-                registry_result.stdout if registry_result.returncode == 0 else ""
-            )
-            prefix = committed_beads_prefix_from_registry(registry_text)
-            prefix_source = "committed registry (materialized worktree)"
-            if not prefix:
-                prefix = beads_prefix_for(bc_name)
-                prefix_source = "name-derived fallback"
-
-            # (3) Adopt the committed prefix.
+            # (2) `bd bootstrap` — imports the git-tracked JSONL, creates
+            # `.beads/embeddeddolt/`, and leaves the BC write-ready.  This is
+            # the ONLY provisioning command; no `bd dolt pull` ran before it
+            # (which would have wedged it into a no-op), no `bd config set`,
+            # no separate `bd import`.
             self._driver.exec_run(
                 container,
-                ["bd", "config", "set", "issue_prefix", prefix],
+                ["bd", "bootstrap"],
             )
             out_lines.append(
-                f"Configured beads issue_prefix {prefix!r} in container "
-                f"({prefix_source})\n"
+                "Ran bd bootstrap (imported git-tracked .beads/issues.jsonl "
+                "into the embedded-Dolt working set)\n"
             )
 
-            # (4) DEFECT 2 — IMPORT the materialized committed registry into
-            # the embedded-Dolt working set.  This creates `embeddeddolt/` and
-            # is what actually makes `bd ready` / `bd create` succeed; setting
-            # the prefix alone does NOT provision the working set.
-            self._driver.exec_run(
-                container,
-                ["bd", "import", f"{CONTAINER_WORKSPACE}/.beads/issues.jsonl"],
-            )
-            out_lines.append(
-                "Imported committed beads registry into the Dolt working set\n"
-            )
-
-            # (5) DEFECT 3 — hand /workspace AND its `.beads` tree to vscode.
-            # This chown runs AS ROOT (the default) and AFTER every beads
-            # write above (checkout, config, import — all of which create
-            # root-owned files under `.beads`), so it transfers ownership of
-            # the freshly-created Dolt working set too.  `-R` recurses into
-            # `.beads`; `.beads` is also named explicitly so the recursion is
-            # unambiguous even if /workspace ownership semantics differ.
+            # (3) Hand /workspace AND its `.beads` tree to vscode.  Bootstrap
+            # ran as root (the default), so the `.beads` tree — including the
+            # freshly-created `embeddeddolt/` — lands root-owned and the
+            # vscode agent cannot use the backend.  This chown runs AFTER
+            # bootstrap so it transfers ownership of the created working set
+            # too.  `-R` recurses into `.beads`; `.beads` is also named
+            # explicitly so the recursion is unambiguous.
             self._driver.exec_run(
                 container,
                 ["chown", "-R", f"{AGENT_CONTAINER_USER}:{AGENT_CONTAINER_USER}",

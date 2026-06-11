@@ -592,10 +592,15 @@ def run_launch_with_a_startup_prompt(bc_name, ctx, fake_driver, controller, tmp_
     ctx["launch_manifest_path"] = manifest_path
 
 
-@when("the container has cloned the repository and bd dolt pull has been run "
+@when("the container has cloned the repository and bd bootstrap has been run "
       "inside the workspace directory")
-def cloned_and_dolt_pulled(ctx, fake_driver):
-    """Confirm clone + bd dolt pull ran during launch (both simulated)."""
+def cloned_and_bootstrapped(ctx, fake_driver):
+    """Confirm clone + bd bootstrap ran during launch (lead-ezzr).
+
+    SUPERSEDES the lead-kjv7 `bd dolt pull` mechanism: provisioning is now
+    `bd bootstrap`, which imports the git-tracked JSONL and creates the
+    embedded-Dolt working set.  `bd dolt pull` must NOT have run first.
+    """
     container_name = ctx["container_name"]
     clone_calls = [
         c for c in fake_driver.exec_calls
@@ -603,12 +608,21 @@ def cloned_and_dolt_pulled(ctx, fake_driver):
         and c.command[:2] == ["git", "clone"]
     ]
     assert clone_calls, "Expected a git clone exec call during launch"
+    bootstrap_calls = [
+        c for c in fake_driver.exec_calls
+        if c.container == container_name
+        and c.command[:2] == ["bd", "bootstrap"]
+    ]
+    assert bootstrap_calls, "Expected a 'bd bootstrap' exec call during launch"
     dolt_calls = [
         c for c in fake_driver.exec_calls
         if c.container == container_name
         and c.command[:3] == ["bd", "dolt", "pull"]
     ]
-    assert dolt_calls, "Expected a 'bd dolt pull' exec call during launch"
+    assert not dolt_calls, (
+        "Did NOT expect a 'bd dolt pull' exec call (it wedges bootstrap into "
+        "a no-op — the lead-vlsu deadlock)"
+    )
 
 
 @when("the container is up but the readiness sequence has not yet completed")
@@ -788,26 +802,47 @@ def assert_cloned_repo_name(bc_name, ctx, fake_driver):
         f"Expected clone URL to reference {bc_name!r}, got {repo_url!r}"
 
 
-@then("bd dolt pull has been run inside the container's workspace directory")
-def assert_bd_dolt_pull(ctx, fake_driver):
+@then("bd bootstrap has been run inside the container's workspace directory")
+def assert_bd_bootstrap(ctx, fake_driver):
+    """lead-ezzr — provisioning is via `bd bootstrap` (SUPERSEDES dolt pull)."""
     container_name = ctx["container_name"]
     bd_calls = [
         c for c in fake_driver.exec_calls
+        if c.container == container_name and c.command[:2] == ["bd", "bootstrap"]
+    ]
+    assert bd_calls, "Expected a 'bd bootstrap' exec call inside the container"
+
+
+@then("bd dolt pull has NOT been run inside the container's workspace directory")
+def assert_no_bd_dolt_pull(ctx, fake_driver):
+    """lead-ezzr revert-teeth — `bd dolt pull` must NOT run before bootstrap.
+
+    A pre-`bd dolt pull` empty Dolt DB makes a later `bd bootstrap` a no-op
+    ("database already exists, nothing to do"), which leaves the BC WEDGED
+    (the self-inflicted lead-vlsu deadlock).  A launcher reverted to the
+    pull-first mechanism is caught here.
+    """
+    container_name = ctx["container_name"]
+    dolt_calls = [
+        c for c in fake_driver.exec_calls
         if c.container == container_name and c.command[:3] == ["bd", "dolt", "pull"]
     ]
-    assert bd_calls, "Expected a 'bd dolt pull' exec call inside the container"
+    assert not dolt_calls, (
+        "Did NOT expect a 'bd dolt pull' exec call inside the container — it "
+        "wedges `bd bootstrap` into a no-op (lead-vlsu deadlock)"
+    )
 
 
 @then("a .beads directory exists inside the container at the workspace root")
 def assert_beads_directory(ctx, fake_driver):
-    # The fake driver simulates bd dolt pull returning 0; that is the indicator
-    # that .beads would be created.  We verify bd dolt pull was called.
+    # lead-ezzr — `bd bootstrap` creates the embedded-Dolt working set under
+    # `.beads`; its invocation is the indicator that `.beads` is provisioned.
     container_name = ctx["container_name"]
     bd_calls = [
         c for c in fake_driver.exec_calls
-        if c.container == container_name and c.command[:3] == ["bd", "dolt", "pull"]
+        if c.container == container_name and c.command[:2] == ["bd", "bootstrap"]
     ]
-    assert bd_calls, "bd dolt pull not called — .beads directory would not exist"
+    assert bd_calls, "bd bootstrap not called — .beads directory would not exist"
 
 
 @then(parsers.parse('a tmux session named "{session}" exists inside the container "{container_name}"'))

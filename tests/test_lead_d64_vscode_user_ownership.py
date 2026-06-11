@@ -10,8 +10,9 @@ default USER is root, so every ``docker exec`` inherited root.  Three
 distinct ownership problems compounded:
 
   (1) tmux + Claude Code launched as root → Claude exits immediately.
-  (2) ``git clone`` + ``bd dolt pull`` ran as root → ``/workspace``
-      root-owned → vscode could not write afterward.
+  (2) ``git clone`` + bd provisioning (now ``bd bootstrap``, lead-ezzr)
+      ran as root → ``/workspace`` root-owned → vscode could not write
+      afterward.
   (3) ``cp`` of host gitconfig and ``.claude.json`` ran as root → the
       destination files under ``/home/vscode/`` were root-owned →
       vscode's gh / git tooling broke.
@@ -21,7 +22,7 @@ This file pins the FakeDockerDriver-level invariants that fix all three:
   (a) Every tmux client exec_run (new-session, send-keys, capture-pane,
       has-session, attach-session) runs as ``-u vscode``.
   (b) A ``chown -R vscode:vscode /workspace`` exec_run exists and is
-      issued AFTER the clone + bd dolt pull exec_runs and BEFORE the
+      issued AFTER the clone + bd bootstrap exec_runs and BEFORE the
       tmux new-session exec_run.
   (c) The cp gitconfig and cp .claude.json exec_runs do not produce
       root-owned files under /home/vscode — verified by asserting they
@@ -270,7 +271,7 @@ def test_chown_workspace_exec_run_exists_after_clone_and_pull(tmp_path):
     """
     Acceptance (lead-d64, fix scope 2): a ``chown -R vscode:vscode
     /workspace`` exec_run must be issued, and its position in the
-    exec_call sequence must be AFTER the clone + bd dolt pull and
+    exec_call sequence must be AFTER the clone + bd bootstrap and
     BEFORE the tmux new-session.
 
     The chown itself runs as root (the default — no ``-u`` flag), since
@@ -296,10 +297,15 @@ def test_chown_workspace_exec_run_exists_after_clone_and_pull(tmp_path):
         ),
         None,
     )
-    pull_idx = next(
+    # lead-ezzr SUPERSEDES `bd dolt pull` with `bd bootstrap` as the
+    # provisioning step the chown must follow.  The ownership invariant is
+    # unchanged: the chown must run AFTER the beads provisioning step (so it
+    # transfers the freshly-created `.beads`/`embeddeddolt` tree) and BEFORE
+    # tmux new-session.
+    bootstrap_idx = next(
         (
             i for i, c in enumerate(driver.exec_calls)
-            if c.command[:3] == ["bd", "dolt", "pull"]
+            if c.command[:2] == ["bd", "bootstrap"]
         ),
         None,
     )
@@ -313,12 +319,12 @@ def test_chown_workspace_exec_run_exists_after_clone_and_pull(tmp_path):
 
     assert chown_idx is not None, (
         f"Expected a `chown -R ... {CONTAINER_WORKSPACE}` exec_run after "
-        f"clone+pull (lead-d64 fix scope 2 — without it, /workspace is "
+        f"clone+bootstrap (lead-d64 fix scope 2 — without it, /workspace is "
         f"root-owned and vscode cannot write).\n"
         f"exec_calls: {[(c.command, c.user) for c in driver.exec_calls]!r}"
     )
-    assert clone_idx is not None and pull_idx is not None, (
-        f"Expected clone + bd dolt pull exec_runs.  "
+    assert clone_idx is not None and bootstrap_idx is not None, (
+        f"Expected clone + bd bootstrap exec_runs.  "
         f"exec_calls: {[c.command for c in driver.exec_calls]!r}"
     )
     assert tmux_idx is not None, (
@@ -329,9 +335,10 @@ def test_chown_workspace_exec_run_exists_after_clone_and_pull(tmp_path):
         f"chown /workspace (index {chown_idx}) must come AFTER git clone "
         f"(index {clone_idx}); otherwise the clone re-roots /workspace."
     )
-    assert pull_idx < chown_idx, (
-        f"chown /workspace (index {chown_idx}) must come AFTER bd dolt "
-        f"pull (index {pull_idx}); otherwise the pull re-roots .beads."
+    assert bootstrap_idx < chown_idx, (
+        f"chown /workspace (index {chown_idx}) must come AFTER bd bootstrap "
+        f"(index {bootstrap_idx}); otherwise bootstrap re-roots .beads "
+        f"(it creates the embedded-Dolt working set under .beads as root)."
     )
     assert chown_idx < tmux_idx, (
         f"chown /workspace (index {chown_idx}) must come BEFORE tmux "

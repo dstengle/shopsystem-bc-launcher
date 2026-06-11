@@ -17,13 +17,20 @@ Feature: bc-container commands
     Then the repository is cloned into the container's workspace directory
     And the cloned directory contains a git repository for "shopsystem-messaging"
 
-  @scenario_hash:dee72338aaa9b96c @bc:shopsystem-bc-launcher
-  Scenario: bc-container launch pulls beads state from the Dolt remote inside the container
+  # lead-ezzr SUPERSEDES the prior `bd dolt pull` mechanism (old
+  # @scenario_hash dee72338aaa9b96c).  The launcher must provision the
+  # in-container beads tracker via `bd bootstrap` (which imports the
+  # git-tracked .beads/issues.jsonl and creates the embedded-Dolt working
+  # set) and must NOT run `bd dolt pull` first — a pre-`bd dolt pull` empty
+  # DB wedges bootstrap into a no-op (the self-inflicted lead-vlsu deadlock).
+  @scenario_hash:9ddda30c0438b8df @bc:shopsystem-bc-launcher
+  Scenario: bc-container launch provisions beads via bd bootstrap inside the container
     Given the shopsystem-bc-launcher BC is installed
     And a BC named "shopsystem-messaging" with a valid repo URL is configured
     When I run bc-container launch with BC name "shopsystem-messaging"
     And the container has cloned the repository
-    Then bd dolt pull has been run inside the container's workspace directory
+    Then bd bootstrap has been run inside the container's workspace directory
+    And bd dolt pull has NOT been run inside the container's workspace directory
     And a .beads directory exists inside the container at the workspace root
 
   @scenario_hash:c1edb80e6ab9c55a @bc:shopsystem-bc-launcher
