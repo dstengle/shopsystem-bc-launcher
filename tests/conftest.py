@@ -4505,21 +4505,32 @@ def given_bc_base_carries_shop_templates(ctx, fake_driver):
 @then("the shop-templates pour has been run inside the container's workspace "
       "directory")
 def then_shop_templates_pour_ran_in_workspace(ctx, fake_driver):
+    # lead-q5k7: the skill-refresh is the `shop-templates update` subcommand
+    # targeting the workspace — NOT the old invalid `pour` shape.  The
+    # scenario semantics ("a skill-refresh ran inside the workspace") are
+    # unchanged; only the underlying corrected command is asserted here.
     container_name = ctx["container_name"]
-    pour_calls = [
+    refresh_calls = [
         c for c in fake_driver.exec_calls
         if c.container == container_name
-        and c.command[:2] == ["shop-templates", "pour"]
+        and c.command[:2] == ["shop-templates", "update"]
     ]
-    assert pour_calls, (
-        "Expected a 'shop-templates pour' exec call during launch; none ran. "
-        "The launch path must pour the shop-templates skill-group after clone."
+    assert refresh_calls, (
+        "Expected a 'shop-templates update' exec call during launch; none "
+        "ran. The launch path must refresh the shop-templates skill-group "
+        "after clone (lead-q5k7: the old `pour` shape is an INVALID command)."
     )
-    # The pour must target the container's workspace directory — i.e. it ran
-    # INSIDE the workspace, not against some other path.
-    assert any("/workspace" in c.command for c in pour_calls), (
-        "shop-templates pour ran but did not target the container's workspace "
-        f"directory (/workspace); pour commands: {[c.command for c in pour_calls]}"
+    # The refresh must target the container's workspace directory via the
+    # VALID `--target` flag — i.e. it ran INSIDE the workspace.
+    assert any(
+        c.command[:2] == ["shop-templates", "update"]
+        and "--target" in c.command
+        and c.command[c.command.index("--target") + 1] == "/workspace"
+        for c in refresh_calls
+    ), (
+        "shop-templates update ran but did not --target the container's "
+        f"workspace directory (/workspace); commands: "
+        f"{[c.command for c in refresh_calls]}"
     )
 
 
@@ -4538,6 +4549,127 @@ def then_workspace_skills_populated(ctx, fake_driver):
         "The workspace's .claude/skills/ directory does not contain the full "
         f"shop-templates skill-group; present: {skills}, "
         f"expected superset of: {set(fake_driver.SHOP_TEMPLATES_SKILL_GROUP)}"
+    )
+
+
+# --- lead-q5k7: skill-refresh uses the correct invocation + surfaces errors --
+# Scenarios 5c62355a8ac1658e (correct command + shop-type), 251984e3ac55e8f9
+# (failed refresh surfaces a real error, no false success), ef39cf2255aea5d2
+# (refreshed skill carries the lead-80t0 health step).
+
+@given(parsers.parse('the cloned shop\'s type marker is "{shop_type}"'))
+def given_cloned_shop_type_marker(shop_type, ctx, fake_driver):
+    """Model `.claude/shop/type.md` in the cloned repo (lead-q5k7).
+
+    The controller reads this to derive the `--shop-type <bc|lead>` value
+    passed to `shop-templates update`.
+    """
+    container_name = f"bc-{ctx['bc_name']}"
+    fake_driver.set_shop_type(container_name, shop_type)
+    ctx["expected_shop_type"] = shop_type
+
+
+@given("the shop-templates skill-refresh fails at runtime")
+def given_skill_refresh_fails(ctx, fake_driver):
+    """Model a VALID `shop-templates update` that nonetheless fails at
+    runtime (lead-q5k7 criterion B), so the controller's result-check +
+    error-surfacing has teeth: a failed refresh must surface a real error
+    and must NOT log false success.
+    """
+    container_name = f"bc-{ctx['bc_name']}"
+    fake_driver.set_skill_refresh_fails(container_name, fails=True)
+
+
+@then(parsers.parse('launch runs "shop-templates update" targeting the '
+                    'container\'s workspace with shop-type "{shop_type}"'))
+def then_launch_runs_update_with_shop_type(shop_type, ctx, fake_driver):
+    container_name = ctx["container_name"]
+    matching = [
+        c for c in fake_driver.exec_calls
+        if c.container == container_name
+        and c.command[:2] == ["shop-templates", "update"]
+        and "--target" in c.command
+        and c.command[c.command.index("--target") + 1] == "/workspace"
+        and "--shop-type" in c.command
+        and c.command[c.command.index("--shop-type") + 1] == shop_type
+    ]
+    assert matching, (
+        "Expected a `shop-templates update --target /workspace --shop-type "
+        f"{shop_type}` exec during launch; none matched. Exec'd "
+        "shop-templates commands: "
+        f"{[c.command for c in fake_driver.exec_calls if c.command[:1] == ['shop-templates']]}"
+    )
+
+
+@then('launch never runs the invalid "shop-templates pour" command')
+def then_launch_never_runs_pour(ctx, fake_driver):
+    container_name = ctx["container_name"]
+    pour = [
+        c for c in fake_driver.exec_calls
+        if c.container == container_name
+        and c.command[:2] == ["shop-templates", "pour"]
+    ]
+    assert not pour, (
+        "Launch ran the INVALID `shop-templates pour` command (lead-q5k7: "
+        f"`pour` is not a valid subcommand): {[c.command for c in pour]}"
+    )
+
+
+@then("the launch result is success")
+def then_launch_result_success(ctx):
+    result = ctx["result"]
+    assert result.exit_code == 0, (
+        f"Expected launch to succeed; got exit {result.exit_code}, "
+        f"stderr={result.stderr!r}"
+    )
+
+
+@then("the launch result is a failure naming the shop-templates update error")
+def then_launch_result_failure_names_update(ctx):
+    result = ctx["result"]
+    assert result.exit_code != 0, (
+        "Expected launch to FAIL when the skill-refresh exec failed, but it "
+        f"returned success (exit 0). A failed `shop-templates update` must "
+        "surface a real error and fail the launch (lead-q5k7 criterion B)."
+    )
+    assert "shop-templates update" in (result.stderr or ""), (
+        "Launch failed but its stderr does not name the shop-templates "
+        f"update error; stderr={result.stderr!r}"
+    )
+
+
+@then("the launch output never claims the skill-group was refreshed")
+def then_launch_output_no_false_success(ctx, fake_driver):
+    result = ctx["result"]
+    combined = (result.stdout or "") + (result.stderr or "")
+    # The old false-success log line; neither it nor a "Refreshed ..."
+    # success line may appear when the refresh actually failed.
+    assert "Poured shop-templates skill-group" not in combined, (
+        "Launch logged the old false-success 'Poured ...' line on a FAILED "
+        f"refresh (lead-q5k7 criterion B); output={combined!r}"
+    )
+    assert "Refreshed shop-templates skill-group" not in (result.stdout or ""), (
+        "Launch logged a 'Refreshed ...' success line on a FAILED refresh "
+        f"(lead-q5k7 criterion B); stdout={result.stdout!r}"
+    )
+    # And the workspace skills must NOT have been deposited.
+    assert not fake_driver.workspace_skills(ctx["container_name"]), (
+        "A failed refresh nonetheless deposited skills into the workspace; "
+        "the failure surface is not modelled faithfully."
+    )
+
+
+@then('the workspace\'s ".claude/skills/" carries the health-bearing '
+      'bc-router skill after launch')
+def then_workspace_carries_health_skill(ctx, fake_driver):
+    skills = fake_driver.workspace_skills(ctx["container_name"])
+    assert "bc-router-health" in skills, (
+        "The refreshed workspace .claude/skills/ does not carry the "
+        "health-bearing bc-router skill (lead-80t0 health step / criterion "
+        f"C); present: {skills}. NOTE: criterion C's full effect (the poured "
+        "SKILL.md is the 143-line health-bearing copy overwriting the stale "
+        "111-line committed one) is EMPIRICAL-ONLY (criterion D) — modelled "
+        "here at the fake's fidelity (a health-bearing skill-group entry)."
     )
 
 

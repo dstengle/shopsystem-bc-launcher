@@ -896,25 +896,57 @@ class BcContainerController:
                 f"{AGENT_CONTAINER_USER}\n"
             )
 
-            # shop-templates pour (lead-dlrx, scenario 75ae95be0ecf1640).
+            # shop-templates skill-refresh (lead-dlrx scenario
+            # 75ae95be0ecf1640; lead-q5k7 bugfix).
             #
             # After the repository has been cloned (and the beads/ownership
-            # setup steps have run), pour the shop-templates skill-group into
-            # the cloned workspace so the launched BC shop carries its
-            # ".claude/skills/" content from first boot.  The pour runs INSIDE
-            # the container's workspace directory (the bc-base image carries the
-            # shop-templates binary, installed from its VCS version pin) and
-            # targets that same workspace dir, populating
-            # ${CONTAINER_WORKSPACE}/.claude/skills/ with the shop-templates
-            # skill-group.  Run as vscode so the poured files are owned by the
-            # agent user (the chown above handed /workspace to vscode).
-            self._driver.exec_run(
+            # setup steps have run), re-pour the shop-templates skill-group
+            # OVER the cloned workspace's committed `.claude/skills/` so the
+            # launched shop carries the CURRENT package skills from first boot
+            # (e.g. the lead-80t0 beads-health step), OVERWRITING any stale
+            # committed copy in the BC's own repo.
+            #
+            # lead-q5k7 ROOT CAUSE + FIX.  The prior invocation execed
+            # `shop-templates pour --workspace <ws>`, but `shop-templates`
+            # has NO `pour` subcommand (valid: list/show/bootstrap/update)
+            # and the flag is `--target`, not `--workspace`.  That exec
+            # FAILED on every launch, yet the step appended a "Poured ..."
+            # success line WITHOUT checking the result — a false-success log
+            # that hid the failure, so the refresh silently NEVER ran and a
+            # launched BC kept its committed-stale `.claude/skills/`.
+            #
+            # The correct invocation in the bc-base image is
+            # `shop-templates update --target <ws> --shop-type <bc|lead>`.
+            # The shop-type is derived from the cloned shop's own
+            # `.claude/shop/type.md` (the canonical per-shop marker:
+            # contents "bc" or "lead"); it must match the original
+            # bootstrap.  Run as vscode so the refreshed files are owned by
+            # the agent user (the chown above handed /workspace to vscode).
+            shop_type = self._read_shop_type(container)
+            refresh_result = self._driver.exec_run(
                 container,
-                ["shop-templates", "pour", "--workspace", CONTAINER_WORKSPACE],
+                ["shop-templates", "update",
+                 "--target", CONTAINER_WORKSPACE,
+                 "--shop-type", shop_type],
                 user=AGENT_CONTAINER_USER,
             )
+            if refresh_result.returncode != 0:
+                # B — CHECK the result; do NOT log false success.  Surface a
+                # real error and fail the launch so a silently-failing
+                # skill-refresh can never again read green.
+                return CommandResult(
+                    exit_code=1,
+                    stdout="".join(out_lines),
+                    stderr=(
+                        "shop-templates update failed "
+                        f"(shop-type={shop_type!r}, exit "
+                        f"{refresh_result.returncode}): "
+                        f"{refresh_result.stderr}"
+                    ),
+                )
             out_lines.append(
-                f"Poured shop-templates skill-group into "
+                f"Refreshed shop-templates skill-group "
+                f"(shop-type={shop_type}) into "
                 f"{CONTAINER_WORKSPACE}/.claude/skills/\n"
             )
 
@@ -1253,6 +1285,25 @@ class BcContainerController:
             exit_code=0,
             stdout=f"{container} is ready\n",
         )
+
+    # lead-q5k7 — derive the shop-type for `shop-templates update
+    # --shop-type <bc|lead>` from the cloned shop's own canonical marker
+    # file `.claude/shop/type.md` (contents "bc" or "lead").  The update
+    # MUST use the type the shop was originally bootstrapped with, and the
+    # cloned repo carries that marker, so this is the authoritative source.
+    # Defaults to "bc" when the marker is absent/unreadable/unrecognised so
+    # the refresh still runs with the dominant shop type rather than
+    # crashing the launch.
+    def _read_shop_type(self, container: str) -> str:
+        result = self._driver.exec_run(
+            container,
+            ["cat", f"{CONTAINER_WORKSPACE}/.claude/shop/type.md"],
+        )
+        if result.returncode == 0:
+            value = (result.stdout or "").strip().lower()
+            if value in ("bc", "lead"):
+                return value
+        return "bc"
 
     # Readiness bookkeeping is delegated to the driver so the fake can model
     # an already-ready container.  Real drivers may persist this as a

@@ -259,22 +259,47 @@ class FakeDockerDriver:
             str, list[tuple[str, str, str, bool]]
         ] = {}
 
-        # --- shop-templates pour model (lead-dlrx, scenario 75ae95be0ecf1640) ---
-        # The workspace's ".claude/skills/" directory, modelled per container as
-        # the set of skill-group entries present.  Empty / missing means the
-        # pour has NOT populated it.  A `shop-templates pour` exec_run run inside
-        # the workspace directory populates it with the shop-templates
-        # skill-group, giving the scenario's "skills populated after launch"
-        # assertion teeth: skip the pour and the set stays empty (scenario
-        # FAILS).
+        # --- shop-templates skill-refresh model (lead-dlrx scenario ---------
+        # 75ae95be0ecf1640; lead-q5k7 bugfix DEFECT-fidelity) ----------------
+        # The workspace's ".claude/skills/" directory, modelled per container
+        # as the set of skill-group entries present.  Empty / missing means
+        # the refresh has NOT populated it.
+        #
+        # lead-q5k7 fidelity: the refresh is recognised ONLY when the
+        # controller execs the REAL, VALID invocation
+        # `shop-templates update --target <ws> --shop-type <bc|lead>`.  The
+        # bc-base `shop-templates` CLI has NO `pour` subcommand (valid:
+        # list/show/bootstrap/update) and the flag is `--target`, NOT
+        # `--workspace` — so a `pour`/`--workspace` exec is modelled as the
+        # REAL FAILURE it is (non-zero, argparse-style stderr) and deposits
+        # NOTHING.  This is what gives criteria A/B their teeth: a launcher
+        # that execs the invalid command can no longer read green, and the
+        # false-success "Poured ..." log it used to append on that failure is
+        # now caught because the controller checks the result and fails.
         self._workspace_skills: dict[str, set[str]] = {}
-        # Ordered record of (container, command) for shop-templates pour calls,
-        # so tests can assert the pour ran inside the workspace directory.
-        self.pour_calls: list[ExecCall] = []
-        # The skill-group entries a pour deposits into ".claude/skills/".
+        # The bc-base image's shop-type marker per container ("bc"/"lead"),
+        # read by the controller from `.claude/shop/type.md`.  Defaults to
+        # "bc"; tests may override via set_shop_type().
+        self._shop_type: dict[str, str] = {}
+        # Ordered record of shop-templates skill-refresh exec calls, so tests
+        # can assert the refresh ran the VALID command inside the workspace.
+        self.refresh_calls: list[ExecCall] = []
+        # The skill-group entries a successful refresh deposits into
+        # ".claude/skills/".  "bc-router-health" models criterion C: the
+        # refreshed bc-router skill carries the lead-80t0 health step (the
+        # 143-line / health-bearing copy), overwriting any stale committed
+        # copy.  A refresh that does not run leaves this absent.
         self.SHOP_TEMPLATES_SKILL_GROUP = frozenset(
-            {"shop-templates"}
+            {"shop-templates", "bc-router-health"}
         )
+        # Back-compat alias: prior tests referenced `pour_calls`.
+        self.pour_calls = self.refresh_calls
+        # lead-q5k7 criterion B — containers for which even the VALID
+        # `shop-templates update` exec fails (e.g. the package errors at
+        # runtime).  Models the REAL failure surface so a controller that
+        # logs false success on a failed refresh cannot read green: a failed
+        # refresh deposits NO skills and returns non-zero.
+        self._skill_refresh_fails: set[str] = set()
 
     # --- Setup helpers (called by step definitions) ---
 
@@ -379,6 +404,27 @@ class FakeDockerDriver:
         launcher's "adopt the committed prefix" behaviour (lead-rply) has teeth.
         """
         self._committed_beads_prefix[container_name] = prefix
+
+    def set_shop_type(self, container_name: str, shop_type: str) -> None:
+        """Model the cloned shop's `.claude/shop/type.md` marker (lead-q5k7).
+
+        This is the value the controller reads to derive the
+        `shop-templates update --shop-type <bc|lead>` argument.  Defaults to
+        "bc" when unset.
+        """
+        self._shop_type[container_name] = shop_type
+
+    def set_skill_refresh_fails(
+        self, container_name: str, fails: bool = True
+    ) -> None:
+        """Model a `shop-templates update` that FAILS at runtime (lead-q5k7
+        criterion B), so the controller's result-check + error-surfacing can
+        be pinned: a failed refresh must NOT log success.
+        """
+        if fails:
+            self._skill_refresh_fails.add(container_name)
+        else:
+            self._skill_refresh_fails.discard(container_name)
 
     def committed_beads_prefix(self, container_name: str) -> str:
         """Return the committed prefix the cloned repo's registry carries."""
@@ -647,6 +693,16 @@ class FakeDockerDriver:
         # registry has been checked out into the worktree; before that the
         # worktree file is ABSENT (the real post-clone state), so the read
         # fails non-zero with an empty body.
+        # Simulate `cat /workspace/.claude/shop/type.md` — the cloned shop's
+        # canonical shop-type marker, read by the controller to derive the
+        # `shop-templates update --shop-type <bc|lead>` value (lead-q5k7).
+        # Returns the configured type ("bc" by default) so the refresh runs
+        # with the type the shop was bootstrapped with.
+        if command[0] == "cat" \
+                and any(arg.endswith(".claude/shop/type.md") for arg in command):
+            shop_type = self._shop_type.get(container_name, "bc")
+            return subprocess.CompletedProcess(command, 0, shop_type + "\n", "")
+
         if command[0] == "cat" \
                 and any(arg.endswith(".beads/issues.jsonl") for arg in command):
             if container_name not in self._beads_registry_materialized:
@@ -775,20 +831,64 @@ class FakeDockerDriver:
             listing = f"{committed}-eaa\tseed\n" if committed else ""
             return subprocess.CompletedProcess(command, 0, listing, "")
 
-        # Simulate `shop-templates pour ...` — the launch step that populates
-        # the workspace's ".claude/skills/" with the shop-templates skill-group
-        # (lead-dlrx, scenario 75ae95be0ecf1640).  The pour is recognised when
-        # the command runs the shop-templates "pour" subcommand AND names the
-        # container workspace directory (so the assertion that it ran INSIDE the
-        # workspace directory has teeth).  Modelling the populate effect here is
-        # what gives the scenario's "skills populated after launch" Then step
-        # its teeth: skip the pour and _workspace_skills stays empty → FAIL.
-        if command[:2] == ["shop-templates", "pour"]:
-            self.pour_calls.append(
+        # Simulate `shop-templates <subcommand> ...` — the launch
+        # skill-refresh step (lead-dlrx scenario 75ae95be0ecf1640; lead-q5k7
+        # bugfix).  This models the REAL bc-base CLI surface so a wrong
+        # invocation cannot read green:
+        #
+        #   * VALID:  `shop-templates update --target <ws> --shop-type
+        #             <bc|lead>` → exit 0, populates ".claude/skills/" with
+        #             the (health-bearing) skill-group.  Only an update that
+        #             TARGETS the workspace dir AND carries a recognised
+        #             --shop-type populates it.
+        #   * INVALID: any other subcommand — notably the old
+        #             `pour`/`--workspace` shape — exits NON-ZERO with an
+        #             argparse-style "invalid choice" stderr and deposits
+        #             NOTHING (the real CLI rejects it).  This is the
+        #             DEFECT-fidelity teeth: a launcher that execs `pour` (or
+        #             omits/mistypes the flags) FAILS, and a controller that
+        #             logs false success on that failure is caught.
+        if command[:1] == ["shop-templates"]:
+            self.refresh_calls.append(
                 ExecCall(container=container_name, command=command, user=user)
             )
-            # Only a pour that targets the workspace directory populates it.
-            if "/workspace" in command:
+            subcommand = command[1] if len(command) > 1 else ""
+            VALID_SUBCOMMANDS = {"list", "show", "bootstrap", "update"}
+            if subcommand not in VALID_SUBCOMMANDS:
+                return subprocess.CompletedProcess(
+                    command, 2, "",
+                    f"shop-templates: error: argument command: invalid "
+                    f"choice: {subcommand!r} (choose from 'list', 'show', "
+                    f"'bootstrap', 'update')\n",
+                )
+            if subcommand != "update":
+                return subprocess.CompletedProcess(command, 0, "", "")
+            # `update` — parse --target / --shop-type the way the real CLI
+            # does.  `--workspace` is NOT a recognised flag for update; an
+            # update that omits a valid --target therefore does NOT populate.
+            target = None
+            shop_type = None
+            if "--target" in command:
+                idx = command.index("--target")
+                target = command[idx + 1] if idx + 1 < len(command) else None
+            if "--shop-type" in command:
+                idx = command.index("--shop-type")
+                shop_type = command[idx + 1] if idx + 1 < len(command) else None
+            if shop_type not in ("bc", "lead"):
+                return subprocess.CompletedProcess(
+                    command, 2, "",
+                    "shop-templates update: error: argument --shop-type: "
+                    f"expected one of 'bc', 'lead', got {shop_type!r}\n",
+                )
+            if container_name in self._skill_refresh_fails:
+                # Criterion B failure surface — a valid invocation that the
+                # package nonetheless rejects at runtime.  Deposits NOTHING.
+                return subprocess.CompletedProcess(
+                    command, 1, "",
+                    "shop-templates update: failed to write skill-group "
+                    "into target workspace\n",
+                )
+            if target == "/workspace":
                 self._workspace_skills.setdefault(container_name, set()).update(
                     self.SHOP_TEMPLATES_SKILL_GROUP
                 )
