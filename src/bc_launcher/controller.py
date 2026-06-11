@@ -830,45 +830,69 @@ class BcContainerController:
             # can leave it absent; `git checkout HEAD -- .beads/issues.jsonl`
             # materializes it FIRST so bootstrap has git-tracked JSONL to
             # import.
+            # ORDER IS LOAD-BEARING (lead-d64, empirically proven by real
+            # container launch): chown the ENTIRE workspace to vscode FIRST,
+            # then run BOTH the materialize and `bd bootstrap` AS VSCODE.
+            #
+            # The clone ran as root, so `.git` and the tree are root-owned.
+            # Running `bd bootstrap` as ROOT corrupts the repo: it leaves the
+            # working set + `.git` internals (e.g. `.git/logs/HEAD`) root-owned,
+            # and the subsequent vscode agent's git operations then fail with
+            # "Permission denied", collapsing the index into dozens of phantom
+            # staged deletions of `.beads/*` and `.claude/*` and removing the
+            # `.beads` tree entirely — bd ends up NON-write-ready.  Chowning
+            # only `.beads`, or chowning AFTER a root-run bootstrap, does NOT
+            # fix this.  Proven-clean recipe: chown-whole-workspace-FIRST +
+            # materialize-and-bootstrap-AS-VSCODE → 0 phantom deletions,
+            # write-ready bd, `.git` writable by the agent.
+
+            # (1) Hand the ENTIRE workspace (including `.git`) to vscode.
+            self._driver.exec_run(
+                container,
+                ["chown", "-R",
+                 f"{AGENT_CONTAINER_USER}:{AGENT_CONTAINER_USER}",
+                 CONTAINER_WORKSPACE],
+            )
+            out_lines.append(
+                f"Chowned {CONTAINER_WORKSPACE} (including .git) to "
+                f"{AGENT_CONTAINER_USER}\n"
+            )
+
+            # (2) Mark the workspace a safe git directory for the agent user
+            # (its ownership just changed), then materialize the committed
+            # registry AS VSCODE so bootstrap has git-tracked JSONL to import.
+            self._driver.exec_run(
+                container,
+                ["git", "config", "--global", "--add",
+                 "safe.directory", CONTAINER_WORKSPACE],
+                user=AGENT_CONTAINER_USER,
+            )
             self._driver.exec_run(
                 container,
                 ["git", "-C", CONTAINER_WORKSPACE,
                  "checkout", "HEAD", "--", ".beads/issues.jsonl"],
+                user=AGENT_CONTAINER_USER,
             )
             out_lines.append(
                 "Materialized committed .beads/issues.jsonl into the "
                 "working tree\n"
             )
 
-            # (2) `bd bootstrap` — imports the git-tracked JSONL, creates
-            # `.beads/embeddeddolt/`, and leaves the BC write-ready.  This is
-            # the ONLY provisioning command; no `bd dolt pull` ran before it
-            # (which would have wedged it into a no-op), no `bd config set`,
-            # no separate `bd import`.
+            # (3) `bd bootstrap` AS VSCODE — imports the git-tracked JSONL,
+            # creates `.beads/embeddeddolt/`, leaves the BC write-ready.  The
+            # ONLY provisioning command; no `bd dolt pull` before it (would
+            # wedge it into a no-op), no `bd config set` (bd rejects it), no
+            # separate `bd import`.  Run as vscode (NOT root) so the working
+            # set and any git ops land vscode-owned and the repo stays clean.
             self._driver.exec_run(
                 container,
-                ["bd", "bootstrap"],
+                ["bash", "-lc",
+                 f"cd {CONTAINER_WORKSPACE} && bd bootstrap"],
+                user=AGENT_CONTAINER_USER,
             )
             out_lines.append(
                 "Ran bd bootstrap (imported git-tracked .beads/issues.jsonl "
                 "into the embedded-Dolt working set)\n"
-            )
-
-            # (3) Hand /workspace AND its `.beads` tree to vscode.  Bootstrap
-            # ran as root (the default), so the `.beads` tree — including the
-            # freshly-created `embeddeddolt/` — lands root-owned and the
-            # vscode agent cannot use the backend.  This chown runs AFTER
-            # bootstrap so it transfers ownership of the created working set
-            # too.  `-R` recurses into `.beads`; `.beads` is also named
-            # explicitly so the recursion is unambiguous.
-            self._driver.exec_run(
-                container,
-                ["chown", "-R", f"{AGENT_CONTAINER_USER}:{AGENT_CONTAINER_USER}",
-                 CONTAINER_WORKSPACE, f"{CONTAINER_WORKSPACE}/.beads"],
-            )
-            out_lines.append(
-                f"Chowned {CONTAINER_WORKSPACE} and its .beads tree to "
-                f"{AGENT_CONTAINER_USER}\n"
             )
 
             # shop-templates skill-refresh (lead-dlrx scenario
