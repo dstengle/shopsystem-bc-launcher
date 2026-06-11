@@ -170,6 +170,25 @@ class FakeDockerDriver:
         # (models the "bd create exits non-zero" health scenario).
         self._beads_broken: set[str] = set()
 
+        # --- Committed beads registry model (lead-rply) ---
+        # The committed prefix the CLONED repo's registry carries at HEAD.
+        # This is intentionally DISTINCT from the name-derived prefix
+        # (beads_prefix_for): a freshly cloned BC's committed registry may use
+        # a prefix the BC name does not imply (e.g. shopsystem-bc-launcher
+        # name-derives 'bclauncher' but its committed registry uses
+        # 'bclaunch').  Keyed per container; set by the clone simulation.
+        self._committed_beads_prefix: dict[str, str] = {}
+        # Whether the committed registry has been MATERIALIZED into the working
+        # tree (via `git checkout HEAD -- .beads/issues.jsonl`).  On clone the
+        # registry is git-tracked at HEAD but ABSENT from the working tree, so
+        # this starts False.  `bd config set issue_prefix` only imports the
+        # committed registry into the Dolt working set once it is materialized.
+        self._beads_registry_materialized: set[str] = set()
+        # Containers whose Dolt working set has been provisioned (committed
+        # registry imported).  Empty working set => `bd ready` lists nothing
+        # and `bd create` cannot adopt the committed issues.
+        self._beads_working_set_provisioned: set[str] = set()
+
         # Explicit health-status overrides per container (when a test wants
         # to assert a docker-inspect status directly rather than derive it).
         self._health_override: dict[str, str] = {}
@@ -312,6 +331,29 @@ class FakeDockerDriver:
             self._beads_broken.add(container_name)
         else:
             self._beads_broken.discard(container_name)
+
+    def set_committed_beads_prefix(
+        self, container_name: str, prefix: str
+    ) -> None:
+        """Model the committed prefix the cloned repo's registry carries.
+
+        This is the prefix `git show HEAD:.beads/issues.jsonl` reveals after
+        clone — intentionally DISTINCT from the name-derived prefix so the
+        launcher's "adopt the committed prefix" behaviour (lead-rply) has teeth.
+        """
+        self._committed_beads_prefix[container_name] = prefix
+
+    def committed_beads_prefix(self, container_name: str) -> str:
+        """Return the committed prefix the cloned repo's registry carries."""
+        return self._committed_beads_prefix.get(container_name, "")
+
+    def beads_registry_materialized(self, container_name: str) -> bool:
+        """True once the committed registry was checked out into the worktree."""
+        return container_name in self._beads_registry_materialized
+
+    def beads_working_set_provisioned(self, container_name: str) -> bool:
+        """True once the committed registry was imported into the Dolt DB."""
+        return container_name in self._beads_working_set_provisioned
 
     def set_health_override(self, container_name: str, status: str) -> None:
         self._health_override[container_name] = status
@@ -524,26 +566,78 @@ class FakeDockerDriver:
         if command[0] == "git" and command[1] == "clone":
             return subprocess.CompletedProcess(command, 0, "", "")
 
+        # Simulate `git -C <ws> show HEAD:.beads/issues.jsonl` (lead-rply).
+        # The committed registry is git-tracked at HEAD even though it is
+        # ABSENT from the working tree after clone, so `git show` reveals it.
+        # Return a one-issue JSONL blob carrying the committed prefix so the
+        # launcher can ADOPT it (rather than name-deriving).  When no committed
+        # prefix is modelled for this container, the registry is empty.
+        if command[0] == "git" and "show" in command \
+                and any(arg.endswith("HEAD:.beads/issues.jsonl") for arg in command):
+            committed = self._committed_beads_prefix.get(container_name, "")
+            if not committed:
+                return subprocess.CompletedProcess(command, 0, "", "")
+            blob = (
+                '{"_type":"issue","id":"' + committed + '-eaa",'
+                '"title":"seed","status":"open"}\n'
+            )
+            return subprocess.CompletedProcess(command, 0, blob, "")
+
+        # Simulate `git -C <ws> checkout HEAD -- .beads/issues.jsonl`
+        # (lead-rply) — materializes the committed registry into the working
+        # tree.  Until this runs, the registry is ABSENT from the worktree.
+        if command[0] == "git" and "checkout" in command \
+                and any(arg.endswith(".beads/issues.jsonl") for arg in command):
+            self._beads_registry_materialized.add(container_name)
+            return subprocess.CompletedProcess(command, 0, "", "")
+
         # Simulate bd dolt pull
         if command[:3] == ["bd", "dolt", "pull"]:
             return subprocess.CompletedProcess(command, 0, "", "")
 
         # Simulate `bd config set issue_prefix <prefix>` — the launcher's
-        # beads-usability fix.  Records the configured prefix so subsequent
-        # `bd create` / `bd ready` behave as functionally usable.
+        # beads-provisioning step (lead-rply).  Records the configured prefix.
+        # SIDE EFFECT: when the committed registry has been materialized into
+        # the working tree, this command imports it into the (empty) Dolt
+        # working set — but ONLY when the prefix being adopted matches the
+        # committed prefix the registry carries.  A name-derived MISMATCH (the
+        # bug) configures a prefix but does NOT provision the working set, so
+        # `bd ready` lists nothing and `bd create` cannot adopt the committed
+        # registry — exactly the WEDGED state the fix must eliminate.
         if command[:3] == ["bd", "config", "set"] and len(command) >= 5 \
                 and command[3] == "issue_prefix":
-            self._beads_prefix[container_name] = command[4]
+            configured = command[4]
+            self._beads_prefix[container_name] = configured
+            committed = self._committed_beads_prefix.get(container_name, "")
+            materialized = container_name in self._beads_registry_materialized
+            if committed:
+                # A committed registry exists: the working set is provisioned
+                # only when it was materialized AND the adopted prefix matches.
+                if materialized and configured == committed:
+                    self._beads_working_set_provisioned.add(container_name)
+                else:
+                    self._beads_working_set_provisioned.discard(container_name)
+            else:
+                # No committed registry modelled (e.g. a brand-new BC): setting
+                # a non-empty prefix is sufficient to make beads usable.
+                if configured:
+                    self._beads_working_set_provisioned.add(container_name)
             return subprocess.CompletedProcess(command, 0, "", "")
 
         # Simulate `bd create ...` — exits zero and emits a new issue id
         # carrying the configured prefix ONLY when beads is functionally
-        # usable (a non-empty issue_prefix is configured and beads is not
-        # forced broken).  Otherwise it exits non-zero, mirroring the
-        # "database not initialized: issue_prefix config is missing" failure.
+        # usable: a non-empty issue_prefix is configured, the Dolt working set
+        # is provisioned, and beads is not forced broken.  Otherwise it exits
+        # non-zero, mirroring the "database not initialized: issue_prefix
+        # config is missing" failure.
         if command[:2] == ["bd", "create"]:
             prefix = self._beads_prefix.get(container_name, "")
-            if not prefix or container_name in self._beads_broken:
+            usable = (
+                bool(prefix)
+                and container_name in self._beads_working_set_provisioned
+                and container_name not in self._beads_broken
+            )
+            if not usable:
                 return subprocess.CompletedProcess(
                     command, 1, "",
                     "database not initialized: issue_prefix config is missing\n",
@@ -553,15 +647,24 @@ class FakeDockerDriver:
             issue_id = f"{prefix}-{seq}"
             return subprocess.CompletedProcess(command, 0, f"{issue_id}\n", "")
 
-        # Simulate `bd ready` — exits zero when beads is functionally usable.
+        # Simulate `bd ready` — exits zero AND lists the committed issues when
+        # beads is functionally usable (provisioned working set).  An empty /
+        # unprovisioned working set fails the same way `bd create` does.
         if command[:2] == ["bd", "ready"]:
             prefix = self._beads_prefix.get(container_name, "")
-            if not prefix or container_name in self._beads_broken:
+            usable = (
+                bool(prefix)
+                and container_name in self._beads_working_set_provisioned
+                and container_name not in self._beads_broken
+            )
+            if not usable:
                 return subprocess.CompletedProcess(
                     command, 1, "",
                     "database not initialized: issue_prefix config is missing\n",
                 )
-            return subprocess.CompletedProcess(command, 0, "", "")
+            committed = self._committed_beads_prefix.get(container_name, "")
+            listing = f"{committed}-eaa\tseed\n" if committed else ""
+            return subprocess.CompletedProcess(command, 0, listing, "")
 
         # Simulate `shop-templates pour ...` — the launch step that populates
         # the workspace's ".claude/skills/" with the shop-templates skill-group

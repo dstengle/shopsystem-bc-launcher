@@ -178,20 +178,51 @@ def _container_name(bc_name: str) -> str:
 
 
 def beads_prefix_for(bc_name: str) -> str:
-    """Derive the beads issue_prefix this BC's registry is expected to carry.
+    """Derive a *fallback* beads issue_prefix from the BC name.
 
-    A BC named ``shopsystem-<identifier>`` keeps its beads under a prefix
-    derived from the identifier: lowercase, non-alphanumerics stripped.  The
-    ``shopsystem-`` namespace prefix is dropped so the resulting registry
-    prefix is the short BC identifier (e.g. ``shopsystem-messaging`` →
-    ``messaging``).  This is the prefix the launcher configures inside the
-    container's ``.beads`` so ``bd create`` yields ids carrying it.
+    A BC named ``shopsystem-<identifier>`` would, by name-derivation, carry a
+    prefix derived from the identifier: lowercase, non-alphanumerics stripped,
+    the ``shopsystem-`` namespace prefix dropped (e.g. ``shopsystem-messaging``
+    → ``messaging``).
+
+    NOTE — name-derivation is NOT authoritative (lead-rply).  A cloned repo's
+    committed registry may carry a DIFFERENT prefix than the BC name implies
+    (e.g. ``shopsystem-bc-launcher`` name-derives ``bclauncher`` but its
+    committed registry uses ``bclaunch``; ``shopsystem-templates`` name-derives
+    ``templates`` but uses ``tmpl``).  The launcher MUST adopt the COMMITTED
+    prefix the cloned repo already carries — see
+    ``_committed_beads_prefix`` — and only fall back to this name-derived value
+    when the clone carries no committed registry from which a prefix can be
+    read.
     """
     ident = bc_name
     if ident.startswith("shopsystem-"):
         ident = ident[len("shopsystem-"):]
     ident = re.sub(r"[^a-z0-9]", "", ident.lower())
     return ident
+
+
+# Issue ids in a beads registry are ``<prefix>-<suffix>`` where the suffix is a
+# short base36-ish token (e.g. ``bclaunch-eaa``).  The committed prefix is the
+# segment before the FINAL hyphen of an issue id.
+_BEADS_ISSUE_ID_RE = re.compile(r'"id"\s*:\s*"(?P<id>[^"]+)"')
+
+
+def committed_beads_prefix_from_registry(registry_text: str) -> str | None:
+    """Extract the committed issue_prefix from a ``.beads/issues.jsonl`` blob.
+
+    The committed registry is JSONL: one issue object per line, each carrying an
+    ``"id":"<prefix>-<suffix>"`` field.  The committed prefix is the portion of
+    the first issue id up to (but excluding) its final hyphen.  Returns ``None``
+    when the blob carries no parseable issue id (e.g. an empty registry), so the
+    caller can fall back to name-derivation rather than configuring an empty
+    prefix.
+    """
+    for match in _BEADS_ISSUE_ID_RE.finditer(registry_text or ""):
+        issue_id = match.group("id")
+        if "-" in issue_id:
+            return issue_id.rsplit("-", 1)[0]
+    return None
 
 
 def _slugify(text: str) -> str:
@@ -764,21 +795,70 @@ class BcContainerController:
             )
             out_lines.append("Ran bd dolt pull\n")
 
-            # Ensure beads is functionally usable inside the container by
-            # configuring a non-empty issue_prefix in the workspace .beads.
-            # A freshly cloned BC may land with its beads database missing
-            # the issue_prefix config ("database not initialized:
-            # issue_prefix config is missing"), which makes `bd create` fail
-            # — the agent then cannot file its own follow-up findings.  The
-            # launcher derives the BC's expected prefix and configures it so
-            # `bd create` / `bd ready` work from first boot.
-            prefix = beads_prefix_for(bc_name)
+            # Provision the in-container beads tracker so the BC boots
+            # WRITE-READY with NO manual heal (lead-rply).
+            #
+            # A freshly cloned BC lands WEDGED: `.beads/issues.jsonl` is
+            # git-tracked at HEAD but ABSENT from the working tree, the Dolt
+            # working set is empty, and no usable issue_prefix is set — so
+            # `bd ready` / `bd create` fail with "database not initialized:
+            # issue_prefix config is missing".  `bd dolt pull` alone does NOT
+            # provision the working set.  Two defects, both fixed here:
+            #
+            #   DEFECT 1 — name-derived prefix mismatch.  The launcher must
+            #   ADOPT the prefix the cloned repo already carries (e.g.
+            #   'bclaunch' for shopsystem-bc-launcher, 'tmpl' for
+            #   shopsystem-templates), NOT derive it from the BC name (which
+            #   would yield 'bclauncher' / 'templates' — wrong).
+            #
+            #   DEFECT 2 — committed registry never materialized / imported.
+            #   The launcher must (a) materialize the committed registry into
+            #   the working tree, then (b) run `bd config set issue_prefix`,
+            #   which side-effect-imports the committed registry into the empty
+            #   Dolt DB AND adopts the prefix.
+            #
+            # The heal shape that works (acceptance reference): (1)
+            # `git checkout HEAD -- .beads/issues.jsonl`, THEN (2)
+            # `bd config set issue_prefix <committed-prefix>`.
+
+            # (1) Materialize the committed registry into the working tree.
+            self._driver.exec_run(
+                container,
+                ["git", "-C", CONTAINER_WORKSPACE,
+                 "checkout", "HEAD", "--", ".beads/issues.jsonl"],
+            )
+            out_lines.append(
+                "Materialized committed .beads/issues.jsonl into the "
+                "working tree\n"
+            )
+
+            # Read the COMMITTED prefix the cloned repo carries from its
+            # committed registry at HEAD.  Fall back to name-derivation ONLY
+            # when the committed registry carries no parseable issue id.
+            registry_result = self._driver.exec_run(
+                container,
+                ["git", "-C", CONTAINER_WORKSPACE,
+                 "show", "HEAD:.beads/issues.jsonl"],
+            )
+            registry_text = (
+                registry_result.stdout if registry_result.returncode == 0 else ""
+            )
+            prefix = committed_beads_prefix_from_registry(registry_text)
+            prefix_source = "committed registry"
+            if not prefix:
+                prefix = beads_prefix_for(bc_name)
+                prefix_source = "name-derived fallback"
+
+            # (2) `bd config set issue_prefix <committed-prefix>` — adopts the
+            # committed prefix AND side-effect-imports the materialized
+            # committed registry into the empty Dolt working set.
             self._driver.exec_run(
                 container,
                 ["bd", "config", "set", "issue_prefix", prefix],
             )
             out_lines.append(
-                f"Configured beads issue_prefix {prefix!r} in container\n"
+                f"Configured beads issue_prefix {prefix!r} in container "
+                f"({prefix_source})\n"
             )
 
             # Hand /workspace ownership to vscode.  The clone + bd dolt pull

@@ -191,6 +191,22 @@ def bc_with_repo_url(bc_name, ctx):
     ctx["repo_url"] = f"https://github.com/shopsystem/{bc_name}.git"
 
 
+@given(parsers.parse('the cloned repository\'s committed beads registry '
+                     'carries the prefix "{prefix}"'))
+def committed_beads_registry_prefix(prefix, ctx, fake_driver):
+    """Model the committed prefix the cloned repo's registry carries (lead-rply).
+
+    Keyed by the container name the upcoming launch will create.  The launcher
+    must ADOPT this committed prefix rather than name-deriving — and the prefix
+    is intentionally allowed to differ from beads_prefix_for(bc_name) so the
+    adoption behaviour is non-vacuous.
+    """
+    bc_name = ctx["bc_name"]
+    container_name = f"bc-{bc_name}"
+    fake_driver.set_committed_beads_prefix(container_name, prefix)
+    ctx["committed_beads_prefix"] = prefix
+
+
 @given(parsers.parse('SHOPMSG_DSN is set to "{dsn}"'))
 def shopmsg_dsn_set(dsn, ctx, monkeypatch):
     """Set SHOPMSG_DSN in the host environment; monkeypatch restores it after the test."""
@@ -2602,30 +2618,69 @@ def assert_invocation_order(ctx, fake_driver):
 # Then steps — messaging readiness / beads usability / health (lead-ieph)
 # ---------------------------------------------------------------------------
 
+@then("the committed beads registry is materialized into the container's "
+      "working tree")
+def assert_committed_registry_materialized(ctx, fake_driver):
+    """The launcher must check the committed registry out into the worktree.
+
+    On clone, .beads/issues.jsonl is git-tracked at HEAD but ABSENT from the
+    working tree.  Provisioning must run `git checkout HEAD -- .beads/issues.jsonl`
+    to materialize it (lead-rply DEFECT 2).
+    """
+    container_name = ctx["container_name"]
+    checkout_calls = [
+        c for c in fake_driver.exec_calls
+        if c.container == container_name
+        and c.command[0] == "git" and "checkout" in c.command
+        and any(arg.endswith(".beads/issues.jsonl") for arg in c.command)
+    ]
+    assert checkout_calls, (
+        "Expected a `git checkout HEAD -- .beads/issues.jsonl` exec call to "
+        f"materialize the committed registry in {container_name!r}"
+    )
+    assert fake_driver.beads_registry_materialized(container_name), (
+        f"Committed registry not materialized into the working tree of "
+        f"{container_name!r}"
+    )
+
+
 @then("the beads issue_prefix configured inside the container's .beads is "
-      "non-empty and matches the BC's expected prefix")
-def assert_beads_prefix_configured(ctx, fake_driver):
+      "non-empty and equals the repo's committed prefix")
+def assert_beads_prefix_is_committed(ctx, fake_driver):
+    """The configured prefix must be the COMMITTED prefix, NOT name-derived.
+
+    For shopsystem-bc-launcher the committed prefix is 'bclaunch' while
+    name-derivation yields 'bclauncher'; this step fails on a name-derived
+    mismatch (lead-rply DEFECT 1).
+    """
     from bc_launcher.controller import beads_prefix_for
     container_name = ctx["container_name"]
     bc_name = ctx["bc_name"]
-    expected = beads_prefix_for(bc_name)
+    expected = ctx["committed_beads_prefix"]
     configured = fake_driver.beads_prefix(container_name)
     assert configured, (
         f"Expected a non-empty beads issue_prefix configured in "
         f"{container_name!r}, got {configured!r}"
     )
     assert configured == expected, (
-        f"Expected beads issue_prefix {expected!r} for BC {bc_name!r}, "
-        f"got {configured!r}"
+        f"Expected the COMMITTED beads issue_prefix {expected!r} for BC "
+        f"{bc_name!r}, got {configured!r}"
+    )
+    # Non-vacuity guard: the committed prefix this scenario pins must differ
+    # from the name-derived prefix, so adopting-the-committed-prefix is a real
+    # behavioural distinction and not accidentally satisfied by name-derivation.
+    assert expected != beads_prefix_for(bc_name), (
+        f"Scenario is vacuous: committed prefix {expected!r} equals the "
+        f"name-derived prefix for {bc_name!r}; pick a BC whose committed "
+        f"registry carries a prefix the BC name does not imply."
     )
 
 
 @then("bd create run inside the container's workspace directory exits zero and "
       "yields a new issue id carrying that prefix")
 def assert_bd_create_yields_prefixed_id(ctx, fake_driver):
-    from bc_launcher.controller import beads_prefix_for
     container_name = ctx["container_name"]
-    expected_prefix = beads_prefix_for(ctx["bc_name"])
+    expected_prefix = ctx["committed_beads_prefix"]
     result = fake_driver.exec_run(container_name, ["bd", "create", "scratch"])
     assert result.returncode == 0, (
         f"Expected `bd create` to exit zero inside {container_name!r}, "
@@ -2639,13 +2694,19 @@ def assert_bd_create_yields_prefixed_id(ctx, fake_driver):
     )
 
 
-@then("bd ready run inside the container's workspace directory exits zero")
-def assert_bd_ready_exits_zero(ctx, fake_driver):
+@then("bd ready run inside the container's workspace directory exits zero and "
+      "lists the committed issues")
+def assert_bd_ready_lists_committed(ctx, fake_driver):
     container_name = ctx["container_name"]
+    expected_prefix = ctx["committed_beads_prefix"]
     result = fake_driver.exec_run(container_name, ["bd", "ready"])
     assert result.returncode == 0, (
         f"Expected `bd ready` to exit zero inside {container_name!r}, "
         f"got rc={result.returncode} stderr={result.stderr!r}"
+    )
+    assert f"{expected_prefix}-" in result.stdout, (
+        f"Expected `bd ready` to list committed {expected_prefix!r}-prefixed "
+        f"issues, got stdout={result.stdout!r}"
     )
 
 
