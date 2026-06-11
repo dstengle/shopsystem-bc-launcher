@@ -884,12 +884,35 @@ class BcContainerController:
             # wedge it into a no-op), no `bd config set` (bd rejects it), no
             # separate `bd import`.  Run as vscode (NOT root) so the working
             # set and any git ops land vscode-owned and the repo stays clean.
+            #
+            # DEFENSIVE re-chown immediately before bootstrap: empirically,
+            # `.beads` can be observed root-owned at bootstrap time in a real
+            # launch even though step (1) chowned the whole tree (a re-root
+            # whose cause does not reproduce in isolated exec replays).  bd
+            # bootstrap run as vscode must `mkdir .beads/embeddeddolt`, which
+            # fails "permission denied" on a root-owned `.beads`.  Re-asserting
+            # vscode ownership here makes the step robust regardless of cause.
             self._driver.exec_run(
+                container,
+                ["chown", "-R",
+                 f"{AGENT_CONTAINER_USER}:{AGENT_CONTAINER_USER}",
+                 CONTAINER_WORKSPACE],
+            )
+            boot_result = self._driver.exec_run(
                 container,
                 ["bash", "-lc",
                  f"cd {CONTAINER_WORKSPACE} && bd bootstrap"],
                 user=AGENT_CONTAINER_USER,
             )
+            if boot_result.returncode != 0:
+                return CommandResult(
+                    exit_code=1,
+                    stdout="".join(out_lines),
+                    stderr=(
+                        "bd bootstrap failed (provisioning the in-container "
+                        f"bd working set): {boot_result.stderr or boot_result.stdout}"
+                    ),
+                )
             out_lines.append(
                 "Ran bd bootstrap (imported git-tracked .beads/issues.jsonl "
                 "into the embedded-Dolt working set)\n"
@@ -921,6 +944,17 @@ class BcContainerController:
             # contents "bc" or "lead"); it must match the original
             # bootstrap.  Run as vscode so the refreshed files are owned by
             # the agent user (the chown above handed /workspace to vscode).
+            # DEFENSIVE re-chown before the refresh: `shop-templates update`
+            # runs as vscode and OVERWRITES `.claude/...` files (e.g.
+            # canonical/bc-primer.md); a root-owned committed copy makes that
+            # write fail "permission denied".  Re-assert vscode ownership so
+            # the refresh can overwrite, regardless of any re-root upstream.
+            self._driver.exec_run(
+                container,
+                ["chown", "-R",
+                 f"{AGENT_CONTAINER_USER}:{AGENT_CONTAINER_USER}",
+                 CONTAINER_WORKSPACE],
+            )
             shop_type = self._read_shop_type(container)
             refresh_result = self._driver.exec_run(
                 container,
