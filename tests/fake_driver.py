@@ -11,6 +11,12 @@ from dataclasses import dataclass, field
 
 from bc_launcher.driver import ContainerInfo, ContainerMount
 
+# Mirror the launcher's container-side constants so the fake can model
+# `.beads` ownership transfer (lead-kjv7 DEFECT 3) without importing
+# controller internals.
+CONTAINER_WORKSPACE = "/workspace"
+AGENT_CONTAINER_USER = "vscode"
+
 
 @dataclass
 class ExecCall:
@@ -187,7 +193,38 @@ class FakeDockerDriver:
         # Containers whose Dolt working set has been provisioned (committed
         # registry imported).  Empty working set => `bd ready` lists nothing
         # and `bd create` cannot adopt the committed issues.
+        #
+        # lead-kjv7 DEFECT 2 / DEFECT 4 — TEST-FIDELITY.  The v0.2.7 fake
+        # MODELLED `bd config set issue_prefix` as side-effect-importing the
+        # committed registry into the Dolt working set.  Empirically that is
+        # FALSE: a real container left the `embeddeddolt/` working set ABSENT
+        # and `bd ready`/`bd create` failed with "no beads database found".
+        # The corrected model:
+        #   * `bd config set issue_prefix` adopts the prefix but does NOT
+        #     create the Dolt working set / `embeddeddolt/` dir.
+        #   * ONLY an explicit `bd import` of the materialized registry
+        #     provisions the working set (creates `embeddeddolt/`).
+        # So a launcher that merely sets the prefix (the broken v0.2.7 shape)
+        # now reads RED here, modelling the real empty-working-set failure.
         self._beads_working_set_provisioned: set[str] = set()
+
+        # lead-kjv7 DEFECT 4 — whether the embedded-Dolt working-set directory
+        # (`/workspace/.beads/embeddeddolt/`) exists.  It is ABSENT after clone
+        # and after `bd config set issue_prefix`; it materializes ONLY when the
+        # committed registry is imported into the Dolt working set (`bd import`
+        # on the materialized jsonl).  This is the directory whose ABSENCE the
+        # empirical failure observed.
+        self._beads_embeddeddolt_present: set[str] = set()
+
+        # lead-kjv7 DEFECT 3 / DEFECT 4 — ownership of `/workspace/.beads`.
+        # Provisioning steps (clone, bd dolt pull, git checkout, bd config,
+        # bd import) run as ROOT by default, so the `.beads` tree they create
+        # lands root-owned.  The vscode agent then cannot use the backend.
+        # Ownership is recorded per container; default "root".  It becomes
+        # "vscode" ONLY when a recursive chown to vscode COVERS `.beads`
+        # (a chown of /workspace with -R, or a chown that names .beads), OR
+        # when the beads provisioning ran as vscode in the first place.
+        self._beads_owner: dict[str, str] = {}
 
         # Explicit health-status overrides per container (when a test wants
         # to assert a docker-inspect status directly rather than derive it).
@@ -354,6 +391,25 @@ class FakeDockerDriver:
     def beads_working_set_provisioned(self, container_name: str) -> bool:
         """True once the committed registry was imported into the Dolt DB."""
         return container_name in self._beads_working_set_provisioned
+
+    def beads_embeddeddolt_present(self, container_name: str) -> bool:
+        """Whether `/workspace/.beads/embeddeddolt/` exists (lead-kjv7 DEFECT 4).
+
+        Absent after clone and after a bare `bd config set issue_prefix`;
+        present ONLY once the committed registry has been imported into the
+        Dolt working set.  Its absence is the empirical failure surface
+        (`bd ready` / `bd create` → "no beads database found").
+        """
+        return container_name in self._beads_embeddeddolt_present
+
+    def beads_owner(self, container_name: str) -> str:
+        """Return the owner of `/workspace/.beads` (lead-kjv7 DEFECT 3).
+
+        Defaults to "root": provisioning runs as root, so the `.beads` tree
+        lands root-owned until a recursive chown covers it (or provisioning
+        ran as vscode).  The vscode agent cannot use a root-owned backend.
+        """
+        return self._beads_owner.get(container_name, "root")
 
     def set_health_override(self, container_name: str, status: str) -> None:
         self._health_override[container_name] = status
@@ -566,14 +622,39 @@ class FakeDockerDriver:
         if command[0] == "git" and command[1] == "clone":
             return subprocess.CompletedProcess(command, 0, "", "")
 
-        # Simulate `git -C <ws> show HEAD:.beads/issues.jsonl` (lead-rply).
-        # The committed registry is git-tracked at HEAD even though it is
-        # ABSENT from the working tree after clone, so `git show` reveals it.
-        # Return a one-issue JSONL blob carrying the committed prefix so the
-        # launcher can ADOPT it (rather than name-deriving).  When no committed
-        # prefix is modelled for this container, the registry is empty.
+        # Simulate `git -C <ws> show HEAD:.beads/issues.jsonl` (lead-rply →
+        # lead-kjv7 DEFECT 1 RE-MODELLED).  The v0.2.7 fake served the
+        # committed registry blob from `git show`, so the launcher's
+        # prefix-detection read green even though it read from a path that is
+        # EMPTY in a real container at that point.  Empirically `git show`
+        # returned EMPTY and the launcher fell back to name-derivation
+        # ("Configured beads issue_prefix 'scenarios' ... name-derived
+        # fallback").  Correct the model: `git show HEAD:.beads/issues.jsonl`
+        # returns EMPTY.  The committed prefix can ONLY be read from the
+        # MATERIALIZED worktree file (see the `cat`/read handler below), and
+        # ONLY after `git checkout HEAD -- .beads/issues.jsonl` has run.  A
+        # launcher that reads the prefix from `git show` (the v0.2.7 shape)
+        # therefore now reads EMPTY → name-derives → mismatches the committed
+        # prefix, exactly the empirical DEFECT 1.
         if command[0] == "git" and "show" in command \
                 and any(arg.endswith("HEAD:.beads/issues.jsonl") for arg in command):
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+        # Simulate reading the MATERIALIZED committed registry from the working
+        # tree (e.g. `cat /workspace/.beads/issues.jsonl`).  lead-kjv7 DEFECT 1:
+        # the committed prefix MUST be read here — AFTER materialization — not
+        # from `git show`.  Returns the committed-prefix blob ONLY once the
+        # registry has been checked out into the worktree; before that the
+        # worktree file is ABSENT (the real post-clone state), so the read
+        # fails non-zero with an empty body.
+        if command[0] == "cat" \
+                and any(arg.endswith(".beads/issues.jsonl") for arg in command):
+            if container_name not in self._beads_registry_materialized:
+                return subprocess.CompletedProcess(
+                    command, 1, "",
+                    "cat: /workspace/.beads/issues.jsonl: No such file or "
+                    "directory\n",
+                )
             committed = self._committed_beads_prefix.get(container_name, "")
             if not committed:
                 return subprocess.CompletedProcess(command, 0, "", "")
@@ -589,39 +670,67 @@ class FakeDockerDriver:
         if command[0] == "git" and "checkout" in command \
                 and any(arg.endswith(".beads/issues.jsonl") for arg in command):
             self._beads_registry_materialized.add(container_name)
+            # lead-kjv7 DEFECT 3 — this write into `.beads` lands owned by the
+            # running user (root by default), so a later vscode chown is
+            # required to leave the tree usable by the agent.
+            self._beads_owner[container_name] = user or "root"
             return subprocess.CompletedProcess(command, 0, "", "")
 
         # Simulate bd dolt pull
         if command[:3] == ["bd", "dolt", "pull"]:
+            # lead-kjv7 DEFECT 3 — touches `.beads`, owned by the running user.
+            self._beads_owner[container_name] = user or "root"
             return subprocess.CompletedProcess(command, 0, "", "")
 
         # Simulate `bd config set issue_prefix <prefix>` — the launcher's
-        # beads-provisioning step (lead-rply).  Records the configured prefix.
-        # SIDE EFFECT: when the committed registry has been materialized into
-        # the working tree, this command imports it into the (empty) Dolt
-        # working set — but ONLY when the prefix being adopted matches the
-        # committed prefix the registry carries.  A name-derived MISMATCH (the
-        # bug) configures a prefix but does NOT provision the working set, so
-        # `bd ready` lists nothing and `bd create` cannot adopt the committed
-        # registry — exactly the WEDGED state the fix must eliminate.
+        # prefix-adoption step.  Records the configured prefix.
+        #
+        # lead-kjv7 DEFECT 2 RE-MODELLED.  The v0.2.7 fake treated this command
+        # as ALSO side-effect-importing the committed registry into the Dolt
+        # working set (when materialized + prefix matched).  Empirically that
+        # is FALSE: the real container had a configured prefix but an ABSENT
+        # `embeddeddolt/` working set, and `bd ready`/`bd create` failed with
+        # "no beads database found".  Correct the model: setting the prefix
+        # records the prefix ONLY; it does NOT create the Dolt working set and
+        # does NOT create `embeddeddolt/`.  Provisioning the working set now
+        # requires an EXPLICIT `bd import` (handled below).  A launcher that
+        # only sets the prefix (the broken v0.2.7 shape) therefore leaves the
+        # working set unprovisioned → `bd ready`/`bd create` RED.
         if command[:3] == ["bd", "config", "set"] and len(command) >= 5 \
                 and command[3] == "issue_prefix":
             configured = command[4]
             self._beads_prefix[container_name] = configured
-            committed = self._committed_beads_prefix.get(container_name, "")
+            # lead-kjv7 DEFECT 3 — writes the prefix into `.beads/config`,
+            # owned by the running user (root by default).
+            self._beads_owner[container_name] = user or "root"
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+        # Simulate `bd import [<path>]` — lead-kjv7 DEFECT 2.  This is the step
+        # that ACTUALLY imports the materialized committed registry into the
+        # (empty) embedded-Dolt working set, creating `embeddeddolt/` and
+        # making `bd ready`/`bd create` succeed.  It provisions the working set
+        # ONLY when the committed registry has been MATERIALIZED into the
+        # worktree first (otherwise there is nothing on disk to import); an
+        # import attempted before materialization exits non-zero, mirroring a
+        # missing source file.
+        if command[:2] == ["bd", "import"]:
             materialized = container_name in self._beads_registry_materialized
-            if committed:
-                # A committed registry exists: the working set is provisioned
-                # only when it was materialized AND the adopted prefix matches.
-                if materialized and configured == committed:
-                    self._beads_working_set_provisioned.add(container_name)
-                else:
-                    self._beads_working_set_provisioned.discard(container_name)
-            else:
-                # No committed registry modelled (e.g. a brand-new BC): setting
-                # a non-empty prefix is sufficient to make beads usable.
-                if configured:
-                    self._beads_working_set_provisioned.add(container_name)
+            committed = self._committed_beads_prefix.get(container_name, "")
+            if committed and not materialized:
+                return subprocess.CompletedProcess(
+                    command, 1, "",
+                    "import source .beads/issues.jsonl not found\n",
+                )
+            # Import succeeds: provision the Dolt working set and create the
+            # embeddeddolt/ directory.  (For a BC with no committed registry,
+            # import is a no-op that still yields an initialised working set.)
+            self._beads_working_set_provisioned.add(container_name)
+            self._beads_embeddeddolt_present.add(container_name)
+            # lead-kjv7 DEFECT 3 — creating `embeddeddolt/` under `.beads`
+            # lands owned by the running user (root by default).  This is the
+            # step most likely to re-root the tree if it runs AFTER a chown,
+            # so the launcher must chown LAST (or import as vscode).
+            self._beads_owner[container_name] = user or "root"
             return subprocess.CompletedProcess(command, 0, "", "")
 
         # Simulate `bd create ...` — exits zero and emits a new issue id
@@ -683,6 +792,30 @@ class FakeDockerDriver:
                 self._workspace_skills.setdefault(container_name, set()).update(
                     self.SHOP_TEMPLATES_SKILL_GROUP
                 )
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+        # Simulate `chown [-R] <user>:<group> <path...>` — lead-kjv7 DEFECT 3.
+        # Ownership of `/workspace/.beads` is transferred to vscode ONLY when a
+        # chown to vscode actually COVERS the `.beads` tree.  Two shapes cover
+        # it: a RECURSIVE chown of /workspace (`chown -R vscode:vscode
+        # /workspace`), or a chown that NAMES `.beads` directly.  A
+        # NON-recursive chown of /workspace alone does NOT recurse into
+        # `.beads` and so leaves it root-owned — the exact empirical DEFECT 3
+        # ("/workspace chown did NOT cover/recurse .beads").
+        if command and command[0] == "chown":
+            recursive = "-R" in command or "--recursive" in command
+            spec_and_paths = [a for a in command[1:] if a not in ("-R", "--recursive")]
+            owner_spec = spec_and_paths[0] if spec_and_paths else ""
+            paths = spec_and_paths[1:]
+            target_user = owner_spec.split(":", 1)[0] if owner_spec else ""
+            names_beads = any(".beads" in p for p in paths)
+            covers_workspace = any(
+                p.rstrip("/") == CONTAINER_WORKSPACE for p in paths
+            )
+            if target_user == AGENT_CONTAINER_USER and (
+                names_beads or (recursive and covers_workspace)
+            ):
+                self._beads_owner[container_name] = AGENT_CONTAINER_USER
             return subprocess.CompletedProcess(command, 0, "", "")
 
         # Default: success

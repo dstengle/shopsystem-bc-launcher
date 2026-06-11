@@ -2676,6 +2676,70 @@ def assert_beads_prefix_is_committed(ctx, fake_driver):
     )
 
 
+@then("the committed beads registry is imported into the container's Dolt "
+      "working set")
+def assert_committed_registry_imported(ctx, fake_driver):
+    """lead-kjv7 DEFECT 2 — provisioning must run an explicit `bd import`.
+
+    Setting the issue_prefix alone does NOT import the committed registry into
+    the embedded-Dolt working set (the empirical failure: `embeddeddolt/`
+    absent, `bd ready`/`bd create` → "no beads database found").  The launcher
+    must run `bd import` of the materialized registry.
+    """
+    container_name = ctx["container_name"]
+    import_calls = [
+        c for c in fake_driver.exec_calls
+        if c.container == container_name
+        and c.command[:2] == ["bd", "import"]
+    ]
+    assert import_calls, (
+        "Expected a `bd import` exec call to import the committed registry "
+        f"into the Dolt working set of {container_name!r}; the launcher must "
+        "not rely on `bd config set issue_prefix` to side-effect-import "
+        "(lead-kjv7 DEFECT 2)"
+    )
+    assert fake_driver.beads_working_set_provisioned(container_name), (
+        f"Dolt working set not provisioned in {container_name!r} after "
+        "provisioning"
+    )
+
+
+@then("the container's beads embedded-Dolt working set directory exists")
+def assert_embeddeddolt_present(ctx, fake_driver):
+    """lead-kjv7 DEFECT 4 — `/workspace/.beads/embeddeddolt/` must exist.
+
+    Its ABSENCE was the empirical failure surface.  It materializes only once
+    the committed registry has been imported into the Dolt working set.
+    """
+    container_name = ctx["container_name"]
+    assert fake_driver.beads_embeddeddolt_present(container_name), (
+        f"Expected the embedded-Dolt working set directory to exist in "
+        f"{container_name!r} (it is created by `bd import`); a configured "
+        "prefix without an import leaves it ABSENT — the empirical "
+        "'no beads database found' state (lead-kjv7 DEFECT 2/4)"
+    )
+
+
+@then("the container's .beads directory is owned by vscode")
+def assert_beads_owned_by_vscode(ctx, fake_driver):
+    """lead-kjv7 DEFECT 3 — `/workspace/.beads` must be vscode-owned.
+
+    Provisioning runs as root, so the `.beads` tree (including the freshly
+    imported Dolt working set) lands root-owned and the vscode agent cannot
+    use it.  The launcher must chown `.beads` recursively to vscode AFTER all
+    beads writes (or run provisioning as vscode).  A non-recursive chown of
+    /workspace that does not cover `.beads` leaves it root-owned — the
+    empirical DEFECT 3.
+    """
+    container_name = ctx["container_name"]
+    owner = fake_driver.beads_owner(container_name)
+    assert owner == "vscode", (
+        f"Expected `/workspace/.beads` in {container_name!r} to be owned by "
+        f"vscode, got {owner!r}; the agent cannot use a root-owned backend "
+        "(lead-kjv7 DEFECT 3)"
+    )
+
+
 @then("bd create run inside the container's workspace directory exits zero and "
       "yields a new issue id carrying that prefix")
 def assert_bd_create_yields_prefixed_id(ctx, fake_driver):
