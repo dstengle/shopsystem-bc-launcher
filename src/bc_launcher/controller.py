@@ -30,6 +30,7 @@ AGENT_TMUX_SESSION = "agent"
 # (the same home into which credential mounts and cp steps land).
 AGENT_CONTAINER_USER = "vscode"
 BC_IMAGE = "ghcr.io/dstengle/shopsystem-bc-base:latest"
+BC_IMAGE_ENV = "BC_IMAGE"
 SHOPMSG_DSN_ENV = "SHOPMSG_DSN"
 
 # ---------------------------------------------------------------------------
@@ -519,6 +520,7 @@ class BcContainerController:
         bc_name: str,
         repo_url: str | None = None,
         shopmsg_dsn: str | None = None,
+        image: str | None = None,
         startup_prompt: str | None = None,
         network: str | None = None,
         manifest_path: Path | None = None,
@@ -713,24 +715,40 @@ class BcContainerController:
             socket_dir = os.path.dirname(dsn_value)
             mounts.append(("bind", socket_dir, socket_dir, False))
 
+        # Launch-image source resolution.
+        #
+        # Precedence (mirrors the SHOPMSG_DSN idiom above: flag -> env ->
+        # default): an explicit ``image`` param (the --image flag) wins;
+        # otherwise the BC_IMAGE process-env var; otherwise the built-in
+        # BC_IMAGE constant.  This lets a launch target a base image other
+        # than the hard-coded default without editing source, while leaving
+        # the default behaviour unchanged when neither flag nor env is set.
+        if image:
+            resolved_image = image
+        elif env_image := os.environ.get(BC_IMAGE_ENV):
+            resolved_image = env_image
+        else:
+            resolved_image = BC_IMAGE
+
         # Digest-resolution step (scenario af2f03d3ac519cb5).
         #
-        # Before starting the container, resolve the bc-base "latest" tag's
+        # Before starting the container, resolve the resolved image tag's
         # CURRENT registry digest and run from that digest, so a republished
         # image reaches the new container instead of a stale locally-cached
         # "latest".  Without this step, a container started from the bare
         # "latest" tag would run whatever digest the local Docker cache holds
         # under "latest" (D_old) even after the registry has moved "latest"
         # to a newer digest (D_new).  When no registry driver is injected the
-        # behaviour is unchanged: launch runs from BC_IMAGE.
-        launch_image = BC_IMAGE
+        # behaviour is unchanged: launch runs from the resolved image.
+        launch_image = resolved_image
         if self._registry_driver is not None:
-            resolved_digest = self._registry_driver.resolve_digest(BC_IMAGE)
+            resolved_digest = self._registry_driver.resolve_digest(resolved_image)
             # Pin the run to the resolved digest.  A bare digest (sha256:...)
             # is turned into a fully-qualified digest reference against the
-            # bc-base repository; an already-qualified reference is used as-is.
+            # resolved image's repository; an already-qualified reference is
+            # used as-is.
             if resolved_digest.startswith("sha256:"):
-                repo = BC_IMAGE.split(":", 1)[0]
+                repo = resolved_image.split(":", 1)[0]
                 launch_image = f"{repo}@{resolved_digest}"
             else:
                 launch_image = resolved_digest

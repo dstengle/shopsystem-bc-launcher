@@ -78,6 +78,15 @@ def build_parser() -> argparse.ArgumentParser:
     p_launch.add_argument("bc_name", help="BC name (e.g. shopsystem-messaging)")
     p_launch.add_argument("--repo-url", help="Git repo URL to clone inside the container")
     p_launch.add_argument("--shopmsg-dsn", help="SHOPMSG_DSN value for the container")
+    p_launch.add_argument(
+        "--image",
+        help=(
+            "Base image to launch the BC container from. Overrides the "
+            "BC_IMAGE env var and the built-in default "
+            "(ghcr.io/dstengle/shopsystem-bc-base:latest). Precedence: "
+            "--image flag > BC_IMAGE env > default."
+        ),
+    )
     p_launch.add_argument("--network", help="Docker network to attach")
     p_launch.add_argument(
         "--debug",
@@ -270,6 +279,7 @@ def main(argv: list[str] | None = None) -> int:
             bc_name=args.bc_name,
             repo_url=getattr(args, "repo_url", None),
             shopmsg_dsn=getattr(args, "shopmsg_dsn", None),
+            image=getattr(args, "image", None),
             startup_prompt=startup_prompt,
             network=getattr(args, "network", None),
             agent_vault_broker=getattr(args, "agent_vault_broker", None),

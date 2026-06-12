@@ -5011,6 +5011,84 @@ def then_container_runs_from_new_digest(container_name, new_digest, old_digest, 
     )
 
 
+# --- lead-6ze3: launch image selection (--image flag / BC_IMAGE env) --------
+
+_BC_IMAGE_ENV = "BC_IMAGE"
+
+
+def _run_image_launch(bc_name, ctx, fake_driver, controller, tmp_path, image):
+    """Drive a launch and record the started container's docker run command.
+
+    A fresh, manifest-backed launch through the FakeDockerDriver so the
+    resolved launch image is observable as the trailing image token of the
+    recorded docker run command for the container.
+    """
+    repo_url = f"https://github.com/shopsystem/{bc_name}.git"
+    default_manifest = tmp_path / "bc-manifest.yaml"
+    if not default_manifest.exists():
+        import yaml as _yaml
+        default_manifest.write_text(_yaml.dump({
+            "product": "shopsystem product",
+            "bcs": [{"name": bc_name, "remote": repo_url, "role": "bc"}],
+        }))
+    result = controller.launch(
+        bc_name=bc_name,
+        repo_url=repo_url,
+        image=image,
+        manifest_path=default_manifest,
+        credential_home=ctx.get("credential_home"),
+    )
+    ctx["result"] = result
+    ctx["fake_driver_for_run"] = fake_driver
+    ctx["container_name"] = f"bc-{bc_name}"
+    ctx["bc_name"] = bc_name
+
+
+@given(parsers.parse('the BC_IMAGE environment variable is set to "{value}"'))
+def given_bc_image_env_set(value, monkeypatch):
+    monkeypatch.setenv(_BC_IMAGE_ENV, value)
+
+
+@given("the BC_IMAGE environment variable is not set")
+def given_bc_image_env_unset(monkeypatch):
+    monkeypatch.delenv(_BC_IMAGE_ENV, raising=False)
+
+
+@when(parsers.parse('I run bc-container launch with BC name "{bc_name}" '
+                    'and image "{image}"'))
+def when_launch_with_image_flag(bc_name, image, ctx, fake_driver, controller, tmp_path):
+    _run_image_launch(bc_name, ctx, fake_driver, controller, tmp_path, image)
+
+
+@when(parsers.parse('I run bc-container launch with BC name "{bc_name}" '
+                    'and no image flag'))
+def when_launch_without_image_flag(bc_name, ctx, fake_driver, controller, tmp_path):
+    _run_image_launch(bc_name, ctx, fake_driver, controller, tmp_path, None)
+
+
+@then(parsers.parse('the started container "{container_name}" is running '
+                    'from image "{image}"'))
+def then_container_runs_from_image(container_name, image, ctx):
+    run_cmd = ctx["fake_driver_for_run"].run_command_for_container(container_name)
+    # The image is the trailing token of the docker run command (no registry
+    # driver is injected here, so launch runs directly from the resolved image
+    # with no digest rewrite).
+    assert run_cmd and run_cmd[-1] == image, (
+        f"Container {container_name} not started from image {image!r}; "
+        f"docker run command was: {run_cmd!r}"
+    )
+
+
+@then(parsers.parse('the started container "{container_name}" is NOT running '
+                    'from image "{image}"'))
+def then_container_not_running_from_image(container_name, image, ctx):
+    run_cmd = ctx["fake_driver_for_run"].run_command_for_container(container_name)
+    assert image not in run_cmd, (
+        f"Container {container_name} unexpectedly started from image {image!r}; "
+        f"docker run command was: {run_cmd!r}"
+    )
+
+
 # ===========================================================================
 # bclaunch-9rr: bc-base agent-vault install + CA-materialization entrypoint +
 # baked placeholder credential.  BC-INTERNAL structural inspection of the
