@@ -33,6 +33,15 @@ BC_IMAGE = "ghcr.io/dstengle/shopsystem-bc-base:latest"
 BC_IMAGE_ENV = "BC_IMAGE"
 SHOPMSG_DSN_ENV = "SHOPMSG_DSN"
 
+# SHOPMSG_SYSTEM_SLUG (lead-53y0): bc-launcher RESOLVES + INJECTS this slug
+# into the launched BC container's docker run env.  bc-launcher itself NEVER
+# reads/consumes SHOPMSG_SYSTEM_SLUG — the CONSUMER is the BC's own shop-msg
+# at runtime (messaging, lead-tgsb).  Resolution precedence for the injected
+# value: SHOPMSG_SYSTEM_SLUG env on the launcher invocation > manifest
+# product: > DEFAULT_SYSTEM_SLUG ('shopsystem').
+SHOPMSG_SYSTEM_SLUG_ENV = "SHOPMSG_SYSTEM_SLUG"
+DEFAULT_SYSTEM_SLUG = "shopsystem"
+
 # ---------------------------------------------------------------------------
 # Agent-vault credential broker model (ADR-026, lead-hxb8 / lead-v4ih)
 # ---------------------------------------------------------------------------
@@ -578,31 +587,55 @@ class BcContainerController:
                 stdout=f"{container} is already running\n",
             )
 
-        # --- Network resolution ---
-        resolved_network: str | None = network
-        auto_create_network = False
-
-        if resolved_network is None:
-            # Try to derive from manifest
-            effective_manifest = manifest_path or Path("bc-manifest.yaml")
-            try:
-                product = _read_product_from_manifest(effective_manifest)
-            except ManifestProductTypeError as exc:
-                # lead-393: a non-string `product:` (int / bool / null / list /
-                # dict) must surface as a clean single-line stderr message
-                # naming the field, file path, expected type, observed type —
-                # NOT as the AttributeError that ``_slugify`` would raise on
-                # the next line.  In debug mode the operator opts back into
-                # the full traceback by letting the exception propagate.
-                if debug:
-                    raise
+        # --- Manifest product: (shared middle tier — lead-53y0) ---
+        # Read the DECLARED manifest ``product:`` ONCE, up front, so all three
+        # identity surfaces (docker network name, BC-name-shape prefix, and the
+        # injected SHOPMSG_SYSTEM_SLUG) derive from the ONE resolver with the
+        # manifest product as the shared middle tier.  Reading it here (rather
+        # than only inside the network branch) means an explicit --network does
+        # NOT suppress system-slug derivation from manifest product:.
+        #
+        # lead-393 reconciliation: a non-string ``product:`` (int/bool/null/
+        # list/dict) is fatal ONLY when the manifest product is actually NEEDED
+        # — i.e. when --network was NOT supplied and the network must derive
+        # from it.  An explicit --network short-circuits the manifest typecheck
+        # (the operator is not relying on the manifest), so a malformed product:
+        # under an explicit --network is swallowed and the system slug falls
+        # back to its default rather than blocking the launch.
+        effective_manifest = manifest_path or Path("bc-manifest.yaml")
+        manifest_product: str | None
+        try:
+            manifest_product = _read_product_from_manifest(effective_manifest)
+        except ManifestProductTypeError as exc:
+            if network is not None:
+                # Explicit --network: do not block on a malformed manifest
+                # product; treat it as absent for the slug surface.
+                manifest_product = None
+            elif debug:
+                # In debug mode the operator opts back into the full traceback.
+                raise
+            else:
+                # Network MUST derive from manifest product but it is malformed:
+                # surface a clean single-line stderr message naming the field,
+                # file path, expected type, observed type — NOT the
+                # AttributeError that ``_slugify`` would raise downstream.
                 return CommandResult(
                     exit_code=1,
                     stdout="",
                     stderr=exc.format_message() + "\n",
                 )
-            if product:
-                resolved_network = _slugify(product)
+
+        # --- Network resolution ---
+        # The docker network name derives from the SAME product resolver
+        # (lead-53y0 unification): there is no pre-existing per-surface env
+        # override for the network, so the network product is
+        #   manifest product: > default — slugified.
+        resolved_network: str | None = network
+        auto_create_network = False
+
+        if resolved_network is None:
+            if manifest_product:
+                resolved_network = _slugify(manifest_product)
                 auto_create_network = True
             else:
                 return CommandResult(
@@ -697,6 +730,26 @@ class BcContainerController:
             env[SHOPMSG_DSN_ENV] = shopmsg_dsn
         elif dsn := os.environ.get(SHOPMSG_DSN_ENV):
             env[SHOPMSG_DSN_ENV] = dsn
+
+        # --- SHOPMSG_SYSTEM_SLUG injection (lead-53y0) ---
+        # RESOLVE the product slug and INJECT it into the launched container's
+        # docker run env as -e SHOPMSG_SYSTEM_SLUG=<resolved>, MIRRORING the
+        # SHOPMSG_DSN injection idiom directly above (env-dict entry -> the
+        # FakeDockerDriver records it as a -e flag on the recorded run command).
+        # bc-launcher NEVER reads/consumes SHOPMSG_SYSTEM_SLUG itself; the
+        # CONSUMER is the BC's own shop-msg at runtime (messaging, lead-tgsb).
+        #
+        # Precedence for the injected slug (this surface's own override on top
+        # of the shared manifest-product middle tier):
+        #   SHOPMSG_SYSTEM_SLUG env on the launcher invocation
+        #     > manifest product:
+        #     > DEFAULT_SYSTEM_SLUG ('shopsystem').
+        if env_system_slug := os.environ.get(SHOPMSG_SYSTEM_SLUG_ENV):
+            env[SHOPMSG_SYSTEM_SLUG_ENV] = env_system_slug
+        elif manifest_product:
+            env[SHOPMSG_SYSTEM_SLUG_ENV] = manifest_product
+        else:
+            env[SHOPMSG_SYSTEM_SLUG_ENV] = DEFAULT_SYSTEM_SLUG
 
         # --- Mounts (bclaunch-7pf REVISED: ZERO credential/CA bind mounts) ---
         # The placeholder .credentials.json is BAKED INTO the bc-base image

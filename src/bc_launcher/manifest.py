@@ -3,6 +3,7 @@ Manifest loading, validation, and sync logic for bc-container manifest commands.
 
 The manifest is a YAML file (bc-manifest.yaml) at the lead repo root. Its structure:
 
+  product: shopsystem            # optional top-level product slug (string)
   bcs:
     - name: shopsystem-messaging
       remote: https://github.com/dstengle/shopsystem-messaging.git
@@ -10,6 +11,13 @@ The manifest is a YAML file (bc-manifest.yaml) at the lead repo root. Its struct
     - ...
 
 Required fields per entry: name, remote, role.
+
+Optional top-level field: ``product`` (string).  When present it is the
+shared MIDDLE tier of the unified product-slug resolver (lead-53y0): the
+docker network name, the BC-name-shape prefix, and the injected
+SHOPMSG_SYSTEM_SLUG all derive from it, with each surface's own env/flag
+override layered on top.  Absent or 'shopsystem' keeps the default
+'shopsystem' identity on every surface unchanged.
 """
 from __future__ import annotations
 
@@ -48,17 +56,34 @@ PRODUCT_SLUG_ENV = "PRODUCT_SLUG"
 DEFAULT_PRODUCT_SLUG = "shopsystem"
 
 
-def resolve_product_slug(product_slug: str | None = None) -> str:
-    """Resolve the configured product slug (flag -> env -> default).
+def resolve_product_slug(
+    product_slug: str | None = None,
+    manifest_product: str | None = None,
+) -> str:
+    """Resolve the configured product slug (flag -> env -> manifest -> default).
 
-    An explicit ``product_slug`` argument wins; otherwise the PRODUCT_SLUG
-    process-env var; otherwise DEFAULT_PRODUCT_SLUG ('shopsystem').
+    This is the UNIFIED product-slug resolver (lead-53y0).  The manifest
+    ``product:`` field is the shared MIDDLE tier across all three identity
+    surfaces (injected system slug, BC-name-shape prefix, docker network name);
+    each surface layers its own per-surface env/flag override on top.
+
+    Precedence for THIS surface (name-shape): an explicit ``product_slug``
+    argument (the --product-slug flag) wins; otherwise the PRODUCT_SLUG
+    process-env var; otherwise the manifest ``product:`` value passed as
+    ``manifest_product``; otherwise DEFAULT_PRODUCT_SLUG ('shopsystem').
+
+    The manifest tier is wired in WITHOUT changing the default-slug behavior:
+    when neither flag nor env is set AND the manifest declares no product (or
+    declares 'shopsystem'), the resolved slug is 'shopsystem' exactly as
+    before — preserving the lead-xntx default-slug guarantee.
     """
     if product_slug:
         return product_slug
     env_slug = os.environ.get(PRODUCT_SLUG_ENV)
     if env_slug:
         return env_slug
+    if manifest_product:
+        return manifest_product
     return DEFAULT_PRODUCT_SLUG
 
 
@@ -87,6 +112,9 @@ class BcEntry:
 @dataclass
 class Manifest:
     entries: list[BcEntry] = field(default_factory=list)
+    # Top-level product slug (lead-53y0).  None when the manifest declares no
+    # ``product:`` field.  Shared middle tier of the unified product resolver.
+    product: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -111,7 +139,13 @@ def load_manifest(path: Path) -> Manifest:
             role=item.get("role", ""),
         )
         entries.append(entry)
-    return Manifest(entries=entries)
+    # Top-level ``product:`` (lead-53y0) is an optional string.  A non-string
+    # value (int/bool/list/dict) is normalized to None here; the launch path's
+    # _read_product_from_manifest enforces the string type with a clean error
+    # (lead-393) for the network/system-slug derivation.
+    raw_product = data.get("product")
+    product = raw_product if isinstance(raw_product, str) and raw_product else None
+    return Manifest(entries=entries, product=product)
 
 
 # ---------------------------------------------------------------------------
@@ -233,25 +267,8 @@ class ManifestController:
         """
         result = ValidationResult(ok=True)
 
-        slug = resolve_product_slug(product_slug)
-        # Name-shape enforcement is ADDITIVE: it applies ONLY when a
-        # non-default product slug is explicitly configured (via --product-slug
-        # flag or PRODUCT_SLUG env).  Under the default slug ('shopsystem' —
-        # neither flag nor env set) validate() does NOT enforce any name shape,
-        # preserving the exact pre-slug-parameterization behavior (the
-        # BC_NAME_RE check was dead in validate() before this feature; the
-        # default accepted set must remain unchanged, so 'acme-widget' and any
-        # other name validate exactly as they did before).
-        #
-        # resolve_product_slug returns DEFAULT_PRODUCT_SLUG iff neither flag nor
-        # env supplied a slug; the only way to reach a non-default slug here is
-        # an explicit configuration.  Therefore `slug != DEFAULT_PRODUCT_SLUG`
-        # is precisely "explicitly-configured non-default slug", making
-        # "default => no new gate" unambiguous.
-        enforce_name_shape = slug != DEFAULT_PRODUCT_SLUG
-        name_re = bc_name_re_for_slug(slug)
-
-        # 1. Parse YAML
+        # 1. Parse YAML (FIRST, so the manifest ``product:`` field can feed the
+        #    unified product-slug resolver as the shared middle tier — lead-53y0).
         try:
             manifest = load_manifest(manifest_path)
         except yaml.YAMLError as exc:
@@ -264,6 +281,23 @@ class ManifestController:
             return result
 
         result.messages.append("Manifest is syntactically valid")
+
+        # Unified resolver (lead-53y0): name-shape slug is
+        #   --product-slug flag > PRODUCT_SLUG env > manifest product: > default.
+        # The manifest ``product:`` is the shared middle tier wired in here.
+        slug = resolve_product_slug(product_slug, manifest_product=manifest.product)
+        # Name-shape enforcement is ADDITIVE: it applies ONLY when the RESOLVED
+        # slug is a non-default product slug (via --product-slug flag, PRODUCT_SLUG
+        # env, OR a non-'shopsystem' manifest product:).  Under the default slug
+        # ('shopsystem' — no flag, no env, and manifest product absent or
+        # 'shopsystem') validate() does NOT enforce any name shape, preserving
+        # the exact pre-slug-parameterization behavior: 'acme-widget' under the
+        # default still validates (lead-xntx default-slug guarantee,
+        # cd7571286d97d76d).  The manifest tier MUST NOT re-enable default-slug
+        # enforcement — and it does not, because a manifest with no product (or
+        # product: shopsystem) resolves to DEFAULT_PRODUCT_SLUG.
+        enforce_name_shape = slug != DEFAULT_PRODUCT_SLUG
+        name_re = bc_name_re_for_slug(slug)
 
         # 2. Per-entry checks
         entry_ok = True

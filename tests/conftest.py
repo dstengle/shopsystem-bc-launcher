@@ -2220,6 +2220,85 @@ def no_manifest_in_cwd(ctx):
     ctx["launch_manifest_path"] = None
 
 
+# ---------------------------------------------------------------------------
+# SHOPMSG_SYSTEM_SLUG resolve+inject (lead-53y0)
+# ---------------------------------------------------------------------------
+
+@given("no SHOPMSG_SYSTEM_SLUG override is set on the launcher invocation")
+def no_system_slug_override(monkeypatch):
+    """Ensure SHOPMSG_SYSTEM_SLUG is absent from the launcher process env."""
+    monkeypatch.delenv("SHOPMSG_SYSTEM_SLUG", raising=False)
+
+
+@given(parsers.parse(
+    'a SHOPMSG_SYSTEM_SLUG override "{value}" is set on the launcher invocation'
+))
+def system_slug_override_set(value, monkeypatch):
+    """Set SHOPMSG_SYSTEM_SLUG on the launcher process env; monkeypatch restores."""
+    monkeypatch.setenv("SHOPMSG_SYSTEM_SLUG", value)
+
+
+@then(parsers.parse(
+    'a manifest file with product field "{product}" containing a single BC entry '
+    'named "{bc_name}" with a valid GitHub remote URL and role label "bc" '
+    'validates ok with the manifest product slug'
+))
+def assert_manifest_product_validates_entry(product, bc_name, ctx, tmp_path, fake_github):
+    """Run validate() against a manifest whose top-level product: drives the
+    name-shape slug (NO explicit --product-slug, NO PRODUCT_SLUG env), confirming
+    the BC-name-shape prefix derives from the SAME manifest product: middle tier
+    as the network name and the injected system slug (lead-53y0 unification)."""
+    import yaml as _yaml
+    manifest_path = tmp_path / f"validate-{product}-{bc_name}.yaml"
+    manifest_path.write_text(_yaml.dump({
+        "product": product,
+        "bcs": [{
+            "name": bc_name,
+            "remote": f"https://github.com/dstengle/{bc_name}.git",
+            "role": "bc",
+        }],
+    }))
+    mc = ManifestController(github_driver=fake_github)
+    result = mc.validate(manifest_path)
+    assert result.ok, (
+        f"Expected manifest with product:{product!r} to validate entry "
+        f"{bc_name!r} ok, got messages: {result.messages!r}"
+    )
+    assert bc_name in result.validated, (
+        f"Expected {bc_name!r} in validated set, got: {result.validated!r}"
+    )
+
+
+@then(parsers.parse(
+    'a manifest file with product field "{product}" containing a single BC entry '
+    'named "{bc_name}" with a valid GitHub remote URL and role label "bc" '
+    'is rejected as not matching the manifest product slug'
+))
+def assert_manifest_product_rejects_entry(product, bc_name, ctx, tmp_path, fake_github):
+    """Confirm the name-shape gate (derived from manifest product:) rejects a BC
+    name that does not match the manifest product slug — the same surface the
+    injected slug and network name derive from (lead-53y0 unification)."""
+    import yaml as _yaml
+    manifest_path = tmp_path / f"reject-{product}-{bc_name}.yaml"
+    manifest_path.write_text(_yaml.dump({
+        "product": product,
+        "bcs": [{
+            "name": bc_name,
+            "remote": f"https://github.com/dstengle/{bc_name}.git",
+            "role": "bc",
+        }],
+    }))
+    mc = ManifestController(github_driver=fake_github)
+    result = mc.validate(manifest_path)
+    assert not result.ok, (
+        f"Expected manifest with product:{product!r} to REJECT entry "
+        f"{bc_name!r}, got messages: {result.messages!r}"
+    )
+    assert bc_name in result.failed, (
+        f"Expected {bc_name!r} in failed set, got: {result.failed!r}"
+    )
+
+
 @given("no explicit \"--network\" flag is provided")
 def no_explicit_network_flag(ctx):
     """Record that no explicit network flag will be passed."""
