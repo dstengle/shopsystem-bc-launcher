@@ -13,6 +13,7 @@ Required fields per entry: name, remote, role.
 """
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -31,7 +32,49 @@ GITHUB_URL_RE = re.compile(
     r"^(https://github\.com/[\w.\-]+/[\w.\-]+(\.git)?|git@github\.com:[\w.\-]+/[\w.\-]+(\.git)?)$"
 )
 
-BC_NAME_RE = re.compile(r"^shopsystem-[a-z][a-z0-9\-]+$")
+# Product-slug resolution.
+#
+# Historically the accepted BC-name shape was hard-coded to the
+# 'shopsystem-' prefix, which product-locked the validator: a non-shopsystem
+# product (e.g. 'acme') could not declare BC names like 'acme-widget'.  The
+# accepted prefix is now derived from the configured product slug.
+#
+# Precedence mirrors the SHOPMSG_DSN / BC_IMAGE idiom in controller.py
+# (flag -> env -> default): an explicit ``product_slug`` argument wins;
+# otherwise the PRODUCT_SLUG process-env var; otherwise the built-in
+# default 'shopsystem'.  With the default slug the accepted set is
+# unchanged — 'shopsystem-*' names still validate.
+PRODUCT_SLUG_ENV = "PRODUCT_SLUG"
+DEFAULT_PRODUCT_SLUG = "shopsystem"
+
+
+def resolve_product_slug(product_slug: str | None = None) -> str:
+    """Resolve the configured product slug (flag -> env -> default).
+
+    An explicit ``product_slug`` argument wins; otherwise the PRODUCT_SLUG
+    process-env var; otherwise DEFAULT_PRODUCT_SLUG ('shopsystem').
+    """
+    if product_slug:
+        return product_slug
+    env_slug = os.environ.get(PRODUCT_SLUG_ENV)
+    if env_slug:
+        return env_slug
+    return DEFAULT_PRODUCT_SLUG
+
+
+def bc_name_re_for_slug(slug: str) -> re.Pattern[str]:
+    """Build the canonical BC-name pattern for a given product slug.
+
+    The accepted shape is '<slug>-<identifier>' where <identifier> begins
+    with a lowercase letter followed by lowercase alphanumerics and hyphens.
+    """
+    return re.compile(rf"^{re.escape(slug)}-[a-z][a-z0-9\-]+$")
+
+
+# Default module-level pattern for the default product slug ('shopsystem').
+# Retained for backward compatibility with consumers that import BC_NAME_RE
+# directly (e.g. manifest-shape BDD assertions over shopsystem-* names).
+BC_NAME_RE = bc_name_re_for_slug(DEFAULT_PRODUCT_SLUG)
 
 
 @dataclass
@@ -171,6 +214,7 @@ class ManifestController:
         self,
         manifest_path: Path,
         repos_dir: Path | None = None,
+        product_slug: str | None = None,
     ) -> ValidationResult:
         """
         Validate the manifest at manifest_path.
@@ -178,11 +222,19 @@ class ManifestController:
         Checks:
         - YAML parseable
         - required fields present on each entry
-        - canonical name pattern
+        - canonical name pattern (parameterized by the configured product slug)
         - GitHub remote URL format and reachability
         - repos_dir consistency (missing clones, extra dirs, remote mismatches)
+
+        The accepted canonical-name shape is '<product-slug>-<identifier>'.
+        ``product_slug`` follows the flag -> env (PRODUCT_SLUG) -> default
+        ('shopsystem') precedence; with the default the accepted set is
+        unchanged ('shopsystem-*' names still validate).
         """
         result = ValidationResult(ok=True)
+
+        slug = resolve_product_slug(product_slug)
+        name_re = bc_name_re_for_slug(slug)
 
         # 1. Parse YAML
         try:
@@ -211,6 +263,15 @@ class ManifestController:
                     result.messages.append(
                         f"Entry '{entry.name}': missing required field '{field_name}'"
                     )
+
+            # Canonical name pattern, parameterized by product slug.
+            if entry.name and not name_re.match(entry.name):
+                result.ok = False
+                entry_failed = True
+                result.messages.append(
+                    f"Entry '{entry.name}': name does not match canonical pattern "
+                    f"'{slug}-<identifier>' for product slug '{slug}'"
+                )
 
             # GitHub URL format
             if entry.remote and not GITHUB_URL_RE.match(entry.remote):

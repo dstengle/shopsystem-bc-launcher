@@ -1679,6 +1679,83 @@ def assert_output_does_not_include(text, ctx):
     )
 
 
+# ---------------------------------------------------------------------------
+# Product-slug-derived BC-name validation (lead-rfc5)
+# ---------------------------------------------------------------------------
+
+@given(parsers.parse(
+    'a manifest file contains a single BC entry named "{bc_name}" with a valid '
+    'GitHub remote URL and role label "bc"'
+))
+def manifest_with_single_named_entry(bc_name, ctx, tmp_path, fake_github):
+    lead_root = tmp_path / "lead_repo"
+    lead_root.mkdir(exist_ok=True)
+    manifest_path = lead_root / "bc-manifest.yaml"
+    entry = {
+        "name": bc_name,
+        "remote": f"https://github.com/dstengle/{bc_name}.git",
+        "role": "bc",
+    }
+    _write_manifest(manifest_path, [entry])
+    ctx["lead_root"] = lead_root
+    ctx["manifest_path"] = manifest_path
+    ctx["single_bc_name"] = bc_name
+    ctx["fake_github"] = fake_github
+
+
+@when(parsers.parse(
+    'I run "bc-container manifest validate" against that manifest with product slug "{slug}"'
+))
+def run_manifest_validate_with_slug(slug, ctx, fake_github):
+    manifest_path = ctx["manifest_path"]
+    repos_dir = ctx.get("repos_dir")
+    driver = ctx.get("fake_github", fake_github)
+    git_driver = ctx.get("fake_git")
+    mc = ManifestController(github_driver=driver, git_driver=git_driver)
+    result = mc.validate(manifest_path, repos_dir=repos_dir, product_slug=slug)
+    ctx["manifest_ok"] = result.ok
+    ctx["manifest_output"] = "\n".join(result.messages) + "\n"
+
+
+@when(parsers.parse(
+    'I run "bc-container manifest validate" against that manifest with the default product slug'
+))
+def run_manifest_validate_default_slug(ctx, fake_github):
+    manifest_path = ctx["manifest_path"]
+    repos_dir = ctx.get("repos_dir")
+    driver = ctx.get("fake_github", fake_github)
+    git_driver = ctx.get("fake_git")
+    mc = ManifestController(github_driver=driver, git_driver=git_driver)
+    # No product_slug argument and no PRODUCT_SLUG env => default 'shopsystem'.
+    result = mc.validate(manifest_path, repos_dir=repos_dir)
+    ctx["manifest_ok"] = result.ok
+    ctx["manifest_output"] = "\n".join(result.messages) + "\n"
+
+
+@then(parsers.parse('the output reports the BC entry "{bc_name}" as valid'))
+def assert_named_entry_valid(bc_name, ctx):
+    output = ctx.get("manifest_output", "")
+    assert ctx.get("manifest_ok"), (
+        f"Expected manifest_ok=True for {bc_name!r}, got output: {output!r}"
+    )
+    assert f"Entry '{bc_name}': valid" in output, (
+        f"Expected entry {bc_name!r} reported valid in output, got: {output!r}"
+    )
+
+
+@then(parsers.parse(
+    'the output reports the BC entry "{bc_name}" as not matching the configured product slug'
+))
+def assert_named_entry_rejected_for_slug(bc_name, ctx):
+    output = ctx.get("manifest_output", "")
+    assert not ctx.get("manifest_ok"), (
+        f"Expected manifest_ok=False for {bc_name!r}, got output: {output!r}"
+    )
+    assert bc_name in output and "canonical pattern" in output, (
+        f"Expected {bc_name!r} reported as not matching canonical pattern, got: {output!r}"
+    )
+
+
 @then(parsers.parse('the output reports "{bc_name}" as an unexpected entry in the repos directory'))
 def assert_output_unexpected_entry(bc_name, ctx):
     output = ctx.get("manifest_output", "")

@@ -176,6 +176,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--repos-dir", default=None,
         help="Path to the repos directory for consistency checks",
     )
+    p_mv.add_argument(
+        "--product-slug", default=None,
+        help=(
+            "Product slug used to derive the accepted BC-name prefix "
+            "'<slug>-<identifier>'. Precedence: this flag -> PRODUCT_SLUG env "
+            "-> default 'shopsystem'."
+        ),
+    )
 
     # manifest list
     p_ml = manifest_sub.add_parser("list", help="List BCs declared in the manifest")
@@ -208,7 +216,11 @@ def _run_manifest(args: argparse.Namespace) -> int:
 
     if args.manifest_subcommand == "validate":
         repos_dir = Path(args.repos_dir) if args.repos_dir else None
-        result = mc.validate(manifest_path, repos_dir=repos_dir)
+        result = mc.validate(
+            manifest_path,
+            repos_dir=repos_dir,
+            product_slug=getattr(args, "product_slug", None),
+        )
         for msg in result.messages:
             sys.stdout.write(msg + "\n")
         return 0 if result.ok else 1
