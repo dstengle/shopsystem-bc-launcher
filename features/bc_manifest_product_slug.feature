@@ -21,6 +21,14 @@ Feature: bc-container manifest validate derives the accepted BC-name prefix from
     Then the command exits zero
     And the output reports the BC entry "shopsystem-messaging" as valid
 
+  @scenario_hash:cd7571286d97d76d @bc:shopsystem-bc-launcher
+  Scenario: the validate command under the default product slug accepts a non-shopsystem BC name (regression guard)
+    Given a manifest file contains a single BC entry named "acme-widget" with a valid GitHub remote URL and role label "bc"
+    And a FakeGitHubDriver is configured to report the declared remote URL as reachable
+    When I run "bc-container manifest validate" against that manifest with the default product slug
+    Then the command exits zero
+    And the output reports the BC entry "acme-widget" as valid
+
   @scenario_hash:b225f050d50896f7 @bc:shopsystem-bc-launcher
   Scenario: the validate command rejects a BC name that does not match the configured product slug
     Given a manifest file contains a single BC entry named "shopsystem-messaging" with a valid GitHub remote URL and role label "bc"

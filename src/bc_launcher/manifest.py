@@ -234,6 +234,21 @@ class ManifestController:
         result = ValidationResult(ok=True)
 
         slug = resolve_product_slug(product_slug)
+        # Name-shape enforcement is ADDITIVE: it applies ONLY when a
+        # non-default product slug is explicitly configured (via --product-slug
+        # flag or PRODUCT_SLUG env).  Under the default slug ('shopsystem' —
+        # neither flag nor env set) validate() does NOT enforce any name shape,
+        # preserving the exact pre-slug-parameterization behavior (the
+        # BC_NAME_RE check was dead in validate() before this feature; the
+        # default accepted set must remain unchanged, so 'acme-widget' and any
+        # other name validate exactly as they did before).
+        #
+        # resolve_product_slug returns DEFAULT_PRODUCT_SLUG iff neither flag nor
+        # env supplied a slug; the only way to reach a non-default slug here is
+        # an explicit configuration.  Therefore `slug != DEFAULT_PRODUCT_SLUG`
+        # is precisely "explicitly-configured non-default slug", making
+        # "default => no new gate" unambiguous.
+        enforce_name_shape = slug != DEFAULT_PRODUCT_SLUG
         name_re = bc_name_re_for_slug(slug)
 
         # 1. Parse YAML
@@ -265,7 +280,9 @@ class ManifestController:
                     )
 
             # Canonical name pattern, parameterized by product slug.
-            if entry.name and not name_re.match(entry.name):
+            # Enforced only when a non-default slug is explicitly configured
+            # (additive; default-slug accepted set is unchanged).
+            if enforce_name_shape and entry.name and not name_re.match(entry.name):
                 result.ok = False
                 entry_failed = True
                 result.messages.append(
