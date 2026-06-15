@@ -24,10 +24,10 @@ USER root
 # "<pkg> @ git+https://github.com/<owner>/<repo>.git@vMAJOR.MINOR.PATCH"
 # VCS-pin shape. The owner is dstengle for these four shopsystem packages.
 RUN pip install --no-cache-dir \
-    "shopsystem-messaging @ git+https://github.com/dstengle/shopsystem-messaging.git@v0.2.1" \
+    "shopsystem-messaging @ git+https://github.com/dstengle/shopsystem-messaging.git@v0.4.0" \
     "scenarios @ git+https://github.com/dstengle/shopsystem-scenarios@v0.2.0" \
     "shop-templates @ git+https://github.com/dstengle/shopsystem-templates.git@v0.3.0" \
-    "shopsystem-bc-launcher @ git+https://github.com/dstengle/shopsystem-bc-launcher.git@v0.3.0"
+    "shopsystem-bc-launcher @ git+https://github.com/dstengle/shopsystem-bc-launcher.git@v0.3.1"
 
 # agent-vault — the in-container broker client (bclaunch-9rr). The agent runs
 # wrapped as `agent-vault run -- claude`; agent-vault establishes the proxy
