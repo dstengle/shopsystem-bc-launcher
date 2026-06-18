@@ -5861,3 +5861,240 @@ def then_probe_exits_nonzero_db_down(ctx):
         "bc-healthcheck.sh does not exit non-zero when the messaging database "
         "is unreachable."
     )
+
+
+# ===========================================================================
+# lead-f6xs — bc-base INTERACTIVE BOOTSTRAP entrypoint mode (scenarios
+# 20b7a66364a26404 + 938342272de4e38a). Structural inspection of the COMMITTED
+# bootstrap-entrypoint script + bc-base Dockerfile content (docker build is NOT
+# run — docker is unavailable in this environment), the same idiom as the
+# bc-base CA-trust / CLI-pin tests.
+# ===========================================================================
+
+# The four baked framework CLIs that must resolve on PATH in a bootstrap-mode
+# container exactly as for a brokered steady-state run.
+_BOOTSTRAP_FRAMEWORK_CLIS = (
+    "shop-templates",
+    "shop-msg",
+    "bc-container",
+    "agent-vault",
+)
+
+
+def _bootstrap_entrypoint_path():
+    """Return the committed bootstrap-entrypoint script Path, or None."""
+    candidate = _bc_base_dir() / "bootstrap-entrypoint.sh"
+    return candidate if candidate.is_file() else None
+
+
+@given("the published bc-base image is run with the interactive bootstrap "
+       "entrypoint mode selected")
+def given_bc_base_bootstrap_mode(ctx):
+    ctx["repo_root"] = _REPO_ROOT
+    ctx["bootstrap_entrypoint"] = _bootstrap_entrypoint_path()
+    ctx["bc_base_dockerfile"] = _find_bc_base_dockerfile()
+
+
+@given("the agent-vault broker holds no Claude or GitHub credential for this "
+       "product yet")
+def given_broker_holds_no_credential(ctx):
+    # Pre-state marker for the bootstrap beat: no real credential held yet, so
+    # the human-auth beat is what obtains them. No additional fixture state is
+    # required for the structural inspection of the committed entrypoint.
+    ctx["broker_credential_present"] = False
+
+
+@when("the bootstrap entrypoint executes its authentication beat")
+def when_bootstrap_beat_executes(ctx):
+    ctx["bootstrap_entrypoint"] = _bootstrap_entrypoint_path()
+    ctx["bc_base_dockerfile"] = _find_bc_base_dockerfile()
+
+
+@when("the bootstrap entrypoint starts")
+def when_bootstrap_entrypoint_starts(ctx):
+    ctx["bootstrap_entrypoint"] = _bootstrap_entrypoint_path()
+    ctx["bc_base_dockerfile"] = _find_bc_base_dockerfile()
+
+
+@then(parsers.parse(
+    'the entrypoint invokes "{cmd}" interactively attached to the host TTY '
+    'for the human to authenticate, not wrapped as "{wrap}"'))
+def then_bootstrap_invokes_claude_tty(ctx, cmd, wrap):
+    script = ctx.get("bootstrap_entrypoint") or _bootstrap_entrypoint_path()
+    assert script is not None, (
+        "No bootstrap entrypoint script found at "
+        "docker/bc-base/bootstrap-entrypoint.sh"
+    )
+    body = script.read_text()
+    code = _strip_sh_comments(body)
+    # The command must be invoked in EXECUTABLE code (not just mentioned in a
+    # comment), interactively attached to the host TTY (/dev/tty).
+    invoke_re = re.compile(
+        r"(?m)^[^\n#]*\b" + re.escape(cmd) + r"\b[^\n]*</dev/tty"
+    )
+    assert invoke_re.search(code), (
+        f"bootstrap entrypoint does not invoke {cmd!r} interactively attached "
+        f"to the host TTY (/dev/tty) in executable code.\n"
+        f"Executable content:\n{code}"
+    )
+    # It must NOT be wrapped as the brokered placeholder wrap (`agent-vault run
+    # -- claude`). Reject any executable line that wraps this command that way.
+    #
+    # NOTE: anchor the negative match on the WRAP PREFIX itself (the broker verb
+    # `agent-vault run --` followed by the command), with flexible whitespace
+    # between the wrap tokens. We deliberately do NOT append a trailing
+    # backreference to `cmd`: because `wrap` already ends in the command token
+    # (`agent-vault run -- claude`, where cmd == `claude`), demanding a SECOND
+    # `cmd` after the wrap would make the assertion vacuous — the canonical
+    # forbidden line `agent-vault run -- claude </dev/tty` has only one `claude`
+    # token and would never match. Build the pattern from the wrap's own tokens
+    # so the forbidden broker-wrapped invocation actually triggers the assert.
+    wrap_pat = r"\s+".join(re.escape(tok) for tok in wrap.split())
+    wrap_re = re.compile(r"(?m)^[^\n#]*\b" + wrap_pat + r"\b")
+    assert not wrap_re.search(code), (
+        f"bootstrap entrypoint wraps {cmd!r} as {wrap!r}; the interactive "
+        f"bootstrap beat must invoke {cmd!r} directly attached to the host TTY, "
+        f"NOT via the brokered placeholder wrap.\nExecutable content:\n{code}"
+    )
+
+
+@then(parsers.parse(
+    'the entrypoint invokes "{cmd}" interactively attached to the host TTY '
+    'for the human to authenticate'))
+def then_bootstrap_invokes_gh_tty(ctx, cmd):
+    script = ctx.get("bootstrap_entrypoint") or _bootstrap_entrypoint_path()
+    assert script is not None, (
+        "No bootstrap entrypoint script found at "
+        "docker/bc-base/bootstrap-entrypoint.sh"
+    )
+    code = _strip_sh_comments(script.read_text())
+    invoke_re = re.compile(
+        r"(?m)^[^\n#]*\b" + re.escape(cmd) + r"\b[^\n]*</dev/tty"
+    )
+    assert invoke_re.search(code), (
+        f"bootstrap entrypoint does not invoke {cmd!r} interactively attached "
+        f"to the host TTY (/dev/tty) in executable code.\n"
+        f"Executable content:\n{code}"
+    )
+
+
+@then(parsers.parse(
+    'the entrypoint does not place a "{placeholder}" credential as the Claude '
+    'or GitHub credential for this beat'))
+def then_bootstrap_no_placeholder(ctx, placeholder):
+    script = ctx.get("bootstrap_entrypoint") or _bootstrap_entrypoint_path()
+    assert script is not None, (
+        "No bootstrap entrypoint script found at "
+        "docker/bc-base/bootstrap-entrypoint.sh"
+    )
+    code = _strip_sh_comments(script.read_text())
+    # The placeholder token is the steady-state brokered artifact; the bootstrap
+    # beat obtains REAL human credentials and must never write/seed the literal
+    # placeholder as the operative Claude/GitHub credential. Assert the literal
+    # does not appear in EXECUTABLE code (comments documenting the contrast are
+    # allowed and expected).
+    assert placeholder not in code, (
+        f"bootstrap entrypoint places the {placeholder!r} placeholder token in "
+        f"executable code; the human-auth beat must obtain real credentials and "
+        f"never seed the placeholder as the operative credential.\n"
+        f"Executable content:\n{code}"
+    )
+
+
+@then("the image is the existing bc-base lineage image and not a separate "
+      "purpose-built bootstrap image")
+def then_bootstrap_is_existing_image(ctx):
+    dockerfile = ctx.get("bc_base_dockerfile") or _find_bc_base_dockerfile()
+    assert dockerfile is not None, (
+        "No tracked Dockerfile building shopsystem-bc-base found under the "
+        "bc-launcher repository file tree."
+    )
+    text = dockerfile.read_text()
+    # The bootstrap entrypoint must ship inside the SAME bc-base image (a mode
+    # of it), not a separate purpose-built bootstrap Dockerfile. Assert the
+    # bootstrap-entrypoint.sh is COPY'd into the bc-base image.
+    assert "shopsystem-bc-base" in text, (
+        "The Dockerfile carrying the bootstrap entrypoint is not the "
+        "shopsystem-bc-base lineage image."
+    )
+    assert re.search(r"(?m)^\s*COPY\s+bootstrap-entrypoint\.sh\b", text), (
+        "The bc-base Dockerfile does not COPY bootstrap-entrypoint.sh into the "
+        "image; the bootstrap mode must be a mode of the EXISTING bc-base "
+        "lineage image, not a separate purpose-built bootstrap image.\n"
+        f"Dockerfile content:\n{text}"
+    )
+    # There must be exactly one bc-base lineage Dockerfile under the repo: a
+    # separate purpose-built bootstrap Dockerfile would be a second image.
+    bc_base_dockerfiles = [
+        p for p in _REPO_ROOT.rglob("Dockerfile*")
+        if ".git" not in p.parts and p.is_file()
+        and "shopsystem-bc-base" in p.read_text()
+    ]
+    assert len(bc_base_dockerfiles) == 1, (
+        "Expected exactly one bc-base lineage Dockerfile (the bootstrap mode is "
+        f"a mode of it); found {len(bc_base_dockerfiles)}: "
+        f"{[str(p.relative_to(_REPO_ROOT)) for p in bc_base_dockerfiles]}"
+    )
+
+
+@then(parsers.parse(
+    'the framework CLIs "{a}", "{b}", "{c}", and "{d}" resolve on PATH inside '
+    'the running container exactly as they do for a brokered steady-state run'))
+def then_bootstrap_clis_on_path(ctx, a, b, c, d):
+    dockerfile = ctx.get("bc_base_dockerfile") or _find_bc_base_dockerfile()
+    assert dockerfile is not None, (
+        "No tracked Dockerfile building shopsystem-bc-base found."
+    )
+    dtext = dockerfile.read_text()
+    named = (a, b, c, d)
+    assert set(named) == set(_BOOTSTRAP_FRAMEWORK_CLIS), (
+        f"Scenario named CLIs {named} differ from the expected baked set "
+        f"{_BOOTSTRAP_FRAMEWORK_CLIS}."
+    )
+    # shop-msg, shop-templates and bc-container are provided by the three
+    # pip-installed dstengle framework packages (shopsystem-messaging ->
+    # shop-msg console-script, shop-templates, shopsystem-bc-launcher ->
+    # bc-container console-script); agent-vault is the installed Go binary.
+    # Assert the Dockerfile installs each provider so the console scripts /
+    # binary resolve on PATH for ANY run of the image (brokered or bootstrap).
+    assert re.search(
+        r"shopsystem-messaging @ git\+https://github\.com/dstengle/"
+        r"shopsystem-messaging(?:\.git)?@v\d+\.\d+\.\d+", dtext), (
+        "bc-base Dockerfile does not install shopsystem-messaging (provides the "
+        "shop-msg CLI) from a dstengle VCS version pin."
+    )
+    assert re.search(
+        r"shop-templates @ git\+https://github\.com/dstengle/"
+        r"shopsystem-templates(?:\.git)?@v\d+\.\d+\.\d+", dtext), (
+        "bc-base Dockerfile does not install shop-templates from a dstengle VCS "
+        "version pin."
+    )
+    assert re.search(
+        r"shopsystem-bc-launcher @ git\+https://github\.com/dstengle/"
+        r"shopsystem-bc-launcher(?:\.git)?@v\d+\.\d+\.\d+", dtext), (
+        "bc-base Dockerfile does not install shopsystem-bc-launcher (provides "
+        "the bc-container CLI) from a dstengle VCS version pin."
+    )
+    assert "Infisical/agent-vault/releases" in dtext and \
+        "install -m 0755 /tmp/agent-vault /usr/local/bin/agent-vault" in dtext, (
+        "bc-base Dockerfile does not install the agent-vault binary onto "
+        "/usr/local/bin (so it would not resolve on PATH)."
+    )
+    # The bootstrap entrypoint itself relies on these resolving on PATH and
+    # fail-fast checks each one — confirm it does not strip / re-export a PATH
+    # that would diverge from the brokered run (it must add nothing/remove
+    # nothing). The entrypoint must reference all four CLIs in its PATH guard.
+    bscript = ctx.get("bootstrap_entrypoint") or _bootstrap_entrypoint_path()
+    assert bscript is not None, "No bootstrap entrypoint script found."
+    bcode = _strip_sh_comments(bscript.read_text())
+    for cli in named:
+        assert cli in bcode, (
+            f"bootstrap entrypoint does not reference framework CLI {cli!r} in "
+            f"its PATH-resolution guard."
+        )
+    # The bootstrap entrypoint must NOT mutate PATH (which would diverge from a
+    # brokered run's PATH resolution).
+    assert not re.search(r"(?m)^[^\n#]*\bexport\s+PATH=", bcode), (
+        "bootstrap entrypoint mutates PATH; the baked framework CLIs must "
+        "resolve on PATH exactly as for a brokered steady-state run."
+    )

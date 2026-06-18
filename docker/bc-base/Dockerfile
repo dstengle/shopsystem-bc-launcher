@@ -155,6 +155,22 @@ RUN chmod 0755 /usr/local/bin/agent-vault-ca.sh \
     && cp /usr/local/bin/agent-vault-ca.sh /etc/profile.d/agent-vault-ca.sh \
     && chmod 0644 /etc/profile.d/agent-vault-ca.sh
 
+# Interactive BOOTSTRAP entrypoint mode (lead-f6xs). This is a MODE of THIS
+# existing bc-base lineage image — NOT a separate, purpose-built bootstrap
+# image. The same image that runs the brokered steady-state agent
+# (`agent-vault run -- claude`) is also run with this bootstrap entrypoint
+# selected to perform the one-time HUMAN authentication beat: it invokes
+# `claude` and `gh auth login` INTERACTIVELY attached to the host TTY so a
+# human authenticates directly, NOT wrapped as `agent-vault run -- claude`, and
+# it places NO "__PLACEHOLDER__" credential. Because it ships in this same
+# image, the four baked framework CLIs (shop-templates, shop-msg, bc-container,
+# agent-vault) resolve on PATH inside a bootstrap-mode container exactly as for
+# a brokered steady-state run. Selected at `docker run` time by overriding the
+# entrypoint to /usr/local/bin/bootstrap-entrypoint.sh (with a TTY allocated,
+# e.g. `docker run -it --entrypoint /usr/local/bin/bootstrap-entrypoint.sh`).
+COPY bootstrap-entrypoint.sh /usr/local/bin/bootstrap-entrypoint.sh
+RUN chmod 0755 /usr/local/bin/bootstrap-entrypoint.sh
+
 # In-container HEALTHCHECK probe (bclaunch-wuo). The script TCP-probes the two
 # services a BC strictly depends on — the agent-vault broker (host:port parsed
 # from the in-container HTTPS_PROXY proxy-listener address, fallback
