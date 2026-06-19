@@ -157,15 +157,28 @@ class DockerDriver(Protocol):
         marker: str,
         timeout_seconds: float,
         poll_interval_seconds: float = 0.5,
+        _clock=None,
+        _capture=None,
     ) -> bool:
         """
         Poll ``tmux capture-pane`` for the named session until ``marker`` is
-        observed in the pane contents, or until ``timeout_seconds`` elapses.
+        observed in the pane contents.
 
-        Returns True if the marker was observed, False on timeout.  The
-        controller uses this to sequence Claude Code startup inside the tmux
-        session (claude command → ready banner → trust accept → input ready)
-        before injecting the first user prompt.
+        lead-j351 — marker-keyed (progress-based) wait.  ``timeout_seconds``
+        is a *no-progress / idle* budget rather than an absolute wall-clock
+        cap: while the pane keeps changing (the boot is still progressing
+        toward readiness) the wait keeps polling, even past the legacy 60s
+        deadline, so a slow brokered boot still has its marker observed.  The
+        wait abandons (returns False) only after ``timeout_seconds`` of NO
+        progress with the marker still absent.
+
+        Returns True if the marker was observed, False on the no-progress
+        timeout.  The controller uses this to sequence Claude Code startup
+        inside the tmux session (claude command → ready banner → trust accept
+        → input ready) before injecting the first user prompt.
+
+        ``_clock`` and ``_capture`` are injectable test seams; production
+        passes neither.
         """
         ...
 
@@ -505,9 +518,31 @@ class RealDockerDriver:
         marker: str,
         timeout_seconds: float,
         poll_interval_seconds: float = 0.5,
+        _clock=None,
+        _capture=None,
     ) -> bool:
-        """Poll tmux capture-pane until marker is observed or timeout elapses."""
-        deadline = time.monotonic() + timeout_seconds
+        """Poll tmux capture-pane until ``marker`` is observed.
+
+        lead-j351 — marker-keyed (progress-based) wait.  The wait keys on the
+        observable ``marker`` rather than abandoning at a fixed wall-clock
+        deadline.  ``timeout_seconds`` is a *no-progress / idle* budget, NOT
+        an absolute cap: as long as the pane contents keep CHANGING (the boot
+        is still making progress toward readiness) the wait keeps polling,
+        even past the legacy 60s deadline.  It only abandons once the pane has
+        gone idle (no change) for ``timeout_seconds`` without the marker
+        appearing.
+
+        This fixes the live v0.3.3 defect where a *brokered* boot reaches the
+        agent REPL but takes >60s: the old fixed 60s deadline fired before the
+        input-ready marker appeared and dropped prompt injection.  A slow
+        brokered boot that is still progressing now still gets its marker
+        observed and its prompt injected.
+
+        ``_clock`` and ``_capture`` are injectable test seams (a monotonic /
+        sleep source and a pane-capture callable); production uses the real
+        monotonic clock and ``docker exec ... tmux capture-pane``.
+        """
+        clock = _clock if _clock is not None else time
         # The agent tmux session is owned by vscode (see
         # controller.AGENT_CONTAINER_USER); capture-pane against a
         # vscode-owned tmux server must run as vscode or tmux refuses the
@@ -516,15 +551,36 @@ class RealDockerDriver:
             "docker", "exec", "-u", "vscode", container_name,
             "tmux", "capture-pane", "-p", "-t", tmux_session,
         ]
-        while True:
+
+        def _capture_pane() -> str:
+            if _capture is not None:
+                return _capture()
             result = subprocess.run(
                 capture_cmd, capture_output=True, text=True, check=False,
             )
-            if marker in result.stdout:
+            return result.stdout
+
+        last_pane: str | None = None
+        # Wall-clock instant of the last observed PROGRESS (pane change).  The
+        # wait abandons only after `timeout_seconds` of NO progress with the
+        # marker still absent.
+        last_progress_at = clock.monotonic()
+        while True:
+            pane = _capture_pane()
+            if marker in pane:
                 return True
-            if time.monotonic() >= deadline:
+            now = clock.monotonic()
+            if pane != last_pane:
+                # The boot is still progressing toward readiness; reset the
+                # idle budget so a slow-but-advancing boot is not abandoned at
+                # a fixed wall-clock deadline.
+                last_pane = pane
+                last_progress_at = now
+            elif now - last_progress_at >= timeout_seconds:
+                # No progress for the full idle budget AND the marker never
+                # appeared — abandon.
                 return False
-            time.sleep(poll_interval_seconds)
+            clock.sleep(poll_interval_seconds)
 
 
 # ---------------------------------------------------------------------------
