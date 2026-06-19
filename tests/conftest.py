@@ -21,7 +21,11 @@ from bc_launcher.cli import build_parser, main as cli_main
 from bc_launcher.controller import BcContainerController
 from bc_launcher.driver import ContainerMount
 from bc_launcher.manifest import ManifestController, load_manifest, BC_NAME_RE, GITHUB_URL_RE
-from tests.fake_driver import FakeDockerDriver, FakeRegistryDriver
+from tests.fake_driver import (
+    FakeDockerDriver,
+    FakeRegistryDriver,
+    is_bd_bootstrap_command,
+)
 from tests.fake_github_driver import FakeGitHubDriver
 from tests.fake_git_driver import FakeGitDriver
 
@@ -611,7 +615,7 @@ def cloned_and_bootstrapped(ctx, fake_driver):
     bootstrap_calls = [
         c for c in fake_driver.exec_calls
         if c.container == container_name
-        and c.command[:2] == ["bd", "bootstrap"]
+        and is_bd_bootstrap_command(c.command)
     ]
     assert bootstrap_calls, "Expected a 'bd bootstrap' exec call during launch"
     dolt_calls = [
@@ -808,7 +812,7 @@ def assert_bd_bootstrap(ctx, fake_driver):
     container_name = ctx["container_name"]
     bd_calls = [
         c for c in fake_driver.exec_calls
-        if c.container == container_name and c.command[:2] == ["bd", "bootstrap"]
+        if c.container == container_name and is_bd_bootstrap_command(c.command)
     ]
     assert bd_calls, "Expected a 'bd bootstrap' exec call inside the container"
 
@@ -840,7 +844,7 @@ def assert_beads_directory(ctx, fake_driver):
     container_name = ctx["container_name"]
     bd_calls = [
         c for c in fake_driver.exec_calls
-        if c.container == container_name and c.command[:2] == ["bd", "bootstrap"]
+        if c.container == container_name and is_bd_bootstrap_command(c.command)
     ]
     assert bd_calls, "bd bootstrap not called — .beads directory would not exist"
 

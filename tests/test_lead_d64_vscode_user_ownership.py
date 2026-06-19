@@ -44,7 +44,7 @@ from bc_launcher.controller import (
     BcContainerController,
     CONTAINER_WORKSPACE,
 )
-from tests.fake_driver import FakeDockerDriver
+from tests.fake_driver import FakeDockerDriver, is_bd_bootstrap_command
 
 
 CONTAINER = "bc-shopsystem-messaging"
@@ -282,14 +282,6 @@ def test_chown_workspace_exec_run_exists_after_clone_and_pull(tmp_path):
     driver = _launch_with_clone(tmp_path)
 
     # Find each step's index in the exec_call sequence
-    chown_idx = next(
-        (
-            i for i, c in enumerate(driver.exec_calls)
-            if c.command[:2] == ["chown", "-R"]
-            and CONTAINER_WORKSPACE in c.command
-        ),
-        None,
-    )
     clone_idx = next(
         (
             i for i, c in enumerate(driver.exec_calls)
@@ -305,7 +297,22 @@ def test_chown_workspace_exec_run_exists_after_clone_and_pull(tmp_path):
     bootstrap_idx = next(
         (
             i for i, c in enumerate(driver.exec_calls)
-            if c.command[:2] == ["bd", "bootstrap"]
+            if is_bd_bootstrap_command(c.command)
+        ),
+        None,
+    )
+    # The ownership-transfer chown that matters for this invariant is the one
+    # that runs AFTER bd bootstrap — it is the one that transfers the freshly
+    # created `.beads`/embeddeddolt tree to vscode.  The launcher also issues
+    # earlier defensive `/workspace` chowns (before materialize and before
+    # bootstrap, lead-ezzr); selecting the FIRST chown would pin one of those
+    # pre-bootstrap chowns and is not what this invariant is about.
+    chown_idx = next(
+        (
+            i for i, c in enumerate(driver.exec_calls)
+            if c.command[:2] == ["chown", "-R"]
+            and CONTAINER_WORKSPACE in c.command
+            and (bootstrap_idx is not None and i > bootstrap_idx)
         ),
         None,
     )

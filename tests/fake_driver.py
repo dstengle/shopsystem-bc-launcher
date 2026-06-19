@@ -18,6 +18,32 @@ CONTAINER_WORKSPACE = "/workspace"
 AGENT_CONTAINER_USER = "vscode"
 
 
+def is_bd_bootstrap_command(command: list[str]) -> bool:
+    """Return True if ``command`` is the launcher's ``bd bootstrap`` provisioning step.
+
+    lead-8268 — the proven-clean recipe (commit 2b7ba61, contract
+    @scenario_hash:2904f3a905567b48) runs bootstrap through a login shell so it
+    executes in the workspace directory:
+
+        ["bash", "-lc", "cd /workspace && bd bootstrap"]
+
+    `docker exec` carries no implicit cwd, so the ``cd`` wrapper is
+    load-bearing.  An earlier launcher form issued the bare vector
+    ``["bd", "bootstrap"]``.  This matcher recognises BOTH so the bootstrap
+    detection tracks the invocation form rather than pinning a stale one.
+    """
+    if command[:2] == ["bd", "bootstrap"]:
+        return True
+    if (
+        len(command) >= 3
+        and command[0] == "bash"
+        and command[1] in ("-lc", "-c")
+        and "bd bootstrap" in command[2]
+    ):
+        return True
+    return False
+
+
 @dataclass
 class ExecCall:
     """Records one exec_run or exec_interactive call.
@@ -756,7 +782,7 @@ class FakeDockerDriver:
         # ("database already exists, nothing to do") and leaves the BC WEDGED
         # — prefix unset, working set unprovisioned — modelling the
         # self-inflicted lead-vlsu deadlock.
-        if command[:2] == ["bd", "bootstrap"]:
+        if is_bd_bootstrap_command(command):
             if container_name in self._beads_db_precreated:
                 # Deadlock: a pre-existing bd-created DB makes bootstrap a
                 # no-op.  Nothing is provisioned; the BC stays wedged.
