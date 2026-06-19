@@ -1093,24 +1093,38 @@ class BcContainerController:
                 user=AGENT_CONTAINER_USER,
             )
             if refresh_result.returncode != 0:
-                # B — CHECK the result; do NOT log false success.  Surface a
-                # real error and fail the launch so a silently-failing
-                # skill-refresh can never again read green.
-                return CommandResult(
-                    exit_code=1,
-                    stdout="".join(out_lines),
-                    stderr=(
-                        "shop-templates update failed "
-                        f"(shop-type={shop_type!r}, exit "
-                        f"{refresh_result.returncode}): "
-                        f"{refresh_result.stderr}"
-                    ),
+                # lead-k4k7 — DOWNGRADE a skill-refresh failure from a fatal
+                # early-return to a WARNING that still PROCEEDS to agent-start.
+                #
+                # The skill-refresh is a freshness nicety, not a precondition
+                # for the agent to run: a stale-but-present skill set is
+                # strictly better than a healthy container with no agent at all.
+                # Previously a transient (network-blip) non-zero exit here did
+                # `return CommandResult(exit_code=1)` BEFORE the tmux/claude
+                # start, leaving a fully-cloned "Up (healthy)" container with no
+                # agent session — a non-resumable strand that every relaunch
+                # re-clones and re-strands (observed live 2026-06-19, blocking
+                # 8 dispatches).  We now WARN and fall through to agent-start.
+                #
+                # The lead-q5k7 criterion-B invariants are preserved: we still
+                # CHECK the result (no false-success "Refreshed ..." line on a
+                # failure), and a failed refresh still deposits NO skills.  The
+                # only change is the disposition — warn-and-continue instead of
+                # fatal-abort.
+                err_lines.append(
+                    "warning: shop-templates skill-refresh failed "
+                    f"(shop-type={shop_type!r}, exit "
+                    f"{refresh_result.returncode}): "
+                    f"{refresh_result.stderr.strip()}; the skill set may be "
+                    "stale but the agent will still be started "
+                    "(lead-k4k7)\n"
                 )
-            out_lines.append(
-                f"Refreshed shop-templates skill-group "
-                f"(shop-type={shop_type}) into "
-                f"{CONTAINER_WORKSPACE}/.claude/skills/\n"
-            )
+            else:
+                out_lines.append(
+                    f"Refreshed shop-templates skill-group "
+                    f"(shop-type={shop_type}) into "
+                    f"{CONTAINER_WORKSPACE}/.claude/skills/\n"
+                )
 
             # FINAL ownership assertion (lead-mf15, scenario
             # @scenario_hash:d9e4ce60e03df361).  TIGHTENS the lead-d64 /
@@ -1146,6 +1160,46 @@ class BcContainerController:
                 f"the last provisioning op, before starting the agent\n"
             )
 
+        # Agent-start sequence (shared with `start_agent`, lead-k4k7).  This is
+        # the EXACT sequence the recovery subcommand drives so a stranded
+        # container can be brought to a running agent without re-cloning; the
+        # two readiness barriers and the inject-after-ready ordering stay
+        # behaviorally identical across launch and start-agent because they run
+        # the same code.
+        return self._start_agent_session(
+            container,
+            startup_prompt,
+            env.get(SHOPMSG_DSN_ENV),
+            probe_broker_address,
+            out_lines,
+            err_lines,
+        )
+
+    # ------------------------------------------------------------------
+    # agent-start sequence (shared by launch + start_agent, lead-k4k7)
+    # ------------------------------------------------------------------
+
+    def _start_agent_session(
+        self,
+        container: str,
+        startup_prompt: str | None,
+        dsn: str | None,
+        probe_broker_address: str,
+        out_lines: list[str],
+        err_lines: list[str],
+    ) -> CommandResult:
+        """Drive the agent-start sequence against an already-provisioned
+        container: start the agent tmux session, gate on the two readiness
+        barriers, start ``agent-vault run -- claude``, wait for the readiness
+        markers, and inject the startup prompt.
+
+        SHARED by ``launch`` (after clone + provisioning) and ``start_agent``
+        (recovery against an already-cloned container).  Sharing the sequence
+        keeps the readiness barriers and inject ordering identical across both
+        entry points (lead-k4k7).  ``out_lines`` / ``err_lines`` accumulate the
+        result's stdout / stderr; the caller passes whatever preamble it has
+        already logged.
+        """
         # Start tmux session as vscode.  Claude Code refuses
         # --dangerously-skip-permissions when EUID==0 ("cannot be used with
         # root/sudo privileges for security reasons"), so the agent must
@@ -1154,7 +1208,7 @@ class BcContainerController:
         # cross-user attach (any subsequent send-keys / capture-pane /
         # has-session / attach-session call against this session must
         # therefore also run as vscode).
-        tmux_result = self._driver.exec_run(
+        self._driver.exec_run(
             container,
             ["tmux", "new-session", "-d", "-s", AGENT_TMUX_SESSION],
             user=AGENT_CONTAINER_USER,
@@ -1181,13 +1235,12 @@ class BcContainerController:
             # fires BEFORE any Claude Code start / prompt injection: on
             # failure we return non-zero with a stderr line naming the DSN
             # and send NOTHING to the tmux session.
-            dsn_for_readiness = env.get(SHOPMSG_DSN_ENV)
-            if dsn_for_readiness and not self._driver.messaging_db_reachable(
-                dsn_for_readiness, container=container
+            if dsn and not self._driver.messaging_db_reachable(
+                dsn, container=container
             ):
                 err_lines.append(
                     f"messaging readiness failure: messaging database at "
-                    f"{SHOPMSG_DSN_ENV}={dsn_for_readiness} is not reachable; "
+                    f"{SHOPMSG_DSN_ENV}={dsn} is not reachable; "
                     f"startup prompt NOT injected\n"
                 )
                 return CommandResult(
@@ -1328,7 +1381,104 @@ class BcContainerController:
             )
             out_lines.append(f"Injected startup prompt: {startup_prompt!r}\n")
 
-        return CommandResult(exit_code=0, stdout="".join(out_lines), stderr="".join(err_lines))
+        return CommandResult(
+            exit_code=0, stdout="".join(out_lines), stderr="".join(err_lines)
+        )
+
+    # ------------------------------------------------------------------
+    # start-agent — recovery: drive agent-start against an already-cloned
+    # healthy container without re-cloning (lead-k4k7)
+    # ------------------------------------------------------------------
+
+    def start_agent(
+        self,
+        bc_name: str,
+        startup_prompt: str | None = None,
+        shopmsg_dsn: str | None = None,
+        agent_vault_broker: str | None = None,
+        manifest_path: Path | None = None,
+    ) -> CommandResult:
+        """Recovery subcommand: drive the agent-start sequence against an
+        ALREADY-cloned, healthy container that has no agent — WITHOUT
+        re-cloning.
+
+        lead-k4k7.  Makes first-class the manual recovery the lead performed
+        when a transient skill-refresh failure stranded a fully-cloned
+        "Up (healthy)" container with no agent session.  It runs the SAME
+        agent-start sequence ``launch`` uses (``_start_agent_session``): tmux
+        new-session as vscode, the messaging-DB + agent-vault readiness
+        barriers, ``agent-vault run -- claude``, the readiness-marker waits,
+        and the prompt injection — but NO clone, NO beads provisioning, and NO
+        skill-refresh.  It is idempotent / safe to re-run on a container
+        stranded with a clone but no agent.
+
+        Resolution of the readiness-probe inputs mirrors ``launch``: the DSN
+        comes from ``shopmsg_dsn`` (falling back to the container's recorded
+        DSN, then the ``SHOPMSG_DSN`` process env), and the probe broker is
+        derived from the resolved product slug (an explicit broker still wins).
+        """
+        container = _container_name(bc_name)
+
+        if not self._driver.is_running(container):
+            return CommandResult(
+                exit_code=1,
+                stderr=(
+                    f"{container} is not running; start-agent recovers an "
+                    "already-cloned, healthy container that has no agent — "
+                    "run `bc-container launch` first to create it\n"
+                ),
+            )
+
+        out_lines: list[str] = []
+        err_lines: list[str] = []
+
+        # Resolve the messaging DSN for the readiness barrier: explicit arg >
+        # the container's recorded DSN (from its docker run -e) > the
+        # SHOPMSG_DSN process env.
+        recorded_dsn = ""
+        dsn_reader = getattr(self._driver, "container_dsn", None)
+        if callable(dsn_reader):
+            recorded_dsn = dsn_reader(container) or ""
+        else:
+            recorded_dsn = self._driver._container_dsn.get(container, "")  # type: ignore[attr-defined]
+        dsn = shopmsg_dsn or recorded_dsn or os.environ.get(SHOPMSG_DSN_ENV)
+
+        # Resolve the probe broker address the same way launch does: an
+        # explicit broker wins, else derive from the resolved product slug
+        # (manifest product > SHOPMSG_SYSTEM_SLUG env > default).
+        explicit_broker = (
+            agent_vault_broker
+            or os.environ.get("BCLAUNCHER_AGENT_VAULT_BROKER")
+        )
+        manifest_product: str | None = None
+        try:
+            manifest_product = _read_product_from_manifest(
+                manifest_path or Path("bc-manifest.yaml")
+            )
+        except ManifestProductTypeError:
+            manifest_product = None
+        if env_system_slug := os.environ.get(SHOPMSG_SYSTEM_SLUG_ENV):
+            resolved_system_slug = env_system_slug
+        elif manifest_product:
+            resolved_system_slug = manifest_product
+        else:
+            resolved_system_slug = DEFAULT_SYSTEM_SLUG
+        probe_broker_address = resolve_probe_broker_address(
+            explicit_broker, resolved_system_slug
+        )
+
+        out_lines.append(
+            f"Recovering agent in already-cloned container {container} "
+            "(no re-clone)\n"
+        )
+        return self._start_agent_session(
+            container,
+            startup_prompt,
+            dsn,
+            probe_broker_address,
+            out_lines,
+            err_lines,
+        )
 
     # ------------------------------------------------------------------
     # attach

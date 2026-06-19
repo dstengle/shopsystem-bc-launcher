@@ -209,6 +209,43 @@ def build_parser() -> argparse.ArgumentParser:
     p_status = sub.add_parser("status", help="Report BC container state")
     p_status.add_argument("bc_name", help="BC name")
 
+    # start-agent (lead-k4k7) — recovery: drive the agent-start sequence
+    # against an already-cloned, healthy container that has no agent, WITHOUT
+    # re-cloning.  Idempotent / safe to re-run.
+    p_start_agent = sub.add_parser(
+        "start-agent",
+        help=(
+            "Recover an already-cloned, healthy container that has no agent "
+            "by driving the agent-start sequence (tmux + agent-vault claude + "
+            "inject) WITHOUT re-cloning. Idempotent / safe to re-run."
+        ),
+    )
+    p_start_agent.add_argument("bc_name", help="BC name")
+    p_start_agent.add_argument(
+        "--shopmsg-dsn",
+        default=None,
+        help=(
+            "SHOPMSG_DSN value for the messaging-readiness barrier. Defaults "
+            "to the DSN the container was launched with."
+        ),
+    )
+    p_start_agent.add_argument(
+        "--agent-vault-broker",
+        default=None,
+        help=(
+            "Agent-vault broker proxy-listener address for the readiness "
+            "probe. Overrides BCLAUNCHER_AGENT_VAULT_BROKER and the default."
+        ),
+    )
+    p_start_agent.add_argument(
+        "--startup-prompt",
+        default=None,
+        help=(
+            "Text to inject into tmux after the agent is ready. If omitted, "
+            "the default session-start imperative is injected (same as launch)."
+        ),
+    )
+
     # list
     sub.add_parser("list", help="List all known BC containers")
 
@@ -383,6 +420,28 @@ def main(argv: list[str] | None = None) -> int:
 
     elif args.subcommand == "status":
         result = controller.status(args.bc_name)
+        sys.stdout.write(result.stdout)
+        if result.stderr:
+            sys.stderr.write(result.stderr)
+        return result.exit_code
+
+    elif args.subcommand == "start-agent":
+        # Resolve --startup-prompt the same way launch does: an explicit value
+        # is a total override; omission injects the default session-start
+        # imperative with the BC name substituted in.
+        explicit_prompt = getattr(args, "startup_prompt", None)
+        if explicit_prompt is None:
+            startup_prompt = DEFAULT_STARTUP_PROMPT_TEMPLATE.format(
+                bc_name=args.bc_name
+            )
+        else:
+            startup_prompt = explicit_prompt
+        result = controller.start_agent(
+            bc_name=args.bc_name,
+            startup_prompt=startup_prompt,
+            shopmsg_dsn=getattr(args, "shopmsg_dsn", None),
+            agent_vault_broker=getattr(args, "agent_vault_broker", None),
+        )
         sys.stdout.write(result.stdout)
         if result.stderr:
             sys.stderr.write(result.stderr)

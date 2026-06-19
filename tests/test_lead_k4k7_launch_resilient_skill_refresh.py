@@ -345,3 +345,59 @@ def test_start_agent_honors_messaging_readiness_barrier(tmp_path):
         "start-agent must report a non-zero exit when the messaging-readiness "
         f"barrier fails; stderr: {result.stderr!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# CLI wiring — `bc-container start-agent <bc>` is a first-class subcommand
+# that threads its flags to controller.start_agent.
+# ---------------------------------------------------------------------------
+
+def test_cli_start_agent_subcommand_parses():
+    """The `start-agent` subcommand parses with its bc_name and flags."""
+    from bc_launcher.cli import build_parser
+
+    args = build_parser().parse_args(
+        ["start-agent", BC_NAME,
+         "--shopmsg-dsn", "postgresql://db/shopmsg",
+         "--agent-vault-broker", "https://agent-vault:14321",
+         "--startup-prompt", "RECOVER"]
+    )
+    assert args.subcommand == "start-agent"
+    assert args.bc_name == BC_NAME
+    assert args.shopmsg_dsn == "postgresql://db/shopmsg"
+    assert args.agent_vault_broker == "https://agent-vault:14321"
+    assert args.startup_prompt == "RECOVER"
+
+
+def test_cli_start_agent_dispatches_to_controller(monkeypatch):
+    """`bc-container start-agent <bc>` dispatches to controller.start_agent
+
+    and threads the bc_name + flags through.
+    """
+    import bc_launcher.cli as cli_module
+    from bc_launcher.cli import main as cli_main
+    from bc_launcher.controller import CommandResult
+
+    calls: list[dict] = []
+
+    class _Recorder:
+        def start_agent(self, **kwargs):
+            calls.append(kwargs)
+            return CommandResult(exit_code=0, stdout="", stderr="")
+
+    monkeypatch.setattr(cli_module, "BcContainerController", lambda _d: _Recorder())
+    monkeypatch.setattr(cli_module, "RealDockerDriver", lambda: object())
+
+    exit_code = cli_main(
+        ["start-agent", BC_NAME,
+         "--shopmsg-dsn", "postgresql://db/shopmsg",
+         "--agent-vault-broker", "https://agent-vault:14321",
+         "--startup-prompt", "RECOVER"]
+    )
+    assert exit_code == 0
+    assert calls, "start-agent subcommand did not dispatch to controller.start_agent"
+    call = calls[0]
+    assert call["bc_name"] == BC_NAME
+    assert call["shopmsg_dsn"] == "postgresql://db/shopmsg"
+    assert call["agent_vault_broker"] == "https://agent-vault:14321"
+    assert call["startup_prompt"] == "RECOVER"

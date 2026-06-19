@@ -26,14 +26,23 @@ Feature: bc-container launch skill-refresh uses the correct shop-templates invoc
     And launch never runs the invalid "shop-templates pour" command
     And the launch result is success
 
+  # lead-k4k7 SUPERSEDES the disposition this scenario originally pinned.
+  # q5k7 made a failed skill-refresh a FATAL early-return; that early-return
+  # (BEFORE the agent-start step) stranded a fully-cloned "Up (healthy)"
+  # container with NO agent when the refresh failed transiently (network blip),
+  # observed live 2026-06-19 blocking 8 dispatches.  The skill-refresh is a
+  # freshness nicety, not a precondition for the agent to run, so a failed
+  # refresh now WARNS and PROCEEDS to agent-start instead of aborting.  q5k7's
+  # surviving invariants are preserved: the launch still never logs false
+  # success and still deposits NO skills on a failed refresh.
   @scenario_hash:251984e3ac55e8f9 @bc:shopsystem-bc-launcher
-  Scenario: a failed skill-refresh surfaces a real error and does NOT log false success
+  Scenario: a failed skill-refresh warns and proceeds to agent-start without logging false success
     Given the shopsystem-bc-launcher BC is installed
     And a BC named "shopsystem-messaging" with a valid repo URL is configured
     And the bc-base image carries the shop-templates binary
     And the shop-templates skill-refresh fails at runtime
     When I run bc-container launch with BC name "shopsystem-messaging"
-    Then the launch result is a failure naming the shop-templates update error
+    Then the launch warns about the shop-templates update failure and still starts the agent
     And the launch output never claims the skill-group was refreshed
 
   @scenario_hash:ef39cf2255aea5d2 @bc:shopsystem-bc-launcher
