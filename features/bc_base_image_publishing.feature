@@ -38,3 +38,19 @@ Feature: bc-base image build and publish artifacts (lead-yy30 / lead-yk3o)
     When the "latest" tag is republished to point at the existing digest "D_good"
     Then the registry exposes the image tag "latest" at the repository path "dstengle/shopsystem-bc-base" pointing to "D_good"
     And no new image build is required because "D_good" is an already-published digest re-tagged in place
+
+  @scenario_hash:c179b0c448ca851c @bc:shopsystem-bc-launcher
+  Scenario: a shopsystem-templates release dispatch starts a bc-base rebuild run
+    Given the shopsystem-templates repository publishes a release for the tag "vT_new"
+    And that release emits a repository_dispatch to the shopsystem-bc-launcher repository carrying the released tag "vT_new" in its client_payload
+    When that repository_dispatch is delivered to shopsystem-bc-launcher
+    Then a bc-base rebuild workflow run is started in the shopsystem-bc-launcher repository in response to that dispatch
+    And that workflow run receives the released tag "vT_new" from the dispatch client_payload
+
+  @scenario_hash:edd2c813688ab768 @bc:shopsystem-bc-launcher
+  Scenario: after a templates release propagates, bc-base:latest carries the released shop-templates version
+    Given the published "bc-base:latest" image carries an installed shop-templates at version "vT_old"
+    And the shopsystem-templates repository publishes a newer release for the tag "vT_new" distinct from "vT_old"
+    When the bc-base rebuild triggered by that release completes and republishes the "latest" tag
+    Then pulling "ghcr.io/dstengle/shopsystem-bc-base:latest" yields an image whose installed shop-templates reports version "vT_new"
+    And the installed shop-templates version is no longer the previously hard-pinned "vT_old"
