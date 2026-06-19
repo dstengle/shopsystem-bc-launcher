@@ -16,3 +16,20 @@ Feature: bc-container --startup-prompt and inject commit prompts to the agent (l
     And I run "bc-container monitor shopsystem-messaging" and read its streamed output without issuing any further "bc-container inject" or other host-side keystroke
     Then within 30 seconds of the launch command exiting, the streamed monitor output contains an agent-working state-marker line that is produced only when the agent has committed input and is actively processing it (and not produced when the agent is idle at an unsubmitted input buffer)
     And the agent-working state-marker appears as a direct consequence of the launch's --startup-prompt being submitted, with no intervening "bc-container inject" invocation
+
+  # lead-j351: TIGHTENING of the readiness-wait TERMINATION CONDITION.  The
+  # legacy wait abandoned injection at a fixed 60s wall-clock deadline; a
+  # brokered boot that reaches its input-ready marker only after >60s was
+  # therefore dropped ("startup prompt NOT injected").  The wait must key on
+  # the observable input-ready marker (progress-based / generous headroom)
+  # rather than a fixed deadline that fires before a slow brokered boot
+  # completes.  The markers and the inject-after-ready ordering
+  # (5ef728039884a9a2) are UNCHANGED.
+  @scenario_hash:d227ccbcc9bdfa87 @bc:shopsystem-bc-launcher
+  Scenario: a brokered boot that becomes ready after the legacy 60s deadline still has its startup prompt injected
+    Given the shopsystem-bc-launcher BC is installed
+    And a brokered BC container whose Claude agent reaches its input-ready marker only after more than 60 seconds
+    When bc-container launch waits for the agent to become ready before injecting the startup prompt
+    Then launch does not abandon prompt injection at a fixed 60-second deadline while the agent is still progressing toward readiness
+    And once the agent's input-ready marker is observed the startup prompt is injected into the tmux session named "agent"
+    And the readiness wait keys on the observable input-ready marker rather than a fixed deadline that fires before a slow brokered boot completes

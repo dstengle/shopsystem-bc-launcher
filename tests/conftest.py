@@ -2623,6 +2623,136 @@ def assert_marker_no_intervening_inject(ctx, fake_driver):
 
 
 # ===========================================================================
+# lead-j351: marker-keyed (progress-based) readiness wait.
+# Scenario @scenario_hash:d227ccbcc9bdfa87 — a brokered boot whose Claude
+# agent reaches its input-ready marker only AFTER the legacy 60s deadline
+# must still have its startup prompt injected.  The FakeDockerDriver models
+# a "delayed marker": the input-ready marker is only observable once the
+# simulated boot has been progressing for more than 60s, so a fixed-60s
+# deadline implementation would drop injection while a marker-keyed one
+# still injects.
+# ===========================================================================
+
+_J351_SLOW_PROMPT = "J351_SLOW_BROKERED_BOOT_PROMPT"
+
+
+@given(parsers.parse(
+    "a brokered BC container whose Claude agent reaches its input-ready "
+    "marker only after more than 60 seconds"
+))
+def j351_brokered_slow_boot(ctx, fake_driver):
+    from bc_launcher.controller import AGENT_TMUX_SESSION, CLAUDE_INPUT_READY_MARKER
+    bc_name = "shopsystem-messaging"
+    container_name = f"bc-{bc_name}"
+    fake_driver.set_running(container_name, running=False)
+    # The input-ready marker only becomes observable after >60s of a
+    # *progressing* brokered boot.
+    fake_driver.simulate_marker_delayed_past_seconds(
+        container_name,
+        AGENT_TMUX_SESSION,
+        CLAUDE_INPUT_READY_MARKER,
+        appears_after_seconds=75.0,
+    )
+    ctx["bc_name"] = bc_name
+    ctx["container_name"] = container_name
+
+
+@when(parsers.parse(
+    "bc-container launch waits for the agent to become ready before "
+    "injecting the startup prompt"
+))
+def j351_launch_slow_boot(ctx, fake_driver, controller, tmp_path):
+    bc_name = ctx["bc_name"]
+    manifest_path = tmp_path / "bc-manifest.yaml"
+    if not manifest_path.exists():
+        import yaml as _yaml
+        manifest_path.write_text(_yaml.dump({
+            "product": "shopsystem product",
+            "bcs": [{
+                "name": bc_name,
+                "remote": f"https://github.com/shopsystem/{bc_name}.git",
+                "role": "bc",
+            }],
+        }))
+    result = controller.launch(
+        bc_name=bc_name,
+        startup_prompt=_J351_SLOW_PROMPT,
+        manifest_path=manifest_path,
+        credential_home=ctx.get("credential_home"),
+    )
+    ctx["result"] = result
+    ctx["startup_prompt"] = _J351_SLOW_PROMPT
+
+
+@then(parsers.parse(
+    "launch does not abandon prompt injection at a fixed 60-second deadline "
+    "while the agent is still progressing toward readiness"
+))
+def j351_no_fixed_deadline_abandon(ctx):
+    result = ctx["result"]
+    assert result.exit_code == 0, (
+        f"Expected launch to exit zero, got {result.exit_code} "
+        f"(stderr: {result.stderr!r})"
+    )
+    assert "NOT injected" not in result.stderr, (
+        "Launch abandoned prompt injection at the fixed 60s deadline for a "
+        f"still-progressing brokered boot; stderr: {result.stderr!r}"
+    )
+
+
+@then(parsers.parse(
+    "once the agent's input-ready marker is observed the startup prompt is "
+    'injected into the tmux session named "{session}"'
+))
+def j351_prompt_injected_after_marker(session, ctx, fake_driver):
+    container_name = ctx["container_name"]
+    send_keys = [
+        c.command for c in fake_driver.exec_calls
+        if c.container == container_name and c.command[:2] == ["tmux", "send-keys"]
+    ]
+    injected = [
+        cmd for cmd in send_keys
+        if _J351_SLOW_PROMPT in cmd
+        and cmd[:4] == ["tmux", "send-keys", "-t", session]
+    ]
+    assert injected, (
+        f"Expected the startup prompt to be injected into tmux session "
+        f"{session!r} after the input-ready marker was observed; "
+        f"send-keys recorded: {send_keys!r}"
+    )
+    # Non-vacuity: the input-ready marker wait actually happened and preceded
+    # the prompt injection (inject-after-ready ordering, 5ef728039884a9a2).
+    from bc_launcher.controller import CLAUDE_INPUT_READY_MARKER
+    markers = [m for (_c, _s, m) in fake_driver.wait_for_marker_calls]
+    assert CLAUDE_INPUT_READY_MARKER in markers, (
+        f"Expected an input-ready marker wait; recorded: {markers!r}"
+    )
+    assert fake_driver.input_ready_wait_preceded_prompt(_J351_SLOW_PROMPT), (
+        "The startup prompt must be injected only AFTER the input-ready "
+        "marker wait (inject-after-ready ordering, 5ef728039884a9a2)."
+    )
+
+
+@then(parsers.parse(
+    "the readiness wait keys on the observable input-ready marker rather "
+    "than a fixed deadline that fires before a slow brokered boot completes"
+))
+def j351_wait_keyed_on_marker(ctx, fake_driver):
+    # The launch above configured the input-ready marker to appear only after
+    # >60s of a progressing boot, yet the prompt was injected.  That outcome
+    # is only possible if the wait keyed on the observable marker / progress
+    # rather than abandoning at the fixed 60s deadline.  Re-assert the marker
+    # was the gating signal: the fake records that the marker became
+    # observable strictly after the legacy 60s deadline.
+    container_name = ctx["container_name"]
+    assert fake_driver.marker_observed_after_legacy_deadline(container_name), (
+        "The input-ready marker must have been observed only AFTER the legacy "
+        "60s deadline, proving the wait keyed on the marker rather than a "
+        "fixed deadline that would have fired first."
+    )
+
+
+# ===========================================================================
 # Two-discrete-invocation send-keys scenario step definitions
 # (lead-lez1 / lead-9q0f, scenarios 30 / 31).
 #
