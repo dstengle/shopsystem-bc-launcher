@@ -6642,21 +6642,34 @@ _MULTILINE_BROKER_CA_PEM = (
     "spanning several physical lines"
 ))
 def given_multiline_ca_env_file(ctx, tmp_path):
+    # The canonical broker CA PEM on disk ends with exactly one trailing
+    # newline (the standard PEM file convention).
     pem = _MULTILINE_BROKER_CA_PEM
     # Sanity: the fixture genuinely spans several physical lines.
     assert pem.count("\n") >= 4, "fixture PEM must span several physical lines"
+    assert pem.endswith("\n") and not pem.endswith("\n\n")
     ctx["b14a_original_pem"] = pem
-    # Write the env file using the quoted multi-line convention: the value opens
-    # with a double quote on the AGENT_VAULT_CA_PEM= line and the closing quote
-    # is on a later physical line, with the PEM's real newlines in between.
+    # Write the env file using the quoted multi-line convention.  The value
+    # opens with a double quote on the AGENT_VAULT_CA_PEM= line and the closing
+    # quote sits immediately after the END marker (no trailing newline captured
+    # inside the quotes) -- mirroring the operator's working
+    # `export AGENT_VAULT_CA_PEM=$(cat agent-vault-ca.pem)` channel, where
+    # command substitution strips the trailing newline.  The bc-base
+    # `printf '%s\n'` materializer re-adds exactly one trailing newline, so the
+    # canonical PEM is reproduced byte-for-byte.  Internal newlines are
+    # preserved verbatim across the several physical lines between the quotes.
+    pem_body = pem.rstrip("\n")  # PEM content without the trailing newline
     env_file = tmp_path / "agent-vault.env"
     env_file.write_text(
         "AGENT_VAULT_ADDR=https://agent-vault:14321\n"
         "AGENT_VAULT_TOKEN=av_agt_xyz\n"
         "AGENT_VAULT_VAULT=shopsystem\n"
-        f'AGENT_VAULT_CA_PEM="{pem}"\n'
+        f'AGENT_VAULT_CA_PEM="{pem_body}"\n'
     )
     ctx["b14a_env_file"] = env_file
+    # The value that travels in the env var is the PEM body (no trailing
+    # newline); the materializer supplies the final newline.
+    ctx["b14a_env_value"] = pem_body
 
 
 @when(parsers.parse(
@@ -6713,22 +6726,33 @@ def when_parse_env_file_and_launch(ctx, controller, fake_driver, tmp_path):
     "multi-line PEM, not truncated at the first newline"
 ))
 def then_ca_pem_not_truncated(ctx):
+    # The value travelling in the env var is the PEM body (all physical lines,
+    # internal newlines preserved; trailing newline supplied later by the
+    # materializer).
+    env_value = ctx["b14a_env_value"]
     original = ctx["b14a_original_pem"]
     injected = ctx["b14a_container_env"].get("AGENT_VAULT_CA_PEM")
     first_line = original.split("\n", 1)[0]
     assert injected is not None, "AGENT_VAULT_CA_PEM was not injected into the container env"
-    # Not truncated: the injected value is NOT merely the first physical line.
-    assert injected != first_line, (
+    # Not truncated: the injected value is NOT merely the first physical line
+    # (the splitlines() bug truncated it to '"' + the BEGIN line).
+    assert injected != first_line and injected != '"' + first_line, (
         "AGENT_VAULT_CA_PEM was truncated to its first physical line "
         f"{first_line!r}; the multi-line PEM was lost"
     )
-    # Complete: every physical line of the original PEM is present, in order.
-    assert injected == original, (
+    # Complete: every physical line of the multi-line PEM is present, in order,
+    # with internal newlines preserved.
+    assert injected == env_value, (
         "AGENT_VAULT_CA_PEM injected into the container env is not the complete "
-        f"multi-line PEM.\n  expected: {original!r}\n  got:      {injected!r}"
+        f"multi-line PEM.\n  expected: {env_value!r}\n  got:      {injected!r}"
     )
-    assert injected.count("\n") == original.count("\n"), (
-        "internal newline count of the injected PEM does not match the original"
+    assert injected.count("\n") == env_value.count("\n") >= 4, (
+        "internal newline count of the injected PEM does not match the "
+        "several-physical-line original"
+    )
+    # The END marker survived -- a truncated value would never reach it.
+    assert "-----END CERTIFICATE-----" in injected, (
+        "the PEM END marker did not survive into the container env (truncated)"
     )
 
 
