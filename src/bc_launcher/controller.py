@@ -81,6 +81,15 @@ AGENT_VAULT_PROXY_ENV = "HTTPS_PROXY"
 DEFAULT_AGENT_VAULT_BROKER = "http://agent-vault:14321"
 AGENT_VAULT_BROKER_ENV = "BCLAUNCHER_AGENT_VAULT_BROKER"
 
+# The agent-vault broker's control-API port — the port the readiness PROBE
+# targets (a reachability check, NOT the :14322 MITM proxy the runtime traffic
+# uses).
+AGENT_VAULT_CONTROL_API_PORT = 14321
+# The unqualified agent-vault service name on the (single-product) shopsystem
+# network.  For a SECOND product the broker is reachable under a
+# slug-qualified name (``<slug>-agent-vault``); see resolve_probe_broker_address.
+AGENT_VAULT_SERVICE_NAME = "agent-vault"
+
 # ---------------------------------------------------------------------------
 # Agent-vault MITM proxy port + clone-time trust env (bclaunch-5fji)
 # ---------------------------------------------------------------------------
@@ -346,6 +355,42 @@ def _build_runtime_proxy_url(
     return _build_clone_proxy_url(
         agent_vault_addr, agent_vault_token, agent_vault_vault
     )
+
+
+def resolve_probe_broker_address(
+    explicit_broker: str | None,
+    system_slug: str | None,
+) -> str:
+    """Resolve the agent-vault broker address used for the READINESS PROBE.
+
+    lead-cs7k DEFECT (b): the readiness probe must target the broker by a host
+    the LAUNCHED CONTAINER's network can resolve.  The pre-fix code probed the
+    hardcoded ``DEFAULT_AGENT_VAULT_BROKER`` (``http://agent-vault:14321``),
+    which only resolves on the single-product ``shopsystem`` network.  For a
+    SECOND product the broker lives on the product network under a
+    slug-qualified name (e.g. ``dummyco-agent-vault``), so the probe host must
+    DERIVE from the resolved product slug.
+
+    Crucially this PROBE address is DECOUPLED from the runtime ``HTTPS_PROXY``
+    value (``_build_runtime_proxy_url``): pointing the probe at
+    ``dummyco-agent-vault:14321`` (the control-API reachability target) must
+    NOT clobber the ``http://<token>:<vault>@<host>:14322`` MITM proxy the
+    launched agent uses verbatim.  This function therefore returns ONLY the
+    probe address and is never fed into the runtime-proxy env.
+
+    Precedence:
+      1. An explicit operator-supplied broker URL wins verbatim (it already
+         names the broker the operator wants probed).
+      2. Else, when a product slug is known, the probe host is
+         ``<slug>-agent-vault`` on the control-API port.
+      3. Else (no slug) the unqualified default broker.
+    """
+    if explicit_broker:
+        return explicit_broker
+    if system_slug and system_slug != DEFAULT_SYSTEM_SLUG:
+        host = f"{_slugify(system_slug)}-{AGENT_VAULT_SERVICE_NAME}"
+        return f"http://{host}:{AGENT_VAULT_CONTROL_API_PORT}"
+    return DEFAULT_AGENT_VAULT_BROKER
 
 
 def _resolve_host_path(devcontainer_path: Path) -> Path:
@@ -745,11 +790,24 @@ class BcContainerController:
         #     > manifest product:
         #     > DEFAULT_SYSTEM_SLUG ('shopsystem').
         if env_system_slug := os.environ.get(SHOPMSG_SYSTEM_SLUG_ENV):
-            env[SHOPMSG_SYSTEM_SLUG_ENV] = env_system_slug
+            resolved_system_slug = env_system_slug
         elif manifest_product:
-            env[SHOPMSG_SYSTEM_SLUG_ENV] = manifest_product
+            resolved_system_slug = manifest_product
         else:
-            env[SHOPMSG_SYSTEM_SLUG_ENV] = DEFAULT_SYSTEM_SLUG
+            resolved_system_slug = DEFAULT_SYSTEM_SLUG
+        env[SHOPMSG_SYSTEM_SLUG_ENV] = resolved_system_slug
+
+        # --- Readiness PROBE broker address (lead-cs7k DEFECT (b)) ---
+        # The agent-vault broker the READINESS PROBE targets must be reachable
+        # from the launched container's product network.  Derive it from the
+        # SAME resolved product slug injected above (so a second product probes
+        # ``<slug>-agent-vault`` rather than the hardcoded ``agent-vault``),
+        # DECOUPLED from the runtime HTTPS_PROXY built earlier (so this never
+        # clobbers the token:vault@host:14322 derived proxy).  An explicit
+        # operator broker still wins verbatim.
+        probe_broker_address = resolve_probe_broker_address(
+            explicit_broker, resolved_system_slug
+        )
 
         # --- Mounts (bclaunch-7pf REVISED: ZERO credential/CA bind mounts) ---
         # The placeholder .credentials.json is BAKED INTO the bc-base image
@@ -1125,7 +1183,7 @@ class BcContainerController:
             # and send NOTHING to the tmux session.
             dsn_for_readiness = env.get(SHOPMSG_DSN_ENV)
             if dsn_for_readiness and not self._driver.messaging_db_reachable(
-                dsn_for_readiness
+                dsn_for_readiness, container=container
             ):
                 err_lines.append(
                     f"messaging readiness failure: messaging database at "
@@ -1149,10 +1207,18 @@ class BcContainerController:
             # with the messaging-DB barrier above, the agent engages only when
             # BOTH the messaging database AND the agent-vault broker are
             # reachable (scenarios f73afae0 / 64aaff80 / 6cb07698).
-            if not self._driver.agent_vault_reachable(broker_address):
+            #
+            # lead-cs7k: the probe targets ``probe_broker_address`` (derived
+            # from the resolved product slug, decoupled from the runtime proxy)
+            # and runs from INSIDE the launched container's network context
+            # (``container=container``) so its reachability matches the
+            # container's, not the launcher host's.
+            if not self._driver.agent_vault_reachable(
+                probe_broker_address, container=container
+            ):
                 err_lines.append(
                     f"agent-vault readiness failure: agent-vault broker at "
-                    f"{broker_address} is not reachable; "
+                    f"{probe_broker_address} is not reachable; "
                     f"startup prompt NOT injected\n"
                 )
                 return CommandResult(

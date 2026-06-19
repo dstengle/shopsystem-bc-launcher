@@ -169,7 +169,9 @@ class DockerDriver(Protocol):
         """
         ...
 
-    def messaging_db_reachable(self, dsn: str) -> bool:
+    def messaging_db_reachable(
+        self, dsn: str, container: str | None = None
+    ) -> bool:
         """Return True if the messaging database at ``dsn`` is reachable.
 
         This is the readiness barrier the launcher checks before injecting
@@ -178,6 +180,10 @@ class DockerDriver(Protocol):
         engaging it is pointless.  The controller calls this BEFORE prompt
         injection; on failure it surfaces a readiness error naming the DSN
         and does NOT send the startup prompt.
+
+        lead-cs7k: when ``container`` is supplied the probe runs from inside
+        the launched container's network context (``docker exec``) so its
+        reachability matches the container's, not the launcher host's.
         """
         ...
 
@@ -190,7 +196,9 @@ class DockerDriver(Protocol):
         """
         ...
 
-    def agent_vault_reachable(self, broker_address: str) -> bool:
+    def agent_vault_reachable(
+        self, broker_address: str, container: str | None = None
+    ) -> bool:
         """Return True if the agent-vault broker at ``broker_address`` is reachable.
 
         Under the agent-vault credential model (ADR-026) the launcher mounts
@@ -202,6 +210,9 @@ class DockerDriver(Protocol):
         messaging-database check: the controller calls this BEFORE engaging
         the agent and surfaces a readiness failure (naming the broker
         address) when it returns False.
+
+        lead-cs7k: when ``container`` is supplied the probe runs from inside
+        the launched container's network context (``docker exec``).
         """
         ...
 
@@ -209,6 +220,32 @@ class DockerDriver(Protocol):
 # ---------------------------------------------------------------------------
 # Real implementation (shells out to docker CLI)
 # ---------------------------------------------------------------------------
+
+def _parse_host_port(
+    addr: str, default_port: int | None = None
+) -> tuple[str | None, int | None]:
+    """Parse a ``host`` / ``port`` out of a DSN or broker address.
+
+    Accepts a bare ``host:port`` or a scheme-qualified URL.  Returns
+    ``(host, port)`` with ``port`` falling back to ``default_port`` when the
+    address omits one.  ``(None, None)`` when no host can be parsed.
+    """
+    if not addr:
+        return None, None
+    from urllib.parse import urlparse
+    s = addr.strip()
+    try:
+        parsed = urlparse(s if "://" in s else "tcp://" + s)
+    except ValueError:
+        return None, None
+    host = parsed.hostname
+    if not host:
+        return None, None
+    try:
+        port = parsed.port or default_port
+    except ValueError:
+        port = default_port
+    return host, port
 
 class RealDockerDriver:
     """Production DockerDriver that shells out to the docker CLI."""
@@ -338,8 +375,19 @@ class RealDockerDriver:
         self._last_command = cmd
         subprocess.run(cmd, check=True)
 
-    def messaging_db_reachable(self, dsn: str) -> bool:
+    def messaging_db_reachable(
+        self, dsn: str, container: str | None = None
+    ) -> bool:
         """Probe the messaging database at ``dsn`` for reachability.
+
+        lead-cs7k: when ``container`` is supplied the probe is executed from
+        INSIDE the launched container's network context (via ``docker exec``)
+        rather than from the launcher host process.  The launcher host is not
+        attached to a second product's docker network, so a host-process
+        connect to e.g. ``dummyco-postgres:5432`` false-fails even though the
+        container reaches it fine; running the probe inside the container
+        makes probe reachability match the container's reachability.  When
+        ``container`` is None the legacy host-process probe is used.
 
         Uses ``shop-msg ping`` if available, falling back to a TCP connect
         against the host:port parsed from the DSN.  Any failure (unparseable
@@ -347,22 +395,29 @@ class RealDockerDriver:
         """
         if not dsn:
             return False
-        # Prefer the messaging BC's own readiness probe when present.
+        host, port = _parse_host_port(dsn, default_port=5432)
+        if host is None:
+            return False
+        if container is not None:
+            # Run the probe inside the container's network context.  Prefer the
+            # messaging BC's own readiness probe, falling back to a python TCP
+            # connect — both execute from inside the container so they resolve
+            # the product-network service hostnames the launcher host cannot.
+            return self._exec_probe_reachable(
+                container,
+                ping_cmd=["shop-msg", "ping", "--dsn", dsn],
+                host=host,
+                port=port,
+            )
+        # Legacy host-process probe (container is None).
         probe = subprocess.run(
             ["shop-msg", "ping", "--dsn", dsn],
             capture_output=True, text=True, check=False,
         )
         if probe.returncode == 0:
             return True
-        # Fall back to a raw TCP connect against the DSN's host:port.
         import socket
-        from urllib.parse import urlparse
         try:
-            parsed = urlparse(dsn)
-            host = parsed.hostname
-            port = parsed.port or 5432
-            if not host:
-                return False
             with socket.create_connection((host, port), timeout=2.0):
                 return True
         except (OSError, ValueError):
@@ -379,8 +434,15 @@ class RealDockerDriver:
         status = result.stdout.strip()
         return status or "none"
 
-    def agent_vault_reachable(self, broker_address: str) -> bool:
+    def agent_vault_reachable(
+        self, broker_address: str, container: str | None = None
+    ) -> bool:
         """Probe the agent-vault broker at ``broker_address`` for reachability.
+
+        lead-cs7k: as for ``messaging_db_reachable``, when ``container`` is
+        supplied the probe runs from INSIDE the launched container's network
+        context (``docker exec``) so it resolves the product-network broker
+        host (e.g. ``dummyco-agent-vault``) the launcher host cannot.
 
         Parses a host:port (or URL) out of ``broker_address`` and attempts a
         TCP connect.  Any failure (empty/unparseable address, refused
@@ -390,21 +452,51 @@ class RealDockerDriver:
         """
         if not broker_address:
             return False
+        host, port = _parse_host_port(broker_address)
+        if host is None or port is None:
+            return False
+        if container is not None:
+            # Run the probe inside the container's network context.
+            return self._exec_probe_reachable(
+                container, ping_cmd=None, host=host, port=port
+            )
         import socket
-        from urllib.parse import urlparse
         try:
-            addr = broker_address
-            if "://" not in addr:
-                addr = "tcp://" + addr
-            parsed = urlparse(addr)
-            host = parsed.hostname
-            port = parsed.port
-            if not host or not port:
-                return False
             with socket.create_connection((host, port), timeout=2.0):
                 return True
         except (OSError, ValueError):
             return False
+
+    def _exec_probe_reachable(
+        self,
+        container: str,
+        *,
+        ping_cmd: list[str] | None,
+        host: str,
+        port: int,
+    ) -> bool:
+        """Execute a reachability probe FROM INSIDE the container's network.
+
+        The container is attached to the product's docker network, so a probe
+        executed via ``docker exec`` resolves the product-network service
+        hostnames the launcher host process cannot (the lead-cs7k
+        second-product bug).  Prefers ``ping_cmd`` when supplied (e.g.
+        ``shop-msg ping``); otherwise falls back to a python TCP connect run
+        inside the container.  Any non-zero / error result returns False.
+        """
+        if ping_cmd is not None:
+            result = self.exec_run(container, ping_cmd)
+            if result.returncode == 0:
+                return True
+        # Fall back to a python TCP connect executed inside the container.
+        connect_script = (
+            "import socket,sys\n"
+            f"\ntry:\n"
+            f"    socket.create_connection(({host!r}, {port}), timeout=2.0)"
+            f"\nexcept Exception:\n    sys.exit(1)\n"
+        )
+        result = self.exec_run(container, ["python3", "-c", connect_script])
+        return result.returncode == 0
 
     def wait_for_pane_marker(
         self,
