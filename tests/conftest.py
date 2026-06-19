@@ -5050,8 +5050,8 @@ def then_workspace_skills_populated(ctx, fake_driver):
 
 
 # --- lead-q5k7: skill-refresh uses the correct invocation + surfaces errors --
-# Scenarios 5c62355a8ac1658e (correct command + shop-type), 251984e3ac55e8f9
-# (failed refresh surfaces a real error, no false success), ef39cf2255aea5d2
+# Scenarios d0045dad01f070c8 (correct command + shop-type), db11ca7b46dd12a4
+# (failed refresh surfaces a real error, no false success), 2cd278b67bb5cd0f
 # (refreshed skill carries the lead-80t0 health step).
 
 @given(parsers.parse('the cloned shop\'s type marker is "{shop_type}"'))

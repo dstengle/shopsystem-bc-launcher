@@ -15,7 +15,7 @@ Feature: bc-container launch skill-refresh uses the correct shop-templates invoc
   MUST be checked, and a failed refresh MUST surface a real error instead of
   logging false success.
 
-  @scenario_hash:5c62355a8ac1658e @bc:shopsystem-bc-launcher
+  @scenario_hash:d0045dad01f070c8 @bc:shopsystem-bc-launcher
   Scenario: launch runs the VALID shop-templates update invocation with the derived shop-type
     Given the shopsystem-bc-launcher BC is installed
     And a BC named "shopsystem-messaging" with a valid repo URL is configured
@@ -35,7 +35,7 @@ Feature: bc-container launch skill-refresh uses the correct shop-templates invoc
   # refresh now WARNS and PROCEEDS to agent-start instead of aborting.  q5k7's
   # surviving invariants are preserved: the launch still never logs false
   # success and still deposits NO skills on a failed refresh.
-  @scenario_hash:251984e3ac55e8f9 @bc:shopsystem-bc-launcher
+  @scenario_hash:db11ca7b46dd12a4 @bc:shopsystem-bc-launcher
   Scenario: a failed skill-refresh warns and proceeds to agent-start without logging false success
     Given the shopsystem-bc-launcher BC is installed
     And a BC named "shopsystem-messaging" with a valid repo URL is configured
@@ -45,7 +45,7 @@ Feature: bc-container launch skill-refresh uses the correct shop-templates invoc
     Then the launch warns about the shop-templates update failure and still starts the agent
     And the launch output never claims the skill-group was refreshed
 
-  @scenario_hash:ef39cf2255aea5d2 @bc:shopsystem-bc-launcher
+  @scenario_hash:2cd278b67bb5cd0f @bc:shopsystem-bc-launcher
   Scenario: a successful refresh deposits the health-bearing bc-router skill into the workspace
     Given the shopsystem-bc-launcher BC is installed
     And a BC named "shopsystem-messaging" with a valid repo URL is configured
