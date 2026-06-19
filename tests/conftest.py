@@ -4645,6 +4645,42 @@ def _find_bc_base_dockerfile() -> Path | None:
     return None
 
 
+# Since lead-pwa2 (scenario edd2c813688ab768) the bc-base Dockerfile installs
+# shop-templates at a version taken from the SHOP_TEMPLATES_VERSION build ARG so
+# a templates-release rebuild can install the released tag.  A genuine
+# version-by-shape pin is therefore EITHER:
+#   (a) the frozen literal  ...shopsystem-templates(.git)?@vMAJOR.MINOR.PATCH, OR
+#   (b) the parameterized   ...shopsystem-templates(.git)?@${SHOP_TEMPLATES_VERSION}
+#       WITH an `ARG SHOP_TEMPLATES_VERSION=vMAJOR.MINOR.PATCH` default carrying
+#       the version shape.
+# Both preserve the dstengle/shopsystem-templates owner/repo binding and the
+# vMAJOR.MINOR.PATCH version shape; both reject an editable clone.  An
+# unparameterized @${VAR} with no vX.Y.Z-shaped default does NOT count.
+_SHOP_TEMPLATES_LITERAL_PIN_RE = re.compile(
+    r"shop-templates @ git\+https://github\.com/dstengle/"
+    r"shopsystem-templates(?:\.git)?@v\d+\.\d+\.\d+"
+)
+_SHOP_TEMPLATES_ARG_PIN_RE = re.compile(
+    r"shop-templates @ git\+https://github\.com/dstengle/"
+    r"shopsystem-templates(?:\.git)?@\$\{?SHOP_TEMPLATES_VERSION\}?"
+)
+_SHOP_TEMPLATES_ARG_DEFAULT_SHAPE_RE = re.compile(
+    r"ARG\s+SHOP_TEMPLATES_VERSION=v\d+\.\d+\.\d+"
+)
+
+
+def _shop_templates_pinned_by_version_shape(dockerfile_text: str) -> bool:
+    """True when shop-templates is pinned by vMAJOR.MINOR.PATCH shape, whether
+    as a frozen literal or via the SHOP_TEMPLATES_VERSION build ARG defaulted to
+    a vX.Y.Z value (lead-pwa2 parameterization)."""
+    if _SHOP_TEMPLATES_LITERAL_PIN_RE.search(dockerfile_text):
+        return True
+    return bool(
+        _SHOP_TEMPLATES_ARG_PIN_RE.search(dockerfile_text)
+        and _SHOP_TEMPLATES_ARG_DEFAULT_SHAPE_RE.search(dockerfile_text)
+    )
+
+
 def _workflows_dir() -> Path:
     return _REPO_ROOT / ".github" / "workflows"
 
@@ -4750,15 +4786,16 @@ def then_dockerfile_pins_shop_templates(ctx):
     # The shop-templates package must be installed from a
     # github.com/dstengle/shopsystem-templates @ vMAJOR.MINOR.PATCH VCS pin in
     # the pip VCS-requirement spelling (package name shop-templates, repo
-    # shopsystem-templates).
-    pin_re = re.compile(
-        r"shop-templates @ git\+https://github\.com/dstengle/"
-        r"shopsystem-templates(?:\.git)?@v\d+\.\d+\.\d+"
-    )
-    assert pin_re.search(text), (
+    # shopsystem-templates).  Since lead-pwa2 (scenario edd2c813688ab768) the
+    # version is PARAMETERIZED through the SHOP_TEMPLATES_VERSION build ARG so a
+    # templates-release rebuild can install the released tag; the ARG carries a
+    # vMAJOR.MINOR.PATCH default, preserving the version-by-shape pin.  Accept
+    # either the frozen literal OR the parameterized-with-vX.Y.Z-default form.
+    assert _shop_templates_pinned_by_version_shape(text), (
         "bc-base Dockerfile does not install shop-templates from a "
         "github.com/dstengle/shopsystem-templates @ vMAJOR.MINOR.PATCH version "
-        f"pin.\nDockerfile content:\n{text}"
+        "pin (literal, or SHOP_TEMPLATES_VERSION build ARG defaulted to "
+        f"vMAJOR.MINOR.PATCH).\nDockerfile content:\n{text}"
     )
 
 
@@ -4776,11 +4813,17 @@ def then_shop_templates_alongside_other_clis(ctx):
         r"([A-Za-z0-9._-]+?)(?:\.git)?@v\d+\.\d+\.\d+"
     )
     packages = {m.group(1) for m in pin_re.finditer(text)}
-    # shop-templates is one of the VCS-pinned utilities ...
-    assert "shop-templates" in packages, (
+    # shop-templates is one of the VCS-pinned utilities -- pinned to its
+    # dstengle/shopsystem-templates repo by vMAJOR.MINOR.PATCH shape.  Since
+    # lead-pwa2 (scenario edd2c813688ab768) its version is PARAMETERIZED through
+    # the SHOP_TEMPLATES_VERSION build ARG (default vX.Y.Z), so it appears in the
+    # @${SHOP_TEMPLATES_VERSION} form rather than as a frozen @vX.Y.Z literal;
+    # the helper recognizes both.
+    assert _shop_templates_pinned_by_version_shape(text), (
         "shop-templates is not installed in the "
         "<pkg> @ git+https://github.com/dstengle/<repo> @ vMAJOR.MINOR.PATCH "
-        f"VCS-pin shape; pinned packages found: {packages}"
+        "VCS-pin shape (literal or SHOP_TEMPLATES_VERSION ARG defaulted to "
+        f"vX.Y.Z); pinned packages found: {packages}"
     )
     # ... and it sits ALONGSIDE at least one OTHER framework utility pinned in
     # the exact same shape (e.g. shop-msg / beads), confirming it joins the
@@ -4839,6 +4882,18 @@ def then_dockerfile_pins_four_dstengle_clis(ctx):
     text = dockerfile.read_text()
     missing = []
     for pkg, (owner, repo) in _BC_BASE_FRAMEWORK_CLI_PINS.items():
+        # shop-templates is PARAMETERIZED since lead-pwa2 (scenario
+        # edd2c813688ab768): its version comes from the SHOP_TEMPLATES_VERSION
+        # build ARG so a templates-release rebuild installs the released tag.
+        # The owner/repo binding and vX.Y.Z version shape are still asserted
+        # (the ARG default carries the shape) -- a wrong owner/repo still FAILS.
+        if pkg == "shop-templates":
+            if not _shop_templates_pinned_by_version_shape(text):
+                missing.append(
+                    f"{pkg} -> github.com/{owner}/{repo} @ vMAJOR.MINOR.PATCH "
+                    "(literal or SHOP_TEMPLATES_VERSION ARG defaulted to vX.Y.Z)"
+                )
+            continue
         # Bind the package name to its CORRECT owner/repo. A wrong owner
         # (e.g. dstengle/beads) or wrong repo (e.g. dstengle/shop-msg) will
         # not match its package's required (owner, repo) pair -> FAIL.
@@ -6356,11 +6411,13 @@ def then_bootstrap_clis_on_path(ctx, a, b, c, d):
         "bc-base Dockerfile does not install shopsystem-messaging (provides the "
         "shop-msg CLI) from a dstengle VCS version pin."
     )
-    assert re.search(
-        r"shop-templates @ git\+https://github\.com/dstengle/"
-        r"shopsystem-templates(?:\.git)?@v\d+\.\d+\.\d+", dtext), (
+    # shop-templates is installed from its dstengle VCS pin; since lead-pwa2
+    # (scenario edd2c813688ab768) its version is parameterized through the
+    # SHOP_TEMPLATES_VERSION build ARG (default vX.Y.Z) rather than a frozen
+    # literal -- either way the shop-templates CLI resolves on PATH.
+    assert _shop_templates_pinned_by_version_shape(dtext), (
         "bc-base Dockerfile does not install shop-templates from a dstengle VCS "
-        "version pin."
+        "version pin (literal or SHOP_TEMPLATES_VERSION ARG defaulted to vX.Y.Z)."
     )
     assert re.search(
         r"shopsystem-bc-launcher @ git\+https://github\.com/dstengle/"
