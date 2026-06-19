@@ -2935,6 +2935,123 @@ def assert_beads_owned_by_vscode(ctx, fake_driver):
     )
 
 
+# ---------------------------------------------------------------------------
+# lead-mf15 — durable vscode ownership of every agent-touched workspace path
+# across container init (scenario @scenario_hash:d9e4ce60e03df361).
+# ---------------------------------------------------------------------------
+
+@given("a BC container is launched whose agent runs as the unprivileged "
+       "vscode user")
+def mf15_container_with_vscode_agent(ctx, fake_driver):
+    """Record that the launch under test runs its agent as vscode.
+
+    The launch itself is driven by the When step below; this Given pins the
+    premise (the agent is the unprivileged vscode user, so every path it
+    touches must be vscode-owned for it to work).
+    """
+    ctx["agent_user"] = "vscode"
+
+
+@when("the launcher clones the repository, provisions beads, and runs any "
+      "root-context setup during container init")
+def mf15_run_full_container_init(ctx, fake_driver, controller, tmp_path):
+    """Run a full launch: clone + bd bootstrap + shop-templates refresh +
+    tmux start — exercising every container-init step that writes under
+    /workspace, including the root-context provisioning ops."""
+    credential_home = ctx.get("credential_home")
+    if credential_home is None:
+        credential_home = tmp_path / "fake_home"
+        credential_home.mkdir(parents=True, exist_ok=True)
+        (credential_home / ".claude").mkdir(parents=True, exist_ok=True)
+        (credential_home / ".config" / "gh").mkdir(parents=True, exist_ok=True)
+        (credential_home / ".gitconfig").write_text("")
+        ctx["credential_home"] = credential_home
+
+    manifest = tmp_path / "bc-manifest.yaml"
+    manifest.write_text(
+        "product: shopsystem product\n"
+        "bcs:\n"
+        "  - name: shopsystem-messaging\n"
+        "    remote: https://github.com/shopsystem/shopsystem-messaging.git\n"
+        "    role: bc\n"
+    )
+    ctx["container_name"] = "bc-shopsystem-messaging"
+    result = controller.launch(
+        bc_name="shopsystem-messaging",
+        repo_url="https://example.invalid/shopsystem-messaging.git",
+        startup_prompt="anything",
+        manifest_path=manifest,
+        credential_home=credential_home,
+    )
+    ctx["result"] = result
+    assert result.exit_code == 0, (
+        f"launch failed during container init: stdout={result.stdout!r} "
+        f"stderr={result.stderr!r}"
+    )
+
+
+@then("every path under the container's /workspace that the agent may touch "
+      "is owned by vscode after container init completes")
+def mf15_every_path_vscode_owned(ctx, fake_driver):
+    container_name = ctx["container_name"]
+    owners = fake_driver.workspace_path_owners_at_agent_start(container_name)
+    assert owners, (
+        "Expected per-path ownership to be snapshotted at agent start "
+        "(tmux new-session); got none — was the agent ever started?"
+    )
+    non_vscode = {p: o for p, o in owners.items() if o != "vscode"}
+    assert not non_vscode, (
+        "After container init completes, every agent-touched path under "
+        "/workspace must be vscode-owned (lead-mf15 "
+        "@scenario_hash:d9e4ce60e03df361); these were not: "
+        f"{non_vscode!r}.  A root-owned agent-touched path is the mid-run "
+        "re-root that required a host `docker exec -u root chown` twice on "
+        "2026-06-18."
+    )
+
+
+@then("no file under /workspace remains root-owned such that the vscode "
+      "agent cannot modify it")
+def mf15_no_root_owned_path_remains(ctx, fake_driver):
+    container_name = ctx["container_name"]
+    root_owned = fake_driver.root_owned_paths_at_agent_start(container_name)
+    assert root_owned == [], (
+        "No agent-touched path under /workspace may remain root-owned after "
+        f"container init; these are still root-owned: {root_owned!r}.  Each "
+        "would require a host-side chown for the vscode agent to proceed "
+        "(lead-mf15)."
+    )
+
+
+@then("a git operation run by the vscode agent against /workspace/.git and a "
+      "bd operation against /workspace/.beads each succeed without a "
+      "host-side chown intervention")
+def mf15_git_and_bd_ops_succeed_without_host_chown(ctx, fake_driver):
+    """Both .git and .beads must be vscode-owned after init, so a vscode-user
+    git op and bd op each succeed with NO intervening host chown."""
+    container_name = ctx["container_name"]
+    owners = fake_driver.workspace_path_owners_at_agent_start(container_name)
+    git_owner = owners.get("/workspace/.git")
+    beads_owner = owners.get("/workspace/.beads")
+    assert git_owner == "vscode", (
+        f"/workspace/.git must be vscode-owned after container init so the "
+        f"vscode agent's git ops succeed without a host chown; got "
+        f"{git_owner!r} (lead-mf15: .git/objects/7e/ re-rooted mid-run "
+        "2026-06-18)."
+    )
+    assert beads_owner == "vscode", (
+        f"/workspace/.beads must be vscode-owned after container init so the "
+        f"vscode agent's bd ops succeed without a host chown; got "
+        f"{beads_owner!r} (lead-mf15: .beads cloned root-owned at bring-up "
+        "2026-06-18)."
+    )
+    # And the .beads-vscode-owned pin (2904f3a905567b48) must continue to hold.
+    assert fake_driver.beads_owner(container_name) == "vscode", (
+        "the existing .beads-vscode-owned invariant (2904f3a905567b48) must "
+        "continue to hold alongside the lead-mf15 tightening."
+    )
+
+
 @then("bd create run inside the container's workspace directory exits zero and "
       "yields a new issue id carrying that prefix")
 def assert_bd_create_yields_prefixed_id(ctx, fake_driver):

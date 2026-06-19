@@ -266,6 +266,33 @@ class FakeDockerDriver:
         # when the beads provisioning ran as vscode in the first place.
         self._beads_owner: dict[str, str] = {}
 
+        # lead-mf15 — durable ownership of EVERY agent-touched workspace path
+        # (scenario @scenario_hash:d9e4ce60e03df361).  The `.beads`-only model
+        # above pins the bd backend; this richer model tracks the ownership of
+        # each agent-touched path under /workspace (/workspace itself, .git,
+        # .beads) so the durable invariant can be asserted: after container
+        # init completes (at the moment the agent's tmux session is started),
+        # NO agent-touched path may be root-owned.
+        #
+        # Model:
+        #   * Each path starts "root" (the BC image default USER is root and
+        #     the clone runs as root).
+        #   * A root-context exec (user is None) that WRITES under a path
+        #     re-roots that path — modelling the lead-mf15 mid-run re-root
+        #     (e.g. a later root-context git op leaving .git/objects/NN/
+        #     root-owned).
+        #   * A vscode-context exec that writes under a path leaves that path
+        #     vscode-owned.
+        #   * A recursive `chown -R vscode:vscode /workspace` re-owns ALL
+        #     agent-touched paths to vscode.
+        # Default per path is "root".
+        self._workspace_path_owner: dict[str, dict[str, str]] = {}
+        # Snapshot of `_workspace_path_owner` captured at the instant the
+        # agent's `tmux new-session` is issued — i.e. the ownership state the
+        # vscode agent inherits once container init completes.  None until the
+        # agent session is started.
+        self._workspace_path_owner_at_agent_start: dict[str, dict[str, str]] = {}
+
         # Explicit health-status overrides per container (when a test wants
         # to assert a docker-inspect status directly rather than derive it).
         self._health_override: dict[str, str] = {}
@@ -497,6 +524,137 @@ class FakeDockerDriver:
         """
         return self._beads_owner.get(container_name, "root")
 
+    # --- lead-mf15: durable per-path ownership model -----------------------
+
+    # The agent-touched workspace paths whose ownership the durable invariant
+    # (scenario @scenario_hash:d9e4ce60e03df361) tracks.
+    AGENT_TOUCHED_PATHS = (
+        CONTAINER_WORKSPACE,
+        f"{CONTAINER_WORKSPACE}/.git",
+        f"{CONTAINER_WORKSPACE}/.beads",
+    )
+
+    @staticmethod
+    def _paths_written_under(command: list[str]) -> set[str]:
+        """Return the agent-touched workspace paths a command writes under.
+
+        A command that materially operates on the workspace (clone into it,
+        a `git -C /workspace ...` op, `bd bootstrap`, a `shop-templates
+        update --target /workspace`, etc.) is modelled as WRITING under the
+        relevant agent-touched paths.  A pure chown is NOT a content write
+        (it is handled separately as an ownership transfer).
+        """
+        if not command:
+            return set()
+        if command[0] == "chown":
+            return set()
+        written: set[str] = set()
+        # git clone <url> /workspace → writes the whole tree, incl. .git
+        if command[0] == "git" and "clone" in command:
+            written |= {
+                CONTAINER_WORKSPACE,
+                f"{CONTAINER_WORKSPACE}/.git",
+            }
+        # any `git -C /workspace ...` op touches /workspace and .git
+        if command[0] == "git" and "-C" in command:
+            written |= {
+                CONTAINER_WORKSPACE,
+                f"{CONTAINER_WORKSPACE}/.git",
+            }
+        # bd bootstrap / bd import / bd dolt pull provision .beads
+        if is_bd_bootstrap_command(command) or command[:2] == ["bd", "import"] \
+                or command[:3] == ["bd", "dolt", "pull"]:
+            written |= {
+                CONTAINER_WORKSPACE,
+                f"{CONTAINER_WORKSPACE}/.beads",
+            }
+        # shop-templates update --target /workspace overwrites .claude/ under
+        # the workspace.  lead-mf15 (observed 2026-06-18): a path created or
+        # re-rooted by this LAST provisioning op — or by a root-context op the
+        # container fires around it — re-introduces root ownership that the
+        # PRIOR chown (which ran BEFORE this step) does not cover.  The model
+        # captures the observed defect: this op leaves /workspace needing a
+        # FOLLOWING ownership re-assertion regardless of the user it nominally
+        # runs as.  Only a `chown -R vscode /workspace` issued AFTER this step
+        # restores the durable invariant.  (Modelled below as a re-root in
+        # `_update_workspace_path_ownership`, not a normal vscode-leaves-vscode
+        # write, so the durable fix is observable.)
+        return written
+
+    def _update_workspace_path_ownership(
+        self, container_name: str, command: list[str], user: str | None
+    ) -> None:
+        """Update the per-path ownership model for one exec (lead-mf15)."""
+        owners = self._workspace_path_owner.setdefault(
+            container_name,
+            {p: "root" for p in self.AGENT_TOUCHED_PATHS},
+        )
+
+        # A recursive `chown -R vscode:vscode /workspace` re-owns ALL
+        # agent-touched paths; a chown that names a specific path re-owns it.
+        if command and command[0] == "chown":
+            recursive = "-R" in command or "--recursive" in command
+            spec_and_paths = [
+                a for a in command[1:] if a not in ("-R", "--recursive")
+            ]
+            owner_spec = spec_and_paths[0] if spec_and_paths else ""
+            paths = spec_and_paths[1:]
+            target_user = owner_spec.split(":", 1)[0] if owner_spec else ""
+            if target_user != AGENT_CONTAINER_USER:
+                return
+            covers_workspace = any(
+                p.rstrip("/") == CONTAINER_WORKSPACE for p in paths
+            )
+            if recursive and covers_workspace:
+                for p in self.AGENT_TOUCHED_PATHS:
+                    owners[p] = AGENT_CONTAINER_USER
+            else:
+                for named in paths:
+                    for p in self.AGENT_TOUCHED_PATHS:
+                        if named.rstrip("/") == p:
+                            owners[p] = AGENT_CONTAINER_USER
+            return
+
+        # lead-mf15 — the shop-templates refresh is the LAST provisioning op
+        # and the observed mid-run re-root surface: a path it (or a
+        # root-context op the container fires around it) creates/re-roots is
+        # left ROOT-owned regardless of the user the refresh nominally runs
+        # as.  Only a `chown -R vscode /workspace` issued AFTER it restores
+        # vscode ownership.  Model that re-root explicitly so the durable fix
+        # is observable in the agent-start snapshot.
+        if command[:2] == ["shop-templates", "update"]:
+            owners[CONTAINER_WORKSPACE] = "root"
+            return
+
+        # A content write under a path leaves that path owned by the running
+        # user: root-context (user=None) re-roots it; vscode-context leaves it
+        # vscode-owned.
+        written = self._paths_written_under(command)
+        if not written:
+            return
+        running_owner = user or "root"
+        for p in written:
+            owners[p] = running_owner
+
+    def workspace_path_owners_at_agent_start(
+        self, container_name: str
+    ) -> dict[str, str]:
+        """Ownership of each agent-touched workspace path at the instant the
+        agent's tmux session is started (i.e. after container init).
+
+        Empty until `tmux new-session` has been issued for the container.
+        """
+        return dict(
+            self._workspace_path_owner_at_agent_start.get(container_name, {})
+        )
+
+    def root_owned_paths_at_agent_start(self, container_name: str) -> list[str]:
+        """The agent-touched workspace paths still root-owned after container
+        init — these are exactly the paths that would require a host-side
+        chown.  Empty means the durable invariant holds (lead-mf15)."""
+        owners = self.workspace_path_owners_at_agent_start(container_name)
+        return [p for p, o in owners.items() if o != AGENT_CONTAINER_USER]
+
     def set_health_override(self, container_name: str, status: str) -> None:
         self._health_override[container_name] = status
 
@@ -637,6 +795,12 @@ class FakeDockerDriver:
             prefix += ["-u", user]
         self._last_command = prefix + [container_name] + command
 
+        # lead-mf15 — update the durable per-path ownership model for every
+        # exec.  This runs BEFORE the command-specific simulations below so the
+        # tmux new-session snapshot reflects the writes this same launch
+        # sequence performed.
+        self._update_workspace_path_ownership(container_name, command, user)
+
         # Simulate tmux has-session
         if command[:3] == ["tmux", "has-session", "-t"]:
             session = command[3] if len(command) > 3 else ""
@@ -648,6 +812,14 @@ class FakeDockerDriver:
         if command[:3] == ["tmux", "new-session", "-d"]:
             session = command[command.index("-s") + 1] if "-s" in command else "default"
             self._tmux_sessions.setdefault(container_name, set()).add(session)
+            # lead-mf15 — container init is complete; the agent is about to
+            # engage.  Snapshot the ownership the vscode agent inherits so the
+            # durable invariant ("no agent-touched path remains root-owned
+            # after container init") can be asserted against this exact
+            # moment.
+            self._workspace_path_owner_at_agent_start[container_name] = dict(
+                self._workspace_path_owner.get(container_name, {})
+            )
             return subprocess.CompletedProcess(command, 0, "", "")
 
         # Simulate tmux capture-pane.  Surface the agent-working state-marker

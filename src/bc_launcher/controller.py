@@ -1054,6 +1054,40 @@ class BcContainerController:
                 f"{CONTAINER_WORKSPACE}/.claude/skills/\n"
             )
 
+            # FINAL ownership assertion (lead-mf15, scenario
+            # @scenario_hash:d9e4ce60e03df361).  TIGHTENS the lead-d64 /
+            # lead-ezzr chowns: those run BEFORE the last root-context
+            # provisioning op (the shop-templates refresh just above), so a
+            # path that op — or any root-context op the container fires around
+            # it — creates/re-roots is left root-owned with no later chown to
+            # correct it before the agent engages.  Observed twice 2026-06-18:
+            # `.beads` cloned root-owned at bring-up and `.git/objects/7e/`
+            # re-rooted mid-run, each requiring a host
+            # `docker exec -u root chown -R 1000:1000`.
+            #
+            # This chown is the LAST thing the launcher does under /workspace
+            # before starting the agent's tmux session, so the ownership
+            # snapshot the vscode agent inherits is UNCONDITIONALLY
+            # vscode-owned across EVERY agent-touched path (/workspace, .git,
+            # .beads) regardless of any intermediate re-root — no host-side
+            # chown is ever needed.  It runs as root (the default — no `-u`)
+            # because transferring ownership of any root-owned path requires
+            # root.  This is additive: the chown-whole-workspace-first recipe
+            # and the .beads-vscode-owned pin (2904f3a905567b48) continue to
+            # hold; this only adds a final assertion AFTER the last
+            # provisioning write.
+            self._driver.exec_run(
+                container,
+                ["chown", "-R",
+                 f"{AGENT_CONTAINER_USER}:{AGENT_CONTAINER_USER}",
+                 CONTAINER_WORKSPACE],
+            )
+            out_lines.append(
+                f"Final ownership assertion: re-chowned {CONTAINER_WORKSPACE} "
+                f"(including .git and .beads) to {AGENT_CONTAINER_USER} after "
+                f"the last provisioning op, before starting the agent\n"
+            )
+
         # Start tmux session as vscode.  Claude Code refuses
         # --dangerously-skip-permissions when EUID==0 ("cannot be used with
         # root/sudo privileges for security reasons"), so the agent must
