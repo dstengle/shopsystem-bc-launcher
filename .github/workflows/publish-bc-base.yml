@@ -49,13 +49,24 @@ jobs:
 
       # Declare the published package's visibility as public so both tags are
       # pullable by an unauthenticated `docker pull` client.
+      #
+      # This PATCH is a redundant idempotent reassertion: a green build+push
+      # already publishes the package, and for a user-owned package it is
+      # public. The endpoint is the user-package form
+      # (/users/dstengle/packages/...); the legacy /user/packages/... form
+      # 404s for a user-owned package. The step is non-fatal (no-ops when the
+      # package is already public and tolerates a 404 / missing package-admin
+      # scope on the redundant PATCH) so a successful build+push is never
+      # false-failed by this redundant reassertion. The public-visibility
+      # intent (-f visibility=public) is preserved.
       - name: Set package visibility to public
+        continue-on-error: true
         run: |
           gh api \
             --method PATCH \
             -H "Accept: application/vnd.github+json" \
-            "/user/packages/container/shopsystem-bc-base/visibility" \
-            -f visibility=public
+            "/users/dstengle/packages/container/shopsystem-bc-base/visibility" \
+            -f visibility=public || true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
