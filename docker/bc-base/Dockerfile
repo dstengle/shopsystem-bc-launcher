@@ -26,7 +26,7 @@ USER root
 RUN pip install --no-cache-dir \
     "shopsystem-messaging @ git+https://github.com/dstengle/shopsystem-messaging.git@v0.4.0" \
     "scenarios @ git+https://github.com/dstengle/shopsystem-scenarios@v0.2.0" \
-    "shop-templates @ git+https://github.com/dstengle/shopsystem-templates.git@v0.3.0" \
+    "shop-templates @ git+https://github.com/dstengle/shopsystem-templates.git@v0.14.0" \
     "shopsystem-bc-launcher @ git+https://github.com/dstengle/shopsystem-bc-launcher.git@v0.3.1"
 
 # agent-vault — the in-container broker client (bclaunch-9rr). The agent runs
