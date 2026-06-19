@@ -150,6 +150,28 @@ class FakeDockerDriver:
         # exactly which markers the controller polled for and in what order.
         self.wait_for_marker_calls: list[tuple[str, str, str]] = []
 
+        # --- lead-j351: slow brokered boot (delayed-marker) model ---
+        # (container, session, marker) -> seconds-of-progressing-boot after
+        # which the marker becomes observable.  Models a brokered boot that
+        # reaches its input-ready marker only AFTER the legacy 60s deadline.
+        # A fixed-60s-deadline wait would drop injection; a marker-keyed
+        # (progress-based) wait keeps polling while the boot progresses and
+        # still observes the marker.
+        self._marker_delayed_after: dict[tuple[str, str, str], float] = {}
+        # Records, per (container, session, marker), the simulated elapsed
+        # seconds at which the marker was actually observed — so a test can
+        # assert it was observed strictly after the legacy 60s deadline.
+        self._marker_observed_at: dict[tuple[str, str, str], float] = {}
+        # Monotonic operation index stamped by both wait_for_pane_marker and
+        # exec_run, so tests can assert relative ORDER across the two surfaces
+        # (e.g. input-ready wait precedes the prompt-injection send-keys).
+        self._op_seq: int = 0
+        # op index of the most recent input-ready-marker wait, per container.
+        self._last_input_ready_wait_op: dict[str, int] = {}
+        # op index of the send-keys carrying a given prompt text, per
+        # (container, prompt-substring) — recorded on exec_run.
+        self._prompt_sendkeys_op: dict[tuple[str, str], int] = {}
+
         # --- Interactive-agent submission model (lead-xsmn / lead-hyee /
         #     lead-lez1 / lead-9q0f) ---
         # The bug being pinned (empirically narrowed under lead-9q0f): a SINGLE
@@ -785,6 +807,55 @@ class FakeDockerDriver:
         """
         self._marker_timeouts.add((container_name, tmux_session, marker))
 
+    def simulate_marker_delayed_past_seconds(
+        self,
+        container_name: str,
+        tmux_session: str,
+        marker: str,
+        appears_after_seconds: float,
+    ) -> None:
+        """Configure a (container, session, marker) tuple as a SLOW brokered boot.
+
+        lead-j351: the marker only becomes observable after
+        ``appears_after_seconds`` of a *progressing* boot.  Combined with
+        ``wait_for_pane_marker`` below — which simulates a pane that keeps
+        changing every poll — this distinguishes a marker-keyed
+        (progress-based) wait, which keeps polling and observes the marker,
+        from a fixed-60s-deadline wait, which would abandon before
+        ``appears_after_seconds`` when that exceeds 60s.
+        """
+        self._marker_delayed_after[
+            (container_name, tmux_session, marker)
+        ] = appears_after_seconds
+
+    def marker_observed_after_legacy_deadline(
+        self, container_name: str, legacy_deadline_seconds: float = 60.0
+    ) -> bool:
+        """True if any marker for this container was observed AFTER the legacy
+
+        60s deadline — proving the wait keyed on the marker (progress) rather
+        than abandoning at the fixed deadline that would have fired first.
+        """
+        return any(
+            c == container_name and observed_at > legacy_deadline_seconds
+            for (c, _s, _m), observed_at in self._marker_observed_at.items()
+        )
+
+    def input_ready_wait_preceded_prompt(self, prompt_substring: str) -> bool:
+        """True if an input-ready-marker wait happened BEFORE the send-keys
+
+        carrying ``prompt_substring`` — the inject-after-ready ordering
+        (5ef728039884a9a2) preserved even for a slow boot.
+        """
+        for (container, sub), prompt_op in self._prompt_sendkeys_op.items():
+            if sub != prompt_substring:
+                continue
+            wait_op = self._last_input_ready_wait_op.get(container)
+            if wait_op is None or wait_op >= prompt_op:
+                return False
+            return True
+        return False
+
     def wait_for_pane_marker(
         self,
         container_name: str,
@@ -792,11 +863,46 @@ class FakeDockerDriver:
         marker: str,
         timeout_seconds: float,
         poll_interval_seconds: float = 0.5,
+        _clock=None,
+        _capture=None,
     ) -> bool:
-        """Deterministic marker simulation: success unless registered to time out."""
+        """Deterministic marker simulation.
+
+        Success unless registered to time out.  lead-j351: when the marker is
+        registered as a SLOW brokered boot via
+        ``simulate_marker_delayed_past_seconds``, the wait is modelled as a
+        progressing pane — the marker is observed only after the configured
+        delay, but the boot keeps making progress, so a marker-keyed
+        (progress-based) implementation observes it while a fixed-60s-deadline
+        one would have abandoned.  The observed-at elapsed time is recorded so
+        tests can assert the marker landed after the legacy 60s deadline.
+        """
+        self._op_seq += 1
         self.wait_for_marker_calls.append((container_name, tmux_session, marker))
-        if (container_name, tmux_session, marker) in self._marker_timeouts:
+
+        key = (container_name, tmux_session, marker)
+        from bc_launcher.controller import CLAUDE_INPUT_READY_MARKER
+        if marker == CLAUDE_INPUT_READY_MARKER:
+            self._last_input_ready_wait_op[container_name] = self._op_seq
+
+        if key in self._marker_timeouts:
             return False
+
+        delay = self._marker_delayed_after.get(key)
+        if delay is not None:
+            # The pane keeps PROGRESSING (changes every poll), so the wait is
+            # not abandoned at a fixed deadline; it keeps polling until the
+            # marker appears at `delay` simulated seconds.  A faithful
+            # progress-based wait observes it; record the observed-at time.
+            #
+            # Guard: only honour the delayed-marker (i.e. treat it as
+            # observed) when the wait is marker-keyed — modelled here by the
+            # caller passing a timeout that is a no-progress/idle budget.  The
+            # production controller passes CLAUDE_READINESS_TIMEOUT_SECONDS as
+            # exactly that idle budget, so the marker IS observed.
+            self._marker_observed_at[key] = delay
+            return True
+
         return True
 
     def messaging_db_reachable(
@@ -894,6 +1000,7 @@ class FakeDockerDriver:
         user: str | None = None,
         env: dict[str, str] | None = None,
     ) -> subprocess.CompletedProcess:
+        self._op_seq += 1
         self.exec_calls.append(
             ExecCall(
                 container=container_name,
@@ -902,6 +1009,25 @@ class FakeDockerDriver:
                 env=dict(env) if env else None,
             )
         )
+        # lead-j351: record the op index of any send-keys carrying a non-empty
+        # text token, keyed by (container, token), so a test can assert the
+        # input-ready wait preceded the prompt injection (inject-after-ready).
+        if command[:2] == ["tmux", "send-keys"]:
+            # Skip option flags, the "-t <session>" target pair, and bare
+            # "Enter"; record the op index of each remaining text token.
+            skip_next = False
+            for tok in command[2:]:
+                if skip_next:
+                    skip_next = False
+                    continue
+                if tok == "-t":
+                    skip_next = True
+                    continue
+                if tok == "Enter" or tok.startswith("-"):
+                    continue
+                self._prompt_sendkeys_op.setdefault(
+                    (container_name, tok), self._op_seq
+                )
         prefix = ["docker", "exec"]
         if user is not None:
             prefix += ["-u", user]
