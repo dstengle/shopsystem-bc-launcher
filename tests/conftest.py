@@ -6935,18 +6935,32 @@ def then_brokered_https_trusts_ca(ctx):
 
 
 # ---------------------------------------------------------------------------
-# Scenario c179b0c448ca851c (lead-pwa2): a shopsystem-templates release
-# dispatch starts a bc-base rebuild run carrying the released tag.
+# Scenario 365be56194c892b9 (lead-aw1b, supersedes the vacuous c179b0c448ca851c
+# from lead-pwa2): a shopsystem-templates release dispatch starts a bc-base
+# rebuild run -- pinning the event_type LITERAL end-to-end.
+#
+# The PRODUCER (dstengle/shopsystem-templates .github/workflows/release.yml)
+# POSTs a repository_dispatch with event_type "shopsystem-templates-released".
+# The CONSUMER (this repo's rebuild-bc-base.yml) only starts a run if it
+# SUBSCRIBES to that exact literal in on.repository_dispatch.types. The prior
+# pin abstracted the literal away (it only checked that *some*
+# repository_dispatch trigger existed), so a renamed/mismatched subscription
+# still passed even though a real release dispatch fired NOTHING (silent
+# no-op). This pin is NON-VACUOUS: it asserts the subscribed types CONTAIN the
+# exact producer literal, so the scenario FAILS if the subscription is renamed
+# or mismatched -- distinguishing emitted-literal == subscribed-literal (fires)
+# from a mismatch (silent no-op).
 #
 # Live GitHub Actions / repository_dispatch delivery is OUT-OF-BAND (the
-# scenario-40 declarative-artifact precedent): the proxy for "a rebuild run is
-# started in response to the dispatch" and "the run receives the released tag
-# from client_payload" is the committed rebuild workflow YAML.  We assert by
-# construction that (a) a committed workflow is triggered by repository_dispatch
-# and runs a bc-base image build, and (b) that workflow consumes the released
-# tag from github.event.client_payload (it is wired through to the build), not
-# ignored.
+# scenario-40 declarative-artifact precedent): the proxy is the committed
+# rebuild workflow YAML.
 # ---------------------------------------------------------------------------
+
+# The event_type literal the shopsystem-templates release workflow POSTs (the
+# producer's repository_dispatch event_type). The consumer must subscribe to
+# THIS exact string for a real release dispatch to start a rebuild run.
+_TEMPLATES_RELEASED_EVENT_TYPE = "shopsystem-templates-released"
+
 
 def _bc_base_rebuild_dispatch_workflow():
     """Return (path, doc) for the committed workflow triggered by a
@@ -6968,39 +6982,101 @@ def _bc_base_rebuild_dispatch_workflow():
     return None
 
 
-@given(parsers.parse('the shopsystem-templates repository publishes a release '
-                     'for the tag "{tag}"'))
-def given_templates_publishes_release(tag, ctx):
-    ctx["released_tag"] = tag
+def _repository_dispatch_subscribed_types(doc) -> list[str]:
+    """The list of repository_dispatch event_type literals a workflow doc
+    subscribes to (its on.repository_dispatch.types), normalized to a list of
+    strings. Empty list if the trigger declares no explicit types filter."""
+    on = doc.get("on", doc.get(True))
+    if not (isinstance(on, dict) and "repository_dispatch" in on):
+        return []
+    rd = on["repository_dispatch"]
+    if not isinstance(rd, dict):
+        return []
+    types = rd.get("types", [])
+    if isinstance(types, str):
+        return [types]
+    if isinstance(types, list):
+        return [str(t) for t in types]
+    return []
 
 
-@given(parsers.parse('that release emits a repository_dispatch to the '
-                     'shopsystem-bc-launcher repository carrying the released '
-                     'tag "{tag}" in its client_payload'))
-def given_release_emits_dispatch(tag, ctx):
+@given(parsers.parse('the shopsystem-templates release workflow emits a '
+                     'repository_dispatch whose event_type is the literal '
+                     '"{event_type}"'))
+def given_templates_emits_event_type(event_type, ctx):
+    # The producer-emitted event_type literal (shopsystem-templates-released).
+    ctx["emitted_event_type"] = event_type
+
+
+@given(parsers.parse('that repository_dispatch targets the '
+                     'shopsystem-bc-launcher repository and carries the '
+                     'released tag "{tag}" in its client_payload'))
+def given_dispatch_targets_bc_launcher(tag, ctx):
     ctx["dispatch_payload_tag"] = tag
 
 
-@when("that repository_dispatch is delivered to shopsystem-bc-launcher")
-def when_dispatch_delivered_to_bc_launcher(ctx):
+@given(parsers.parse('the shopsystem-bc-launcher rebuild-bc-base workflow '
+                     'subscribes to the repository_dispatch event_type literal '
+                     '"{event_type}"'))
+def given_rebuild_subscribes_event_type(event_type, ctx):
+    # Resolve the committed rebuild workflow and read the literals it actually
+    # subscribes to. NON-VACUITY: assert the subscribed types CONTAIN the exact
+    # producer literal -- this FAILS if the subscription is renamed/mismatched.
+    wf = _bc_base_rebuild_dispatch_workflow()
+    assert wf is not None, (
+        "No committed workflow under .github/workflows is triggered by a "
+        "repository_dispatch AND rebuilds the shopsystem-bc-base image."
+    )
+    ctx["rebuild_dispatch_workflow"] = wf
+    subscribed = _repository_dispatch_subscribed_types(wf[1])
+    ctx["subscribed_event_types"] = subscribed
+    ctx["subscribed_event_type"] = event_type
+    assert event_type in subscribed, (
+        "The rebuild-bc-base workflow does NOT subscribe to the producer's "
+        f"event_type literal {event_type!r}. Its "
+        f"on.repository_dispatch.types = {subscribed!r}. Because the producer "
+        f"POSTs event_type {event_type!r} and it is not among the subscribed "
+        "literals, a real shopsystem-templates release dispatch would fire "
+        "NOTHING (silent no-op).\n"
+        f"Workflow: {wf[0].relative_to(_REPO_ROOT)}"
+    )
+
+
+@when(parsers.parse('that repository_dispatch with event_type "{event_type}" '
+                    'is delivered to shopsystem-bc-launcher'))
+def when_dispatch_delivered_to_bc_launcher(event_type, ctx):
     # Live Actions delivery is OUT-OF-BAND; the proxy is the committed rebuild
     # workflow declaring the repository_dispatch trigger.
-    ctx["rebuild_dispatch_workflow"] = _bc_base_rebuild_dispatch_workflow()
+    ctx.setdefault("rebuild_dispatch_workflow",
+                   _bc_base_rebuild_dispatch_workflow())
+    ctx["delivered_event_type"] = event_type
 
 
-@then("a bc-base rebuild workflow run is started in the shopsystem-bc-launcher "
-      "repository in response to that dispatch")
+@then("because the emitted event_type literal equals the subscribed "
+      "event_type literal, a bc-base rebuild workflow run is started in "
+      "shopsystem-bc-launcher in response to that dispatch")
 def then_bc_base_rebuild_run_started(ctx):
     wf = ctx.get("rebuild_dispatch_workflow")
     assert wf is not None, (
         "No committed workflow under .github/workflows is triggered by a "
         "repository_dispatch AND rebuilds the shopsystem-bc-base image, so a "
-        "templates-release dispatch could not start a bc-base rebuild run."
+        "templates release dispatch could not start a bc-base rebuild run."
+    )
+    # The run is started ONLY because the emitted literal is among the
+    # subscribed literals. Re-assert the literal match here so this Then is
+    # non-vacuous on its own: a mismatch means the run is NOT started.
+    emitted = ctx.get("emitted_event_type", _TEMPLATES_RELEASED_EVENT_TYPE)
+    subscribed = _repository_dispatch_subscribed_types(wf[1])
+    assert emitted in subscribed, (
+        f"The emitted event_type literal {emitted!r} is NOT among the "
+        f"rebuild workflow's subscribed types {subscribed!r}, so the "
+        "emitted-literal != subscribed-literal and NO rebuild run starts "
+        "(silent no-op)."
     )
 
 
-@then(parsers.parse('that workflow run receives the released tag "{tag}" from '
-                    'the dispatch client_payload'))
+@then(parsers.parse('that rebuild workflow run receives the released tag '
+                    '"{tag}" from the dispatch client_payload'))
 def then_workflow_receives_released_tag(tag, ctx):
     wf = ctx.get("rebuild_dispatch_workflow")
     assert wf is not None, (

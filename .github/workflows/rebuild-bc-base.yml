@@ -5,21 +5,29 @@
 # framework utility versions) and re-pushes the "latest" tag at the freshly
 # built digest.
 #
-# Also pins scenarios c179b0c448ca851c + edd2c813688ab768 (lead-pwa2): a
-# shopsystem-templates RELEASE emits a repository_dispatch of type
-# "templates-release" carrying the released tag in client_payload.tag. This
-# run consumes that released tag from github.event.client_payload.tag and
-# threads it into the image build as the SHOP_TEMPLATES_VERSION build-arg, so
-# the republished "latest" carries the RELEASED shop-templates version rather
-# than the previously hard-pinned one. A plain "rebuild-bc-base" dispatch with
-# no client_payload.tag falls back to the Dockerfile's default pin.
+# Also pins scenarios 365be56194c892b9 + edd2c813688ab768 (lead-aw1b /
+# lead-pwa2): a shopsystem-templates RELEASE emits a repository_dispatch whose
+# event_type is the literal "shopsystem-templates-released" (the exact literal
+# POSTed by dstengle/shopsystem-templates .github/workflows/release.yml),
+# carrying the released tag in client_payload.tag. For a real release dispatch
+# to start a run, this workflow MUST subscribe to that same literal; a
+# mismatched subscription is a silent no-op. This run consumes that released
+# tag from github.event.client_payload.tag and threads it into the image build
+# as the SHOP_TEMPLATES_VERSION build-arg, so the republished "latest" carries
+# the RELEASED shop-templates version rather than the previously hard-pinned
+# one. A plain "rebuild-bc-base" dispatch with no client_payload.tag falls back
+# to the Dockerfile's default pin.
 name: rebuild-bc-base
 
 on:
   repository_dispatch:
     types:
+      # Manual / plain rebuild dispatch (no released tag in client_payload).
       - rebuild-bc-base
-      - templates-release
+      # The exact event_type literal POSTed by the shopsystem-templates release
+      # workflow (release.yml). Must equal the producer literal for a real
+      # templates-release dispatch to start a rebuild run.
+      - shopsystem-templates-released
 
 permissions:
   contents: read
