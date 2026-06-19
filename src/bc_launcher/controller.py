@@ -1433,15 +1433,11 @@ class BcContainerController:
         err_lines: list[str] = []
 
         # Resolve the messaging DSN for the readiness barrier: explicit arg >
-        # the container's recorded DSN (from its docker run -e) > the
-        # SHOPMSG_DSN process env.
-        recorded_dsn = ""
-        dsn_reader = getattr(self._driver, "container_dsn", None)
-        if callable(dsn_reader):
-            recorded_dsn = dsn_reader(container) or ""
-        else:
-            recorded_dsn = self._driver._container_dsn.get(container, "")  # type: ignore[attr-defined]
-        dsn = shopmsg_dsn or recorded_dsn or os.environ.get(SHOPMSG_DSN_ENV)
+        # SHOPMSG_DSN process env.  start-agent recovers a container that was
+        # launched with its DSN already baked into the container env, so the
+        # readiness barrier is best driven from the SAME source the operator
+        # used at launch (an explicit --shopmsg-dsn, or the SHOPMSG_DSN env).
+        dsn = shopmsg_dsn or os.environ.get(SHOPMSG_DSN_ENV)
 
         # Resolve the probe broker address the same way launch does: an
         # explicit broker wins, else derive from the resolved product slug

@@ -220,7 +220,6 @@ def test_start_agent_brings_up_agent_without_recloning(tmp_path):
     driver = FakeDockerDriver()
     # The container is already cloned, running, and healthy — but has no agent.
     driver.set_running(CONTAINER, True)
-    driver.set_container_dsn(CONTAINER, "postgresql://db/shopmsg")
     controller = BcContainerController(driver)
 
     result = controller.start_agent(
@@ -263,7 +262,6 @@ def test_start_agent_runs_agent_vault_wrapped_claude(tmp_path):
     """
     driver = FakeDockerDriver()
     driver.set_running(CONTAINER, True)
-    driver.set_container_dsn(CONTAINER, "postgresql://db/shopmsg")
     controller = BcContainerController(driver)
 
     controller.start_agent(
@@ -294,7 +292,6 @@ def test_start_agent_idempotent_on_rerun(tmp_path):
     """
     driver = FakeDockerDriver()
     driver.set_running(CONTAINER, True)
-    driver.set_container_dsn(CONTAINER, "postgresql://db/shopmsg")
     controller = BcContainerController(driver)
 
     first = controller.start_agent(
@@ -323,13 +320,13 @@ def test_start_agent_honors_messaging_readiness_barrier(tmp_path):
     driver = FakeDockerDriver()
     driver.set_running(CONTAINER, True)
     dsn = "postgresql://unreachable-db/shopmsg"
-    driver.set_container_dsn(CONTAINER, dsn)
     driver.set_dsn_reachable(dsn, False)
     controller = BcContainerController(driver)
 
     result = controller.start_agent(
         bc_name=BC_NAME,
         startup_prompt="K4K7_BARRIER_PROMPT",
+        shopmsg_dsn=dsn,
     )
 
     injected = [
