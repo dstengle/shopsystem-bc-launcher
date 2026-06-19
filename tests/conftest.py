@@ -6219,3 +6219,263 @@ def then_bootstrap_clis_on_path(ctx, a, b, c, d):
         "bootstrap entrypoint mutates PATH; the baked framework CLIs must "
         "resolve on PATH exactly as for a brokered steady-state run."
     )
+
+
+# ===========================================================================
+# lead-cs7k — readiness probes run inside the container network, and the probe
+# broker host derives from the product slug (decoupled from the runtime proxy)
+# ===========================================================================
+#
+# These TIGHTEN the already-pinned readiness barrier. The pass/withhold
+# semantics (both-reachable -> inject, either-unreachable -> withhold) are
+# UNCHANGED; what changes is WHERE each probe runs (inside the container's
+# network, not the launcher host) and which broker host the PROBE targets
+# (derived from the product slug, decoupled from the verbatim runtime proxy).
+
+# --- Scenario 27b73cbb: probes run inside the container network -------------
+
+@given(parsers.parse(
+    'a BC container "{container_name}" is launched on the docker network '
+    '"{network}" for a product whose slug is "{slug}"'
+))
+def cs7k_container_on_product_network(
+    container_name, network, slug, ctx, fake_driver, tmp_path
+):
+    """Stash the launch parameters for a second-product (dummyco) launch.
+
+    The actual launch is performed in the When step, after the network
+    reachability and host-unresolvable conditions are configured, so the
+    readiness probes observe the second-product network topology.
+    """
+    bc_name = container_name.removeprefix("bc-")
+    ctx["cs7k_bc_name"] = bc_name
+    ctx["cs7k_container_name"] = container_name
+    ctx["cs7k_network"] = network
+    ctx["cs7k_slug"] = slug
+    # The container is attached to the product network; probes that docker-exec
+    # into it resolve against this network.
+    fake_driver.set_container_network(container_name, network)
+    # A bc-manifest whose product: is the slug so the launch derives the
+    # network and the probe broker host from it.
+    import yaml as _yaml
+    manifest = tmp_path / "bc-manifest.yaml"
+    manifest.write_text(_yaml.dump({
+        "product": slug,
+        "bcs": [{
+            "name": bc_name,
+            "remote": f"https://github.com/{slug}/{bc_name}.git",
+            "role": "bc",
+        }],
+    }))
+    ctx["launch_manifest_path"] = manifest
+
+
+@given(parsers.parse(
+    'the launcher host process is NOT attached to the "{network}" docker network'
+))
+def cs7k_host_not_on_network(network, ctx, fake_driver):
+    """The launcher host cannot resolve the product-network service hostnames.
+
+    So a probe run FROM THE HOST against "<slug>-postgres" or the product
+    broker host false-fails — only a probe executed inside the container's
+    network reaches them.  Concrete host tokens are registered in the
+    reachability Given below.
+    """
+    ctx["cs7k_host_off_network"] = network
+
+
+@given(parsers.parse(
+    'the messaging database is reachable as "{db_target}" from inside the '
+    '"{network}" network and the agent-vault broker is reachable from inside '
+    'that network'
+))
+def cs7k_reachable_from_inside(db_target, network, ctx, fake_driver):
+    slug = ctx["cs7k_slug"]
+    # DSN host token (strip any :port for the host comparison).
+    db_host = db_target.split(":", 1)[0]
+    broker_host = f"{slug}-agent-vault"
+    # Reachable from INSIDE the product network (docker exec into the container).
+    fake_driver.set_network_target_reachable_from_inside(network, db_host)
+    fake_driver.set_network_target_reachable_from_inside(network, broker_host)
+    # NOT resolvable from the launcher HOST process — this is the second-product
+    # bug: a host-context probe false-fails both.
+    fake_driver.set_host_cannot_resolve(db_host)
+    fake_driver.set_host_cannot_resolve(broker_host)
+    # The DSN this launch uses points at the product DB by its in-network name.
+    ctx["cs7k_dsn"] = f"postgres://{db_target}/messaging"
+    ctx["cs7k_db_host"] = db_host
+    ctx["cs7k_broker_host"] = broker_host
+
+
+@when("bc-container launch runs its messaging-database and agent-vault "
+      "readiness probes")
+def cs7k_run_launch_probes(ctx, fake_driver, controller):
+    bc_name = ctx["cs7k_bc_name"]
+    result = controller.launch(
+        bc_name=bc_name,
+        repo_url=f"https://github.com/{ctx['cs7k_slug']}/{bc_name}.git",
+        shopmsg_dsn=ctx["cs7k_dsn"],
+        startup_prompt="please begin your session",
+        network=None,
+        manifest_path=ctx["launch_manifest_path"],
+    )
+    ctx["result"] = result
+    ctx["container_name"] = ctx["cs7k_container_name"]
+    ctx["bc_name"] = bc_name
+
+
+@then("each readiness probe is executed from inside the launched container's "
+      "network context rather than from the launcher host process")
+def cs7k_probes_inside_container(ctx, fake_driver):
+    container_name = ctx["cs7k_container_name"]
+    contexts = fake_driver.probe_exec_contexts()
+    kinds = {kind for kind, _ in contexts}
+    assert "messaging_db" in kinds and "agent_vault" in kinds, (
+        f"Expected both a messaging-db and an agent-vault readiness probe; "
+        f"recorded probe contexts: {contexts!r}"
+    )
+    # CRITICAL: every probe must have run via docker exec INTO the launched
+    # container (container context == this container), NOT from the launcher
+    # host process (container context None).
+    assert contexts, "No readiness probes were executed at all"
+    for kind, container in contexts:
+        assert container == container_name, (
+            f"Readiness probe {kind!r} ran from the launcher host process "
+            f"(container={container!r}); it must run inside the launched "
+            f"container {container_name!r}'s network context. "
+            f"All recorded probe contexts: {contexts!r}"
+        )
+
+
+@then(parsers.parse(
+    'both probes report reachable even though the launcher host cannot itself '
+    'resolve "{db_host}" or the broker host'
+))
+def cs7k_both_probes_reachable(db_host, ctx, fake_driver):
+    # The launch succeeded (rc 0) and committed the startup prompt — which only
+    # happens when BOTH probes passed.  Independently assert that a HOST-context
+    # probe against the same targets would have FAILED (proving the fix is the
+    # inside-network execution, not merely default reachability).
+    result = ctx["result"]
+    assert result.exit_code == 0, (
+        f"Expected launch to succeed with both inside-network probes passing, "
+        f"got rc={result.exit_code} stderr={result.stderr!r}"
+    )
+    assert not fake_driver.messaging_db_reachable(ctx["cs7k_dsn"]), (
+        "A launcher-HOST-context messaging probe should false-fail for the "
+        "second product (host cannot resolve the product DB host); the fix "
+        "must be that the probe runs inside the container network."
+    )
+    broker_addr = f"http://{ctx['cs7k_broker_host']}:14321"
+    assert not fake_driver.agent_vault_reachable(broker_addr), (
+        "A launcher-HOST-context agent-vault probe should false-fail for the "
+        "second product (host cannot resolve the product broker host)."
+    )
+
+
+# --- Scenario fa08c549: probe broker host from slug, decoupled from proxy ---
+
+@given(parsers.parse('a bc-manifest.yaml whose product field is "{product}"'))
+def cs7k_manifest_product(product, ctx, tmp_path):
+    import yaml as _yaml
+    manifest = tmp_path / "bc-manifest.yaml"
+    manifest.write_text(_yaml.dump({
+        "product": product,
+        "bcs": [{
+            "name": f"{product}-messaging",
+            "remote": f"https://github.com/{product}/{product}-messaging.git",
+            "role": "bc",
+        }],
+    }))
+    ctx["launch_manifest_path"] = manifest
+    ctx["cs7k_product"] = product
+
+
+@given("no agent-vault broker override is supplied on the launcher invocation")
+def cs7k_no_broker_override(ctx, monkeypatch):
+    monkeypatch.delenv("BCLAUNCHER_AGENT_VAULT_BROKER", raising=False)
+    ctx["cs7k_broker_override"] = None
+
+
+@when("bc-container launch resolves the agent-vault broker address used for "
+      "the readiness probe")
+def cs7k_resolve_probe_broker(ctx, controller, fake_driver):
+    from bc_launcher.controller import resolve_probe_broker_address
+    product = ctx["cs7k_product"]
+    # Resolve the PROBE broker address the controller would use for this
+    # product, with NO explicit broker override.
+    probe_broker = resolve_probe_broker_address(
+        explicit_broker=ctx.get("cs7k_broker_override"),
+        system_slug=product,
+    )
+    ctx["cs7k_probe_broker"] = probe_broker
+    # Independently derive the verbatim runtime HTTPS_PROXY for an operator who
+    # supplies the addr/token/vault triple, to prove the probe broker host does
+    # not clobber it.
+    from bc_launcher.controller import _build_runtime_proxy_url
+    ctx["cs7k_av_addr"] = "https://agent-vault:14321"
+    ctx["cs7k_av_token"] = "av_agt_dummyco_xyz"
+    ctx["cs7k_av_vault"] = "dummyco"
+    ctx["cs7k_runtime_proxy"] = _build_runtime_proxy_url(
+        ctx.get("cs7k_broker_override"),
+        ctx["cs7k_av_addr"],
+        ctx["cs7k_av_token"],
+        ctx["cs7k_av_vault"],
+    )
+
+
+@then(parsers.parse(
+    'the probe broker host is derived from the product slug "{slug}" rather '
+    'than the hardcoded "{hardcoded}"'
+))
+def cs7k_probe_broker_from_slug(slug, hardcoded, ctx):
+    from urllib.parse import urlparse
+    probe_broker = ctx["cs7k_probe_broker"]
+    parsed = urlparse(
+        probe_broker if "://" in probe_broker else "tcp://" + probe_broker
+    )
+    host = parsed.hostname or ""
+    assert host == f"{slug}-agent-vault", (
+        f"Expected the probe broker host derived from product slug {slug!r} "
+        f"(i.e. {slug}-agent-vault), got host {host!r} from probe broker "
+        f"{probe_broker!r}"
+    )
+    hardcoded_host = hardcoded.split(":", 1)[0]
+    assert host != hardcoded_host, (
+        f"Probe broker host must NOT be the hardcoded {hardcoded_host!r}; "
+        f"got {host!r}"
+    )
+
+
+@then("supplying a probe broker host does not clobber the token:vault "
+      "basic-auth runtime HTTPS_PROXY value derived for the launched agent")
+def cs7k_probe_decoupled_from_proxy(ctx):
+    from urllib.parse import urlparse, unquote
+    runtime_proxy = ctx["cs7k_runtime_proxy"]
+    assert runtime_proxy is not None, (
+        "Expected a derived runtime HTTPS_PROXY from the addr/token/vault "
+        "triple"
+    )
+    parsed = urlparse(runtime_proxy)
+    # The runtime proxy must remain the :14322 MITM listener with token:vault
+    # basic-auth — UNAFFECTED by the probe broker host derived above.
+    assert parsed.port == 14322, (
+        f"Probe-broker derivation clobbered the runtime HTTPS_PROXY port; "
+        f"expected the :14322 MITM listener, got {runtime_proxy!r}"
+    )
+    got = f"{unquote(parsed.username or '')}:{unquote(parsed.password or '')}"
+    assert got == f"{ctx['cs7k_av_token']}:{ctx['cs7k_av_vault']}", (
+        f"Probe-broker derivation clobbered the runtime HTTPS_PROXY "
+        f"token:vault basic-auth; got {got!r} from {runtime_proxy!r}"
+    )
+    # And the probe broker host is genuinely DISTINCT from the runtime proxy
+    # host (decoupling, not aliasing).
+    probe_host = urlparse(
+        ctx["cs7k_probe_broker"]
+        if "://" in ctx["cs7k_probe_broker"]
+        else "tcp://" + ctx["cs7k_probe_broker"]
+    ).hostname
+    assert probe_host != parsed.hostname, (
+        f"Probe broker host {probe_host!r} should be decoupled from the "
+        f"runtime-proxy host {parsed.hostname!r}"
+    )
