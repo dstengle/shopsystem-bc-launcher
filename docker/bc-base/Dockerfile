@@ -28,7 +28,7 @@ USER root
 # a republished "latest" carries the RELEASED shop-templates version instead of
 # the previously hard-pinned one. The default below pins the version for a
 # plain (non-dispatch) build; a release dispatch overrides it.
-ARG SHOP_TEMPLATES_VERSION=v0.14.0
+ARG SHOP_TEMPLATES_VERSION=v0.15.0
 
 # Framework utility CLIs, version-pinned in the
 # "<pkg> @ git+https://github.com/<owner>/<repo>.git@vMAJOR.MINOR.PATCH"
@@ -39,7 +39,7 @@ RUN pip install --no-cache-dir \
     "shopsystem-messaging @ git+https://github.com/dstengle/shopsystem-messaging.git@v0.4.0" \
     "scenarios @ git+https://github.com/dstengle/shopsystem-scenarios.git@v0.2.0" \
     "shop-templates @ git+https://github.com/dstengle/shopsystem-templates.git@${SHOP_TEMPLATES_VERSION}" \
-    "shopsystem-bc-launcher @ git+https://github.com/dstengle/shopsystem-bc-launcher.git@v0.3.1"
+    "shopsystem-bc-launcher @ git+https://github.com/dstengle/shopsystem-bc-launcher.git@v0.3.4"
 
 # agent-vault — the in-container broker client (bclaunch-9rr). The agent runs
 # wrapped as `agent-vault run -- claude`; agent-vault establishes the proxy
