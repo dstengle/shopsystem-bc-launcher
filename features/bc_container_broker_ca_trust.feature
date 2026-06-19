@@ -31,3 +31,23 @@ Feature: bc-container launch passes the broker CA as an env var, builds no CA bi
     And the container env has no NODE_EXTRA_CA_CERTS key set by the controller
     And the container env has no SSL_CERT_FILE key set by the controller
     And the container env has no GIT_SSL_CAINFO key set by the controller
+
+  # lead-b14a: the operator-supplied broker CA PEM is multi-line (~574 bytes,
+  # spanning several physical lines). A --env-file value carrying that PEM must
+  # survive parsing intact — NOT truncated at the first physical newline by the
+  # KEY=VALUE line splitter. The convention: a quoted value left open on its
+  # first physical line continues accumulating subsequent physical lines (with
+  # their real newlines preserved) until the closing quote. The parsed value is
+  # a real-newline string, which the bc-base entrypoint's `printf '%s\n'`
+  # materializer reproduces byte-for-byte — both ends agree on real newlines,
+  # no \n-escape convention is introduced. Single-line env-file values and the
+  # AGENT_VAULT_CA_PEM-travels-as-env-var contract (7c3e1a9f5d8b2640) are
+  # unchanged; this is additive.
+  @scenario_hash:eb92b4a40939973f @bc:shopsystem-bc-launcher
+  Scenario: bc-container --env-file preserves a multi-line AGENT_VAULT_CA_PEM value intact through to the container env
+    Given the shopsystem-bc-launcher BC is installed
+    And an env file supplies AGENT_VAULT_CA_PEM as a multi-line PEM block spanning several physical lines
+    When bc-container launch parses that env file and injects AGENT_VAULT_CA_PEM into the launched container env
+    Then the AGENT_VAULT_CA_PEM value injected into the container is the complete multi-line PEM, not truncated at the first newline
+    And the value materialized inside the container reproduces the original PEM byte-for-byte including its internal newlines
+    And a brokered HTTPS request from inside the container trusts the broker CA using the materialized PEM

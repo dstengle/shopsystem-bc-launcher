@@ -40,16 +40,48 @@ DEFAULT_STARTUP_PROMPT_TEMPLATE = (
 )
 
 
+def _is_closed_quote(value: str) -> bool:
+    """True if ``value`` is a single-physical-line quoted string whose opening
+    quote has a matching closing quote on the same line.
+
+    Used to distinguish a complete single-line quoted value (e.g. ``"abc"``)
+    from a quoted value left open for multi-line continuation (e.g. ``"-----``).
+    """
+    return (
+        len(value) >= 2
+        and value[0] in ("'", '"')
+        and value[-1] == value[0]
+    )
+
+
 def _parse_env_file(path: Path) -> dict[str, str]:
     """Parse a KEY=VALUE env file into a dict.
 
     Tolerates blank lines, '#' comments, an optional leading 'export ', and
     single/double-quoted values.  Surrounding whitespace around the key and the
     (unquoted) value is stripped.  Lines without '=' are skipped.
+
+    Multi-line quoted values (lead-b14a): a quoted value whose opening quote is
+    NOT closed on the same physical line continues accumulating subsequent
+    physical lines -- with their real newlines preserved -- until the matching
+    closing quote.  This lets a multi-line broker CA PEM travel through
+    AGENT_VAULT_CA_PEM intact (the old ``splitlines()`` parser truncated it at
+    the first physical newline).  The materialized value is the verbatim
+    multi-line string; the bc-base entrypoint's ``printf '%s\\n'`` reproduces
+    it byte-for-byte, so both ends agree on real newlines (no ``\\n``-escape
+    convention is introduced).  Single-line quoted/unquoted values are
+    unchanged.
     """
     result: dict[str, str] = {}
-    for raw in path.read_text().splitlines():
-        line = raw.strip()
+    # Keep raw physical lines (no whitespace stripping of the value body yet)
+    # so a multi-line quoted value preserves its internal newlines and per-line
+    # content exactly.
+    lines = path.read_text().splitlines()
+    i = 0
+    n = len(lines)
+    while i < n:
+        line = lines[i].strip()
+        i += 1
         if not line or line.startswith("#"):
             continue
         if line.startswith("export "):
@@ -59,8 +91,26 @@ def _parse_env_file(path: Path) -> dict[str, str]:
         key, _, value = line.partition("=")
         key = key.strip()
         value = value.strip()
-        if (len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"')):
+
+        # Detect an opening quote that is not closed on this physical line.
+        # When found, accumulate following physical lines (joined by the real
+        # newline that ``splitlines()`` removed) until the closing quote
+        # appears, then drop the surrounding quotes.
+        if value[:1] in ("'", '"') and not _is_closed_quote(value):
+            quote = value[0]
+            collected = value[1:]  # drop the opening quote
+            while i < n:
+                nxt = lines[i]
+                i += 1
+                if quote in nxt:
+                    closing = nxt.index(quote)
+                    collected += "\n" + nxt[:closing]
+                    break
+                collected += "\n" + nxt
+            value = collected
+        elif _is_closed_quote(value):
             value = value[1:-1]
+
         if key:
             result[key] = value
     return result
