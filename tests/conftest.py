@@ -4645,6 +4645,42 @@ def _find_bc_base_dockerfile() -> Path | None:
     return None
 
 
+# Since lead-pwa2 (scenario edd2c813688ab768) the bc-base Dockerfile installs
+# shop-templates at a version taken from the SHOP_TEMPLATES_VERSION build ARG so
+# a templates-release rebuild can install the released tag.  A genuine
+# version-by-shape pin is therefore EITHER:
+#   (a) the frozen literal  ...shopsystem-templates(.git)?@vMAJOR.MINOR.PATCH, OR
+#   (b) the parameterized   ...shopsystem-templates(.git)?@${SHOP_TEMPLATES_VERSION}
+#       WITH an `ARG SHOP_TEMPLATES_VERSION=vMAJOR.MINOR.PATCH` default carrying
+#       the version shape.
+# Both preserve the dstengle/shopsystem-templates owner/repo binding and the
+# vMAJOR.MINOR.PATCH version shape; both reject an editable clone.  An
+# unparameterized @${VAR} with no vX.Y.Z-shaped default does NOT count.
+_SHOP_TEMPLATES_LITERAL_PIN_RE = re.compile(
+    r"shop-templates @ git\+https://github\.com/dstengle/"
+    r"shopsystem-templates(?:\.git)?@v\d+\.\d+\.\d+"
+)
+_SHOP_TEMPLATES_ARG_PIN_RE = re.compile(
+    r"shop-templates @ git\+https://github\.com/dstengle/"
+    r"shopsystem-templates(?:\.git)?@\$\{?SHOP_TEMPLATES_VERSION\}?"
+)
+_SHOP_TEMPLATES_ARG_DEFAULT_SHAPE_RE = re.compile(
+    r"ARG\s+SHOP_TEMPLATES_VERSION=v\d+\.\d+\.\d+"
+)
+
+
+def _shop_templates_pinned_by_version_shape(dockerfile_text: str) -> bool:
+    """True when shop-templates is pinned by vMAJOR.MINOR.PATCH shape, whether
+    as a frozen literal or via the SHOP_TEMPLATES_VERSION build ARG defaulted to
+    a vX.Y.Z value (lead-pwa2 parameterization)."""
+    if _SHOP_TEMPLATES_LITERAL_PIN_RE.search(dockerfile_text):
+        return True
+    return bool(
+        _SHOP_TEMPLATES_ARG_PIN_RE.search(dockerfile_text)
+        and _SHOP_TEMPLATES_ARG_DEFAULT_SHAPE_RE.search(dockerfile_text)
+    )
+
+
 def _workflows_dir() -> Path:
     return _REPO_ROOT / ".github" / "workflows"
 
@@ -4750,15 +4786,16 @@ def then_dockerfile_pins_shop_templates(ctx):
     # The shop-templates package must be installed from a
     # github.com/dstengle/shopsystem-templates @ vMAJOR.MINOR.PATCH VCS pin in
     # the pip VCS-requirement spelling (package name shop-templates, repo
-    # shopsystem-templates).
-    pin_re = re.compile(
-        r"shop-templates @ git\+https://github\.com/dstengle/"
-        r"shopsystem-templates(?:\.git)?@v\d+\.\d+\.\d+"
-    )
-    assert pin_re.search(text), (
+    # shopsystem-templates).  Since lead-pwa2 (scenario edd2c813688ab768) the
+    # version is PARAMETERIZED through the SHOP_TEMPLATES_VERSION build ARG so a
+    # templates-release rebuild can install the released tag; the ARG carries a
+    # vMAJOR.MINOR.PATCH default, preserving the version-by-shape pin.  Accept
+    # either the frozen literal OR the parameterized-with-vX.Y.Z-default form.
+    assert _shop_templates_pinned_by_version_shape(text), (
         "bc-base Dockerfile does not install shop-templates from a "
         "github.com/dstengle/shopsystem-templates @ vMAJOR.MINOR.PATCH version "
-        f"pin.\nDockerfile content:\n{text}"
+        "pin (literal, or SHOP_TEMPLATES_VERSION build ARG defaulted to "
+        f"vMAJOR.MINOR.PATCH).\nDockerfile content:\n{text}"
     )
 
 
@@ -4776,11 +4813,17 @@ def then_shop_templates_alongside_other_clis(ctx):
         r"([A-Za-z0-9._-]+?)(?:\.git)?@v\d+\.\d+\.\d+"
     )
     packages = {m.group(1) for m in pin_re.finditer(text)}
-    # shop-templates is one of the VCS-pinned utilities ...
-    assert "shop-templates" in packages, (
+    # shop-templates is one of the VCS-pinned utilities -- pinned to its
+    # dstengle/shopsystem-templates repo by vMAJOR.MINOR.PATCH shape.  Since
+    # lead-pwa2 (scenario edd2c813688ab768) its version is PARAMETERIZED through
+    # the SHOP_TEMPLATES_VERSION build ARG (default vX.Y.Z), so it appears in the
+    # @${SHOP_TEMPLATES_VERSION} form rather than as a frozen @vX.Y.Z literal;
+    # the helper recognizes both.
+    assert _shop_templates_pinned_by_version_shape(text), (
         "shop-templates is not installed in the "
         "<pkg> @ git+https://github.com/dstengle/<repo> @ vMAJOR.MINOR.PATCH "
-        f"VCS-pin shape; pinned packages found: {packages}"
+        "VCS-pin shape (literal or SHOP_TEMPLATES_VERSION ARG defaulted to "
+        f"vX.Y.Z); pinned packages found: {packages}"
     )
     # ... and it sits ALONGSIDE at least one OTHER framework utility pinned in
     # the exact same shape (e.g. shop-msg / beads), confirming it joins the
@@ -4839,6 +4882,18 @@ def then_dockerfile_pins_four_dstengle_clis(ctx):
     text = dockerfile.read_text()
     missing = []
     for pkg, (owner, repo) in _BC_BASE_FRAMEWORK_CLI_PINS.items():
+        # shop-templates is PARAMETERIZED since lead-pwa2 (scenario
+        # edd2c813688ab768): its version comes from the SHOP_TEMPLATES_VERSION
+        # build ARG so a templates-release rebuild installs the released tag.
+        # The owner/repo binding and vX.Y.Z version shape are still asserted
+        # (the ARG default carries the shape) -- a wrong owner/repo still FAILS.
+        if pkg == "shop-templates":
+            if not _shop_templates_pinned_by_version_shape(text):
+                missing.append(
+                    f"{pkg} -> github.com/{owner}/{repo} @ vMAJOR.MINOR.PATCH "
+                    "(literal or SHOP_TEMPLATES_VERSION ARG defaulted to vX.Y.Z)"
+                )
+            continue
         # Bind the package name to its CORRECT owner/repo. A wrong owner
         # (e.g. dstengle/beads) or wrong repo (e.g. dstengle/shop-msg) will
         # not match its package's required (owner, repo) pair -> FAIL.
@@ -6356,11 +6411,13 @@ def then_bootstrap_clis_on_path(ctx, a, b, c, d):
         "bc-base Dockerfile does not install shopsystem-messaging (provides the "
         "shop-msg CLI) from a dstengle VCS version pin."
     )
-    assert re.search(
-        r"shop-templates @ git\+https://github\.com/dstengle/"
-        r"shopsystem-templates(?:\.git)?@v\d+\.\d+\.\d+", dtext), (
+    # shop-templates is installed from its dstengle VCS pin; since lead-pwa2
+    # (scenario edd2c813688ab768) its version is parameterized through the
+    # SHOP_TEMPLATES_VERSION build ARG (default vX.Y.Z) rather than a frozen
+    # literal -- either way the shop-templates CLI resolves on PATH.
+    assert _shop_templates_pinned_by_version_shape(dtext), (
         "bc-base Dockerfile does not install shop-templates from a dstengle VCS "
-        "version pin."
+        "version pin (literal or SHOP_TEMPLATES_VERSION ARG defaulted to vX.Y.Z)."
     )
     assert re.search(
         r"shopsystem-bc-launcher @ git\+https://github\.com/dstengle/"
@@ -6874,4 +6931,212 @@ def then_brokered_https_trusts_ca(ctx):
     assert materialized == original, (
         "materialized trust anchor does not equal the operator-supplied broker "
         "CA; a brokered HTTPS request would fail cert verification"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Scenario c179b0c448ca851c (lead-pwa2): a shopsystem-templates release
+# dispatch starts a bc-base rebuild run carrying the released tag.
+#
+# Live GitHub Actions / repository_dispatch delivery is OUT-OF-BAND (the
+# scenario-40 declarative-artifact precedent): the proxy for "a rebuild run is
+# started in response to the dispatch" and "the run receives the released tag
+# from client_payload" is the committed rebuild workflow YAML.  We assert by
+# construction that (a) a committed workflow is triggered by repository_dispatch
+# and runs a bc-base image build, and (b) that workflow consumes the released
+# tag from github.event.client_payload (it is wired through to the build), not
+# ignored.
+# ---------------------------------------------------------------------------
+
+def _bc_base_rebuild_dispatch_workflow():
+    """Return (path, doc) for the committed workflow triggered by a
+    repository_dispatch that rebuilds the bc-base image, or None."""
+    for path, doc in _load_workflows().items():
+        if not isinstance(doc, dict):
+            continue
+        on = doc.get("on", doc.get(True))
+        if not (isinstance(on, dict) and "repository_dispatch" in on):
+            continue
+        text = path.read_text()
+        # The workflow must actually rebuild the bc-base image (a build step),
+        # otherwise a bare repository_dispatch trigger would falsely satisfy
+        # "a bc-base rebuild run is started".
+        if "shopsystem-bc-base" in text and (
+            "build-push-action" in text or "docker build" in text
+        ):
+            return (path, doc)
+    return None
+
+
+@given(parsers.parse('the shopsystem-templates repository publishes a release '
+                     'for the tag "{tag}"'))
+def given_templates_publishes_release(tag, ctx):
+    ctx["released_tag"] = tag
+
+
+@given(parsers.parse('that release emits a repository_dispatch to the '
+                     'shopsystem-bc-launcher repository carrying the released '
+                     'tag "{tag}" in its client_payload'))
+def given_release_emits_dispatch(tag, ctx):
+    ctx["dispatch_payload_tag"] = tag
+
+
+@when("that repository_dispatch is delivered to shopsystem-bc-launcher")
+def when_dispatch_delivered_to_bc_launcher(ctx):
+    # Live Actions delivery is OUT-OF-BAND; the proxy is the committed rebuild
+    # workflow declaring the repository_dispatch trigger.
+    ctx["rebuild_dispatch_workflow"] = _bc_base_rebuild_dispatch_workflow()
+
+
+@then("a bc-base rebuild workflow run is started in the shopsystem-bc-launcher "
+      "repository in response to that dispatch")
+def then_bc_base_rebuild_run_started(ctx):
+    wf = ctx.get("rebuild_dispatch_workflow")
+    assert wf is not None, (
+        "No committed workflow under .github/workflows is triggered by a "
+        "repository_dispatch AND rebuilds the shopsystem-bc-base image, so a "
+        "templates-release dispatch could not start a bc-base rebuild run."
+    )
+
+
+@then(parsers.parse('that workflow run receives the released tag "{tag}" from '
+                    'the dispatch client_payload'))
+def then_workflow_receives_released_tag(tag, ctx):
+    wf = ctx.get("rebuild_dispatch_workflow")
+    assert wf is not None, (
+        "No repository_dispatch-triggered bc-base rebuild workflow was found."
+    )
+    text = wf[0].read_text()
+    # The released tag must be consumed FROM the dispatch client_payload and
+    # threaded into the run -- a workflow that ignores client_payload and
+    # rebuilds at a frozen tag would NOT "receive the released tag".  Genuine
+    # consumption is a github.event.client_payload.<field> expression.
+    payload_re = re.compile(
+        r"\$\{\{\s*github\.event\.client_payload\.[A-Za-z0-9_]+\s*\}\}"
+    )
+    assert payload_re.search(text), (
+        "The repository_dispatch rebuild workflow does not read the released "
+        "tag from github.event.client_payload; it ignores the dispatch payload "
+        "and so does not receive the released tag.\n"
+        f"Workflow: {wf[0].relative_to(_REPO_ROOT)}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Scenario edd2c813688ab768 (lead-pwa2): after a templates release propagates,
+# the rebuilt bc-base:latest carries the RELEASED shop-templates version, no
+# longer the previously hard-pinned one.
+#
+# Live registry pull is OUT-OF-BAND; the proxy is the committed
+# Dockerfile + rebuild workflow.  For the rebuild to republish "latest"
+# carrying vT_new, the shop-templates version installed into the image must be
+# PARAMETERIZED from the dispatch payload (a Docker build-arg fed from
+# client_payload) rather than frozen at a hard-coded vMAJOR.MINOR.PATCH literal
+# in the Dockerfile.  We assert that parameterization by construction:
+#   (a) the rebuild workflow passes a build-arg sourced from
+#       github.event.client_payload, and
+#   (b) the Dockerfile installs shop-templates at a version taken from a build
+#       ARG (not a frozen literal), so the installed version is no longer the
+#       hard-pinned vT_old.
+# ---------------------------------------------------------------------------
+
+# The Dockerfile build ARG that carries the shop-templates version through the
+# rebuild.  Asserted (not just any ARG) so the parameterization is the
+# shop-templates one specifically.
+_SHOP_TEMPLATES_VERSION_ARG_RE = re.compile(
+    r"ARG\s+(SHOP_TEMPLATES_VERSION|SHOP_TEMPLATES_REF|TEMPLATES_VERSION)\b"
+)
+
+
+@given(parsers.parse('the published "bc-base:latest" image carries an '
+                     'installed shop-templates at version "{tag}"'))
+def given_latest_carries_shop_templates_version(tag, ctx):
+    ctx["shop_templates_old_version"] = tag
+
+
+@given(parsers.parse('the shopsystem-templates repository publishes a newer '
+                     'release for the tag "{tag}" distinct from "{old}"'))
+def given_templates_publishes_newer_release(tag, old, ctx):
+    assert tag != old, "scenario precondition: vT_new must differ from vT_old"
+    ctx["shop_templates_new_version"] = tag
+
+
+@when('the bc-base rebuild triggered by that release completes and '
+      'republishes the "latest" tag')
+def when_rebuild_completes_republishes_latest(ctx):
+    ctx["rebuild_dispatch_workflow"] = _bc_base_rebuild_dispatch_workflow()
+    ctx["bc_base_dockerfile"] = _find_bc_base_dockerfile()
+
+
+@then(parsers.parse('pulling "{image_ref}" yields an image whose installed '
+                    'shop-templates reports version "{tag}"'))
+def then_pulled_image_reports_shop_templates_version(image_ref, tag, ctx):
+    # For the pulled "latest" to report the RELEASED version, the rebuild must
+    # feed the released tag into the shop-templates install as a build-arg.
+    wf = ctx.get("rebuild_dispatch_workflow")
+    assert wf is not None, (
+        "No repository_dispatch-triggered bc-base rebuild workflow was found, "
+        "so a templates release cannot republish a latest carrying the new "
+        "shop-templates version."
+    )
+    wf_text = wf[0].read_text()
+    # The build step must pass a build-arg carrying the shop-templates version,
+    # sourced from the dispatch client_payload (the released tag).
+    assert "build-args" in wf_text or "--build-arg" in wf_text, (
+        "The rebuild workflow does not pass any docker build-arg, so it cannot "
+        "thread the released shop-templates version into the image build.\n"
+        f"Workflow: {wf[0].relative_to(_REPO_ROOT)}"
+    )
+    payload_re = re.compile(
+        r"\$\{\{\s*github\.event\.client_payload\.[A-Za-z0-9_]+\s*\}\}"
+    )
+    assert payload_re.search(wf_text), (
+        "The rebuild workflow's build-arg is not sourced from "
+        "github.event.client_payload, so the pulled image would not carry the "
+        f"released version {tag!r}."
+    )
+    dockerfile = ctx.get("bc_base_dockerfile")
+    assert dockerfile is not None, "bc-base Dockerfile not found."
+    df_text = dockerfile.read_text()
+    arg_match = _SHOP_TEMPLATES_VERSION_ARG_RE.search(df_text)
+    assert arg_match, (
+        "The bc-base Dockerfile declares no ARG for the shop-templates "
+        "version, so the rebuild's build-arg has nothing to bind and the "
+        "installed version cannot be the released one."
+    )
+    arg_name = arg_match.group(1)
+    # The shop-templates install must reference that ARG (so the installed
+    # version is the build-arg value), e.g. "...@${SHOP_TEMPLATES_VERSION}".
+    install_uses_arg = re.search(
+        r"shop-templates @ git\+https://github\.com/dstengle/"
+        r"shopsystem-templates(?:\.git)?@\$\{?" + re.escape(arg_name) + r"\}?",
+        df_text,
+    )
+    assert install_uses_arg, (
+        "The bc-base Dockerfile's shop-templates install does not interpolate "
+        f"the ${{{arg_name}}} build ARG, so the installed shop-templates "
+        f"version is not driven by the released tag {tag!r}."
+    )
+
+
+@then(parsers.parse('the installed shop-templates version is no longer the '
+                    'previously hard-pinned "{old}"'))
+def then_shop_templates_no_longer_hard_pinned(old, ctx):
+    dockerfile = ctx.get("bc_base_dockerfile")
+    assert dockerfile is not None, "bc-base Dockerfile not found."
+    df_text = dockerfile.read_text()
+    # The shop-templates install line must NOT freeze the version at a
+    # hard-coded vMAJOR.MINOR.PATCH literal; it must take the version from the
+    # build ARG.  A frozen literal (the old behavior) would pin vT_old forever
+    # regardless of the dispatched release.
+    frozen_literal = re.search(
+        r"shop-templates @ git\+https://github\.com/dstengle/"
+        r"shopsystem-templates(?:\.git)?@v\d+\.\d+\.\d+",
+        df_text,
+    )
+    assert frozen_literal is None, (
+        "The bc-base Dockerfile still installs shop-templates at a frozen "
+        "vMAJOR.MINOR.PATCH literal "
+        f"({frozen_literal.group(0) if frozen_literal else ''!r}); a rebuild "
+        "would re-pin that hard-coded version rather than the released one."
     )

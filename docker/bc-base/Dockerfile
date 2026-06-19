@@ -20,13 +20,25 @@ FROM mcr.microsoft.com/devcontainers/python:3.11
 
 USER root
 
+# The shop-templates VCS version is PARAMETERIZED through a build ARG rather
+# than frozen at a hard-coded vMAJOR.MINOR.PATCH literal (lead-pwa2,
+# scenario edd2c813688ab768). The rebuild-bc-base workflow, triggered by a
+# shopsystem-templates release repository_dispatch, passes the released tag in
+# as --build-arg SHOP_TEMPLATES_VERSION=<released tag from client_payload>, so
+# a republished "latest" carries the RELEASED shop-templates version instead of
+# the previously hard-pinned one. The default below pins the version for a
+# plain (non-dispatch) build; a release dispatch overrides it.
+ARG SHOP_TEMPLATES_VERSION=v0.14.0
+
 # Framework utility CLIs, version-pinned in the
 # "<pkg> @ git+https://github.com/<owner>/<repo>.git@vMAJOR.MINOR.PATCH"
 # VCS-pin shape. The owner is dstengle for these four shopsystem packages.
+# shop-templates takes its version from the SHOP_TEMPLATES_VERSION build ARG
+# (default v0.14.0) so a templates-release rebuild can install the released tag.
 RUN pip install --no-cache-dir \
     "shopsystem-messaging @ git+https://github.com/dstengle/shopsystem-messaging.git@v0.4.0" \
     "scenarios @ git+https://github.com/dstengle/shopsystem-scenarios.git@v0.2.0" \
-    "shop-templates @ git+https://github.com/dstengle/shopsystem-templates.git@v0.14.0" \
+    "shop-templates @ git+https://github.com/dstengle/shopsystem-templates.git@${SHOP_TEMPLATES_VERSION}" \
     "shopsystem-bc-launcher @ git+https://github.com/dstengle/shopsystem-bc-launcher.git@v0.3.1"
 
 # agent-vault — the in-container broker client (bclaunch-9rr). The agent runs
