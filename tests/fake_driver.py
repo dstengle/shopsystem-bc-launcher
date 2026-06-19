@@ -306,6 +306,19 @@ class FakeDockerDriver:
         # that pin the unreachable path register the offending broker address
         # here via set_agent_vault_reachable(addr, False).
         self._unreachable_brokers: set[str] = set()
+        # --- lead-cs7k probe-execution-context model ---
+        # Targets reachable from INSIDE a given docker network (docker exec),
+        # keyed by network name -> set of host tokens.
+        self._network_reachable_targets: dict[str, set[str]] = {}
+        # Targets the launcher HOST process cannot resolve (host-context probe
+        # fails for these; an inside-network probe still reaches them).
+        self._host_unresolvable_targets: set[str] = set()
+        # The docker network each container is attached to.
+        self._container_network: dict[str, str] = {}
+        # Ordered record of (probe_kind, container) for each probe invocation,
+        # so tests can assert each probe ran inside the container's network
+        # context rather than from the launcher host process.
+        self._probe_exec_contexts: list[tuple[str, str | None]] = []
         # The agent-vault broker address configured for each container, so
         # health can fold broker reachability into its status.
         self._container_broker: dict[str, str] = {}
@@ -420,6 +433,60 @@ class FakeDockerDriver:
             self._unreachable_brokers.discard(broker_address)
         else:
             self._unreachable_brokers.add(broker_address)
+
+    # --- lead-cs7k: probe-execution-context model -------------------------
+    # The readiness probes must run from INSIDE the launched container's
+    # network context, NOT from the launcher host process.  For a second
+    # product the launcher host is not attached to the product's docker
+    # network, so a host-process socket connect to "dummyco-postgres" or the
+    # product broker host false-fails — while a `docker exec` into the
+    # container (which IS on the product network) reaches both fine.
+    #
+    # Model: reachability is keyed by EXECUTION CONTEXT.  A probe invoked
+    # WITHOUT a container runs from the launcher host (the legacy
+    # host-reachability sets above).  A probe invoked WITH a container runs
+    # inside that container's network; reachability is resolved against the
+    # per-network reachable-target set registered here.  A target absent from
+    # the network set but absent from the host-unreachable set is still
+    # reachable-by-default (so existing scenarios are unaffected); the
+    # second-product bug is modelled by registering a target as reachable
+    # ONLY from inside the network while the launcher host cannot resolve it.
+    def set_network_target_reachable_from_inside(
+        self, network: str, target: str
+    ) -> None:
+        """Mark ``target`` reachable from INSIDE ``network`` (docker exec),
+        even when the launcher host cannot resolve it."""
+        self._network_reachable_targets.setdefault(network, set()).add(target)
+
+    def set_host_cannot_resolve(self, target: str) -> None:
+        """Mark ``target`` unresolvable from the launcher HOST process.
+
+        A probe that runs from the host against this target fails; only a
+        probe executed from inside the container's network reaches it.
+        """
+        self._host_unresolvable_targets.add(target)
+
+    def set_container_network(self, container_name: str, network: str) -> None:
+        """Record the docker network the container is attached to."""
+        self._container_network[container_name] = network
+
+    def probe_exec_contexts(self) -> list[tuple[str, str | None]]:
+        """Return the recorded (probe_kind, container) execution contexts.
+
+        ``container`` is None when the probe ran from the launcher host
+        process and the container name when it ran via docker exec inside the
+        container's network.
+        """
+        return list(self._probe_exec_contexts)
+
+    @staticmethod
+    def _target_host(addr: str) -> str:
+        """Extract the bare host[:port] target token from a DSN/broker addr."""
+        from urllib.parse import urlparse
+        s = addr.strip()
+        parsed = urlparse(s if "://" in s else "tcp://" + s)
+        host = parsed.hostname or ""
+        return host
 
     def set_container_broker(self, container_name: str, broker_address: str) -> None:
         """Record the agent-vault broker configured for a container."""
@@ -732,13 +799,58 @@ class FakeDockerDriver:
             return False
         return True
 
-    def messaging_db_reachable(self, dsn: str) -> bool:
-        """Reachable-by-default unless the DSN was marked unreachable."""
-        return bool(dsn) and dsn not in self._unreachable_dsns
+    def messaging_db_reachable(
+        self, dsn: str, container: str | None = None
+    ) -> bool:
+        """Reachable-by-default unless the DSN was marked unreachable.
 
-    def agent_vault_reachable(self, broker_address: str) -> bool:
-        """Reachable-by-default unless the broker was marked unreachable."""
-        return bool(broker_address) and broker_address not in self._unreachable_brokers
+        lead-cs7k: when ``container`` is supplied the probe runs from INSIDE
+        that container's network (docker exec) rather than from the launcher
+        host process; reachability is then resolved against the container's
+        network so a target the launcher host cannot resolve still reads
+        reachable when it is reachable from inside the product network.
+        """
+        self._probe_exec_contexts.append(("messaging_db", container))
+        return self._probe_reachable(
+            dsn, container, self._unreachable_dsns
+        )
+
+    def agent_vault_reachable(
+        self, broker_address: str, container: str | None = None
+    ) -> bool:
+        """Reachable-by-default unless the broker was marked unreachable.
+
+        lead-cs7k: ``container`` selects the inside-network probe context, as
+        for ``messaging_db_reachable``.
+        """
+        self._probe_exec_contexts.append(("agent_vault", container))
+        return self._probe_reachable(
+            broker_address, container, self._unreachable_brokers
+        )
+
+    def _probe_reachable(
+        self, addr: str, container: str | None, host_unreachable: set[str]
+    ) -> bool:
+        if not addr:
+            return False
+        host = self._target_host(addr)
+        if container is not None:
+            # Inside-network probe (docker exec): resolve against the
+            # container's network reachable-target set.  A target registered
+            # reachable-from-inside the container's network reaches even when
+            # the launcher host cannot resolve it.
+            network = self._container_network.get(container)
+            reachable_inside = self._network_reachable_targets.get(network, set())
+            if host in reachable_inside:
+                return True
+            # Otherwise fall back to the default-reachable model: only an
+            # explicitly host-unreachable addr fails.
+            return addr not in host_unreachable
+        # Host-context probe (legacy): a target the launcher host cannot
+        # resolve false-fails here, modelling the second-product bug.
+        if host in self._host_unresolvable_targets:
+            return False
+        return addr not in host_unreachable
 
     def health_status(self, container_name: str) -> str:
         """Compose the container's health status.
