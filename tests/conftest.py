@@ -5080,6 +5080,48 @@ def then_launch_result_failure_names_update(ctx):
     )
 
 
+@then("the launch warns about the shop-templates update failure and still "
+      "starts the agent")
+def then_launch_warns_and_starts_agent(ctx, fake_driver):
+    """lead-k4k7 — a failed skill-refresh is downgraded from a fatal
+
+    early-return to a WARNING that still PROCEEDS to agent-start.  The launch
+    must NOT abort before the agent tmux session is started, must emit a
+    warning naming the shop-templates failure, and must end with the agent's
+    tmux session started and the startup prompt injected.
+    """
+    result = ctx["result"]
+    container_name = ctx["container_name"]
+    combined = (result.stdout or "") + (result.stderr or "")
+
+    # A warning naming the shop-templates skill-refresh failure.
+    assert "warning" in combined.lower() and "shop-templates" in combined, (
+        "A failed skill-refresh must log a warning naming the shop-templates "
+        f"failure; output={combined!r}"
+    )
+    # The launch must NOT have aborted before starting the agent tmux session.
+    new_sessions = [
+        c.command for c in fake_driver.exec_calls
+        if c.container == container_name
+        and c.command[:3] == ["tmux", "new-session", "-d"]
+    ]
+    assert new_sessions, (
+        "A failed skill-refresh must NOT abort the launch before the agent "
+        f"tmux session is started (lead-k4k7); output={combined!r}"
+    )
+    assert "Started tmux session" in (result.stdout or ""), (
+        "The 'Started tmux session' log line must still be emitted on a "
+        f"failed refresh (lead-k4k7); stdout={result.stdout!r}"
+    )
+    # And the launch must not abort with a fatal exit on the refresh failure
+    # alone (the readiness barriers are green in this scenario).
+    assert result.exit_code == 0, (
+        "A launch whose only failure was a transient skill-refresh — with all "
+        "readiness barriers green — must exit 0, not abort (lead-k4k7); "
+        f"stderr={result.stderr!r}"
+    )
+
+
 @then("the launch output never claims the skill-group was refreshed")
 def then_launch_output_no_false_success(ctx, fake_driver):
     result = ctx["result"]
