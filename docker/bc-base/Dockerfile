@@ -37,7 +37,7 @@ ARG SHOP_TEMPLATES_VERSION=v0.15.0
 # (default v0.14.0) so a templates-release rebuild can install the released tag.
 RUN pip install --no-cache-dir \
     "shopsystem-messaging @ git+https://github.com/dstengle/shopsystem-messaging.git@v0.4.0" \
-    "scenarios @ git+https://github.com/dstengle/shopsystem-scenarios.git@v0.2.0" \
+    "scenarios @ git+https://github.com/dstengle/shopsystem-scenarios@v0.2.0" \
     "shop-templates @ git+https://github.com/dstengle/shopsystem-templates.git@${SHOP_TEMPLATES_VERSION}" \
     "shopsystem-bc-launcher @ git+https://github.com/dstengle/shopsystem-bc-launcher.git@v0.3.4"
 
