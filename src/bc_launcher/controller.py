@@ -42,6 +42,69 @@ SHOPMSG_DSN_ENV = "SHOPMSG_DSN"
 SHOPMSG_SYSTEM_SLUG_ENV = "SHOPMSG_SYSTEM_SLUG"
 DEFAULT_SYSTEM_SLUG = "shopsystem"
 
+# lead-5k8c — the GitHub org that owns each BC's `<bc>-beads` Dolt remote
+# (mirrors the BC_IMAGE org "ghcr.io/dstengle/...").  The per-BC beads remote
+# is `git+https://github.com/<org>/<bc>-beads.git`; the agent-vault proxy
+# injects credentials for it via HTTPS_PROXY at exec time.
+BEADS_REMOTE_ORG = "dstengle"
+
+
+def _beads_dolt_remote_url(bc_name: str) -> str:
+    """The `git+https://` Dolt remote URL for a BC's `<bc>-beads` registry.
+
+    lead-5k8c.  A BC named ``shopsystem-bc-launcher`` keeps its beads working
+    set on the GitHub repo ``<org>/shopsystem-bc-launcher-beads.git``; the
+    launcher's empty-remote provisioning seeds + pushes to this URL.
+    """
+    return (
+        f"git+https://github.com/{BEADS_REMOTE_ORG}/{bc_name}-beads.git"
+    )
+
+
+def _is_empty_remote_failure(message: str) -> bool:
+    """Whether a `bd bootstrap` failure was caused by an EMPTY Dolt remote.
+
+    lead-5k8c.  An uninitialized `<bc>-beads` GitHub repo makes bootstrap's
+    clone fail with "git remote has no branches: cannot push ...; initialize
+    the repository with an initial branch/commit first".  That specific
+    condition — and ONLY that condition — is what the empty-remote
+    init-and-push provisioning recovers; other bootstrap failures fall
+    straight through to the warn-and-continue path.
+    """
+    text = message.lower()
+    return "git remote has no branches" in text or (
+        "no branches" in text and "initialize" in text
+    )
+
+
+def _empty_remote_seed_script(beads_remote_url: str) -> str:
+    """Shell to INITIALIZE an empty `<bc>-beads` Dolt remote (lead-5k8c).
+
+    Mirrors the heal performed live 2026-06-22: `git init -b main` a temp
+    repo seeded from the git-tracked `.beads/issues.jsonl`, push an initial
+    commit to the `<bc>-beads.git` GitHub repo (agent-vault proxy injects
+    creds via HTTPS_PROXY), then `bd dolt remote add origin <url>` +
+    `bd dolt push`, and verify `refs/dolt/data` appears in `git ls-remote`.
+    """
+    return (
+        f"set -e; cd {CONTAINER_WORKSPACE}; "
+        # Materialize the committed registry into a throwaway init tree so the
+        # seed commit carries the BC's tracked issues.
+        "tmp=$(mktemp -d); "
+        "cp .beads/issues.jsonl \"$tmp/issues.jsonl\" 2>/dev/null || true; "
+        "git -C \"$tmp\" init -b main >/dev/null; "
+        "git -C \"$tmp\" add -A; "
+        "git -C \"$tmp\" -c user.email=bc-launcher@shopsystem "
+        "-c user.name=bc-launcher commit -m 'seed beads remote' >/dev/null; "
+        f"git -C \"$tmp\" push \"{beads_remote_url}\" main >/dev/null; "
+        # Point the local bd working set at the now-initialized remote and push
+        # the embedded-Dolt working set up.
+        f"bd dolt remote add origin {beads_remote_url} || true; "
+        "bd dolt push || true; "
+        # Verify the remote now carries Dolt data refs (init succeeded).
+        f"git ls-remote {beads_remote_url} 'refs/dolt/*' | grep -q refs/dolt"
+    )
+
 # ---------------------------------------------------------------------------
 # Agent-vault credential broker model (ADR-026, lead-hxb8 / lead-v4ih)
 # ---------------------------------------------------------------------------
@@ -1033,19 +1096,88 @@ class BcContainerController:
                  f"cd {CONTAINER_WORKSPACE} && bd bootstrap"],
                 user=AGENT_CONTAINER_USER,
             )
-            if boot_result.returncode != 0:
-                return CommandResult(
-                    exit_code=1,
-                    stdout="".join(out_lines),
-                    stderr=(
-                        "bd bootstrap failed (provisioning the in-container "
-                        f"bd working set): {boot_result.stderr or boot_result.stdout}"
-                    ),
+
+            # lead-5k8c — EMPTY-REMOTE PROVISIONING.  A BC whose `<bc>-beads`
+            # Dolt remote was never seeded (the GitHub repo exists but is
+            # EMPTY) makes `bd bootstrap`'s clone fail:
+            #   "dolt clone git+https://.../<bc>-beads.git: git remote has no
+            #    branches: cannot push...; initialize the repository with an
+            #    initial branch/commit first".
+            # Empirically observed live 2026-06-22 (lead-4qpq fleet relaunch):
+            # this failure stranded a healthy cloned container with no agent.
+            # The fix is to INITIALIZE the empty remote — seed it with an
+            # initial branch/commit from the git-tracked `.beads/issues.jsonl`
+            # — then retry bootstrap, INSTEAD of fatal-failing the launch.
+            # The seed mirrors the heal performed live: `git init -b main` a
+            # temp repo and push an initial commit to the `<bc>-beads.git`
+            # GitHub repo (creds injected by the agent-vault proxy via
+            # HTTPS_PROXY), then `bd dolt remote add origin` + `bd dolt push`.
+            if boot_result.returncode != 0 and _is_empty_remote_failure(
+                boot_result.stderr or boot_result.stdout or ""
+            ):
+                beads_remote = _beads_dolt_remote_url(bc_name)
+                seed_result = self._driver.exec_run(
+                    container,
+                    ["bash", "-lc", _empty_remote_seed_script(beads_remote)],
+                    user=AGENT_CONTAINER_USER,
                 )
-            out_lines.append(
-                "Ran bd bootstrap (imported git-tracked .beads/issues.jsonl "
-                "into the embedded-Dolt working set)\n"
-            )
+                if seed_result.returncode == 0:
+                    out_lines.append(
+                        "Empty beads dolt remote detected; initialized it with "
+                        f"an initial branch/commit ({beads_remote}) and retried "
+                        "bd bootstrap (lead-5k8c)\n"
+                    )
+                    # Re-assert vscode ownership before the retry (the seed may
+                    # have re-rooted paths under .beads), then retry bootstrap.
+                    self._driver.exec_run(
+                        container,
+                        ["chown", "-R",
+                         f"{AGENT_CONTAINER_USER}:{AGENT_CONTAINER_USER}",
+                         CONTAINER_WORKSPACE],
+                    )
+                    boot_result = self._driver.exec_run(
+                        container,
+                        ["bash", "-lc",
+                         f"cd {CONTAINER_WORKSPACE} && bd bootstrap"],
+                        user=AGENT_CONTAINER_USER,
+                    )
+                else:
+                    err_lines.append(
+                        "warning: beads dolt remote is empty and could not be "
+                        f"initialized ({beads_remote}, exit "
+                        f"{seed_result.returncode}): "
+                        f"{(seed_result.stderr or seed_result.stdout).strip()}; "
+                        "proceeding to agent-start so the agent can self-heal "
+                        "(lead-5k8c)\n"
+                    )
+
+            if boot_result.returncode != 0:
+                # lead-5k8c — NO PRE-AGENT-START STEP MAY FATAL-STRAND THE
+                # CONTAINER.  This extends the lead-k4k7 warn-and-continue
+                # pattern (originally applied to the shop-templates
+                # skill-refresh) to the bd-bootstrap step.  A failed
+                # `bd bootstrap` used to `return CommandResult(exit_code=1)`
+                # BEFORE the tmux/claude agent-start step, leaving a fully
+                # cloned "Up (healthy)" container with NO agent — a
+                # non-resumable strand (observed live 2026-06-22).  Beads
+                # provisioning is a boot convenience, NOT a precondition for
+                # the agent to run: the BC's session-start beads-health step
+                # self-heals a wedged tracker.  So a bootstrap failure now
+                # WARNS and PROCEEDS to agent-start instead of aborting, so a
+                # healthy cloned container is NEVER left without an agent.
+                err_lines.append(
+                    "warning: bd bootstrap failed while provisioning the "
+                    "in-container bd working set (exit "
+                    f"{boot_result.returncode}): "
+                    f"{(boot_result.stderr or boot_result.stdout).strip()}; "
+                    "the beads tracker may need a session-start heal but the "
+                    "agent will still be started (lead-5k8c)\n"
+                )
+            else:
+                out_lines.append(
+                    "Ran bd bootstrap (imported git-tracked .beads/issues.jsonl "
+                    "into the embedded-Dolt working set)\n"
+                )
 
             # shop-templates skill-refresh (lead-dlrx scenario
             # 75ae95be0ecf1640; lead-q5k7 bugfix).

@@ -44,6 +44,33 @@ def is_bd_bootstrap_command(command: list[str]) -> bool:
     return False
 
 
+def _is_empty_remote_seed_command(command: list[str]) -> bool:
+    """Return True if ``command`` is the launcher's empty-remote SEED step.
+
+    lead-5k8c.  When `bd bootstrap` fails because the `<bc>-beads` Dolt remote
+    is empty ("git remote has no branches"), the launcher INITIALIZES the
+    remote by init-and-pushing an initial branch/commit then verifying
+    `refs/dolt/*` appears in `git ls-remote`.  The seed runs as a login-shell
+    script; it is recognised by its `bd dolt remote add` + `bd dolt push` +
+    `git ls-remote ... refs/dolt` verification tail, distinct from the
+    `bd bootstrap` step itself (which this matcher must NOT claim).
+    """
+    if (
+        len(command) >= 3
+        and command[0] == "bash"
+        and command[1] in ("-lc", "-c")
+    ):
+        script = command[2]
+        if "bd bootstrap" in script:
+            return False
+        return (
+            "bd dolt push" in script
+            and "ls-remote" in script
+            and "refs/dolt" in script
+        )
+    return False
+
+
 @dataclass
 class ExecCall:
     """Records one exec_run or exec_interactive call.
@@ -403,6 +430,23 @@ class FakeDockerDriver:
         # refresh deposits NO skills and returns non-zero.
         self._skill_refresh_fails: set[str] = set()
 
+        # --- lead-5k8c empty beads-dolt-remote model -----------------------
+        # Containers whose `<bc>-beads` Dolt remote is EMPTY/uninitialized.
+        # While empty, a `bd bootstrap` clone fails with "git remote has no
+        # branches: ...; initialize the repository with an initial
+        # branch/commit first" — the exact strand-class condition observed
+        # live 2026-06-22.  The launcher's empty-remote provisioning seeds the
+        # remote (init-and-push an initial branch/commit), after which the
+        # container is recorded as seeded and bootstrap succeeds.
+        self._beads_remote_empty: set[str] = set()
+        # Containers whose previously-empty beads remote has been SEEDED by the
+        # launcher's empty-remote init-and-push step.
+        self._beads_remote_seeded: set[str] = set()
+        # Whether even the launcher's empty-remote seed step itself fails
+        # (models a seed that cannot reach/initialize the remote), so the
+        # warn-and-continue-to-agent-start path can be exercised.
+        self._beads_remote_seed_fails: set[str] = set()
+
     # --- Setup helpers (called by step definitions) ---
 
     def set_network(self, network_name: str, exists: bool = True) -> None:
@@ -581,6 +625,35 @@ class FakeDockerDriver:
             self._skill_refresh_fails.add(container_name)
         else:
             self._skill_refresh_fails.discard(container_name)
+
+    def set_beads_remote_empty(
+        self, container_name: str, empty: bool = True
+    ) -> None:
+        """Model the BC's `<bc>-beads` Dolt remote as EMPTY/uninitialized
+        (lead-5k8c).  While empty (and not yet seeded by the launcher), a
+        `bd bootstrap` clone fails with "git remote has no branches".
+        """
+        if empty:
+            self._beads_remote_empty.add(container_name)
+        else:
+            self._beads_remote_empty.discard(container_name)
+
+    def set_beads_remote_seed_fails(
+        self, container_name: str, fails: bool = True
+    ) -> None:
+        """Model the launcher's empty-remote SEED step itself failing
+        (lead-5k8c), so the warn-and-continue-to-agent-start path can be
+        pinned: a seed that cannot initialize the remote must NOT abort.
+        """
+        if fails:
+            self._beads_remote_seed_fails.add(container_name)
+        else:
+            self._beads_remote_seed_fails.discard(container_name)
+
+    def beads_remote_seeded(self, container_name: str) -> bool:
+        """True once the launcher's empty-remote init-and-push step has seeded
+        the previously-empty `<bc>-beads` Dolt remote (lead-5k8c)."""
+        return container_name in self._beads_remote_seeded
 
     def committed_beads_prefix(self, container_name: str) -> str:
         """Return the committed prefix the cloned repo's registry carries."""
@@ -1192,7 +1265,41 @@ class FakeDockerDriver:
         # ("database already exists, nothing to do") and leaves the BC WEDGED
         # — prefix unset, working set unprovisioned — modelling the
         # self-inflicted lead-vlsu deadlock.
+        # lead-5k8c — the launcher's empty-remote SEED step.  Recognised by its
+        # `git ls-remote ... refs/dolt` verification tail inside a login-shell
+        # script.  When the remote is empty (and the seed is not forced to
+        # fail) the seed succeeds and marks the remote seeded, after which
+        # `bd bootstrap` succeeds; a forced-fail seed exits non-zero.
+        if _is_empty_remote_seed_command(command):
+            if container_name in self._beads_remote_seed_fails:
+                return subprocess.CompletedProcess(
+                    command, 1, "",
+                    "fatal: could not initialize empty beads dolt remote\n",
+                )
+            self._beads_remote_seeded.add(container_name)
+            self._beads_remote_empty.discard(container_name)
+            return subprocess.CompletedProcess(
+                command, 0,
+                "Initialized empty beads dolt remote; pushed initial "
+                "branch/commit (refs/dolt/data present)\n",
+                "",
+            )
+
         if is_bd_bootstrap_command(command):
+            # lead-5k8c — an EMPTY/uninitialized `<bc>-beads` Dolt remote makes
+            # the bootstrap clone fail "git remote has no branches" UNTIL the
+            # launcher's empty-remote seed step initializes it.
+            if (
+                container_name in self._beads_remote_empty
+                and container_name not in self._beads_remote_seeded
+            ):
+                return subprocess.CompletedProcess(
+                    command, 1, "",
+                    "dolt clone git+https://github.com/dstengle/"
+                    f"{container_name}-beads.git: git remote has no branches: "
+                    "cannot push to a remote with no branches; initialize the "
+                    "repository with an initial branch/commit first\n",
+                )
             if container_name in self._beads_db_precreated:
                 # Deadlock: a pre-existing bd-created DB makes bootstrap a
                 # no-op.  Nothing is provisioned; the BC stays wedged.

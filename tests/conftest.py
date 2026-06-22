@@ -25,6 +25,7 @@ from tests.fake_driver import (
     FakeDockerDriver,
     FakeRegistryDriver,
     is_bd_bootstrap_command,
+    _is_empty_remote_seed_command,
 )
 from tests.fake_github_driver import FakeGitHubDriver
 from tests.fake_git_driver import FakeGitDriver
@@ -7215,4 +7216,145 @@ def then_shop_templates_no_longer_hard_pinned(old, ctx):
         "vMAJOR.MINOR.PATCH literal "
         f"({frozen_literal.group(0) if frozen_literal else ''!r}); a rebuild "
         "would re-pin that hard-coded version rather than the released one."
+    )
+
+
+# ---------------------------------------------------------------------------
+# lead-5k8c — bd-bootstrap resilience: empty-remote provisioning +
+# warn-and-continue (generalizes the lead-k4k7 no-fatal-strand invariant to
+# the in-container bd-bootstrap step).
+# ---------------------------------------------------------------------------
+
+@given("the BC's beads dolt remote is empty and uninitialized")
+def beads_remote_empty(ctx, fake_driver):
+    """Model the BC's `<bc>-beads` Dolt remote as EMPTY (lead-5k8c).
+
+    While empty (and not yet seeded by the launcher), a `bd bootstrap` clone
+    fails "git remote has no branches" — the exact strand-class condition
+    observed live 2026-06-22.  Keyed by the container name the upcoming launch
+    will create.
+    """
+    bc_name = ctx["bc_name"]
+    container_name = f"bc-{bc_name}"
+    fake_driver.set_beads_remote_empty(container_name, True)
+    ctx["container_name"] = container_name
+
+
+@given("the launcher's empty-remote seed step fails at runtime")
+def beads_remote_seed_fails(ctx, fake_driver):
+    """Model the launcher's empty-remote SEED step itself failing (lead-5k8c).
+
+    This drives the warn-and-continue path: the remote stays empty so
+    `bd bootstrap` still fails, and the launch must WARN and proceed to
+    agent-start rather than fatal-strand the container.
+    """
+    bc_name = ctx["bc_name"]
+    container_name = f"bc-{bc_name}"
+    fake_driver.set_beads_remote_seed_fails(container_name, True)
+    ctx["container_name"] = container_name
+
+
+@then("the launch initializes the empty beads dolt remote with an initial "
+      "branch and commit")
+def assert_empty_remote_initialized(ctx, fake_driver):
+    """The launcher must have run the empty-remote SEED step and the remote
+    must end up seeded (lead-5k8c EMPTY-REMOTE PROVISIONING)."""
+    container_name = ctx["container_name"]
+    seed_calls = [
+        c for c in fake_driver.exec_calls
+        if c.container == container_name
+        and _is_empty_remote_seed_command(c.command)
+    ]
+    assert seed_calls, (
+        "The launcher must INITIALIZE an empty beads dolt remote (init-and-"
+        "push an initial branch/commit) instead of fatal-failing; no "
+        f"empty-remote seed step ran. exec calls on {container_name!r}: "
+        f"{[c.command for c in fake_driver.exec_calls if c.container == container_name]!r}"
+    )
+    assert fake_driver.beads_remote_seeded(container_name), (
+        "The empty beads dolt remote must end up SEEDED after the launcher's "
+        f"init-and-push step (lead-5k8c); container={container_name!r}"
+    )
+
+
+@then("the launch retries bd bootstrap after seeding the empty remote")
+def assert_bootstrap_retried_after_seed(ctx, fake_driver):
+    """The launcher must run `bd bootstrap` AGAIN after seeding the remote, so
+    a once-empty remote ends up provisioned (lead-5k8c)."""
+    container_name = ctx["container_name"]
+    calls = [
+        c for c in fake_driver.exec_calls
+        if c.container == container_name
+    ]
+    # Locate the seed step, and assert a bd bootstrap exec follows it.
+    seed_idx = next(
+        (i for i, c in enumerate(calls)
+         if _is_empty_remote_seed_command(c.command)),
+        None,
+    )
+    assert seed_idx is not None, (
+        "Expected an empty-remote seed step before the bootstrap retry "
+        f"(lead-5k8c); calls={[c.command for c in calls]!r}"
+    )
+    retried = any(
+        is_bd_bootstrap_command(c.command) for c in calls[seed_idx + 1:]
+    )
+    assert retried, (
+        "The launcher must RETRY `bd bootstrap` after seeding the empty "
+        f"remote (lead-5k8c); calls after seed="
+        f"{[c.command for c in calls[seed_idx + 1:]]!r}"
+    )
+
+
+@then("the launch still starts the agent")
+def assert_launch_starts_agent(ctx, fake_driver):
+    """The agent tmux session must be started — a healthy cloned container is
+    NEVER left without an agent (lead-5k8c)."""
+    container_name = ctx["container_name"]
+    new_sessions = [
+        c.command for c in fake_driver.exec_calls
+        if c.container == container_name
+        and c.command[:3] == ["tmux", "new-session", "-d"]
+    ]
+    assert new_sessions, (
+        "The launch must start the agent tmux session (lead-5k8c: no "
+        f"pre-agent-start step may strand the container); tmux new-session "
+        f"calls={new_sessions!r}"
+    )
+    result = ctx["result"]
+    assert "Started tmux session" in (result.stdout or ""), (
+        "The 'Started tmux session' log line must be emitted (lead-5k8c); "
+        f"stdout={result.stdout!r}"
+    )
+
+
+@then("the launch warns about the bd bootstrap failure and still starts the "
+      "agent")
+def assert_bootstrap_failure_warns_and_starts_agent(ctx, fake_driver):
+    """lead-5k8c — a bd-bootstrap failure is downgraded from a fatal
+
+    early-return to a WARNING that still PROCEEDS to agent-start (the same
+    class as lead-k4k7's skill-refresh warn-and-continue).  The launch must
+    emit a warning naming the bd bootstrap failure AND start the agent.
+    """
+    result = ctx["result"]
+    container_name = ctx["container_name"]
+    combined = (result.stdout or "") + (result.stderr or "")
+
+    assert "warning" in combined.lower() and "bd bootstrap" in combined, (
+        "A failed bd bootstrap must log a warning naming the bd bootstrap "
+        f"failure (lead-5k8c); output={combined!r}"
+    )
+    new_sessions = [
+        c.command for c in fake_driver.exec_calls
+        if c.container == container_name
+        and c.command[:3] == ["tmux", "new-session", "-d"]
+    ]
+    assert new_sessions, (
+        "A failed bd bootstrap must NOT abort the launch before the agent "
+        f"tmux session is started (lead-5k8c); output={combined!r}"
+    )
+    assert "Started tmux session" in (result.stdout or ""), (
+        "The 'Started tmux session' log line must still be emitted on a "
+        f"failed bd bootstrap (lead-5k8c); stdout={result.stdout!r}"
     )
