@@ -127,6 +127,29 @@ def build_parser() -> argparse.ArgumentParser:
     p_launch = sub.add_parser("launch", help="Start a BC container")
     p_launch.add_argument("bc_name", help="BC name (e.g. shopsystem-messaging)")
     p_launch.add_argument("--repo-url", help="Git repo URL to clone inside the container")
+    p_launch.add_argument(
+        "--workspace-mount",
+        default=None,
+        help=(
+            "Path to an existing host working tree to bind-mount at the "
+            "container's /workspace. When given, the launch SKIPS the clone "
+            "and ALL clone-path provisioning (no bd bootstrap, no "
+            "shop-templates re-pour), presenting the host tree unchanged "
+            "(its committed .beads registry and poured .claude/skills are "
+            "left byte-unchanged). Mutually exclusive in effect with "
+            "--repo-url (a workspace-mount launch never clones)."
+        ),
+    )
+    p_launch.add_argument(
+        "--mount-docker-socket",
+        action="store_true",
+        help=(
+            "Opt-in lead-only flag: bind-mount the host docker socket "
+            "(/var/run/docker.sock) into the container so the launched shop "
+            "can drive docker itself. OFF by default — when absent, NO "
+            "docker-socket mount is added."
+        ),
+    )
     p_launch.add_argument("--shopmsg-dsn", help="SHOPMSG_DSN value for the container")
     p_launch.add_argument(
         "--image",
@@ -385,6 +408,8 @@ def main(argv: list[str] | None = None) -> int:
             agent_vault_addr=env_vals.get("AGENT_VAULT_ADDR"),
             agent_vault_token=env_vals.get("AGENT_VAULT_TOKEN"),
             agent_vault_vault=env_vals.get("AGENT_VAULT_VAULT"),
+            workspace_mount=getattr(args, "workspace_mount", None),
+            mount_docker_socket=bool(getattr(args, "mount_docker_socket", False)),
             debug=debug,
         )
         sys.stdout.write(result.stdout)

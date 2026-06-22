@@ -7358,3 +7358,240 @@ def assert_bootstrap_failure_warns_and_starts_agent(ctx, fake_driver):
         "The 'Started tmux session' log line must still be emitted on a "
         f"failed bd bootstrap (lead-5k8c); stdout={result.stdout!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# lead-zxtk — workspace-mount launch option + opt-in docker-socket mount
+# (scenarios 0bc8e4532c04bf72 / 9fc84c8424b2a223 / ff370a4e7e9dac5e /
+#  e177655ba09a73fa)
+# ---------------------------------------------------------------------------
+
+def _zxtk_default_manifest(ctx, tmp_path, bc_name="shopsystem-messaging"):
+    """Write a default manifest so network resolution succeeds for a launch
+    that does not otherwise configure one (lead-zxtk scenarios)."""
+    manifest_path = tmp_path / "bc-manifest.yaml"
+    if not manifest_path.exists():
+        import yaml as _yaml
+        manifest_path.write_text(_yaml.dump({
+            "product": "shopsystem product",
+            "bcs": [{
+                "name": bc_name,
+                "remote": f"https://github.com/shopsystem/{bc_name}.git",
+                "role": "bc",
+            }],
+        }))
+    return manifest_path
+
+
+@given(parsers.parse('an existing host working tree at a path "{host_path}" '
+                     'containing a git repository'))
+def host_working_tree_with_git(host_path, ctx, fake_driver):
+    """A host working tree to bind-mount as /workspace (lead-zxtk)."""
+    ctx["workspace_mount"] = host_path
+    # Record a minimal host-tree snapshot so the byte-unchanged model has a
+    # baseline even when this scenario does not assert on it.
+    fake_driver.set_host_tree_snapshot(
+        host_path,
+        beads_registry='{"id":"lead-1","title":"seed"}\n',
+        claude_skills="committed-skill-group\n",
+    )
+
+
+@given(parsers.parse('an existing host working tree at a path "{host_path}" '
+                     'with a committed ".beads" registry and poured '
+                     '".claude/skills"'))
+def host_working_tree_with_beads_and_skills(host_path, ctx, fake_driver):
+    """A host working tree carrying a committed `.beads` registry and poured
+    `.claude/skills`, to be presented unchanged via a workspace-mount."""
+    ctx["workspace_mount"] = host_path
+    fake_driver.set_host_tree_snapshot(
+        host_path,
+        beads_registry='{"id":"lead-1","title":"committed registry"}\n',
+        claude_skills="poured-skill-group/bc-router-health\n",
+    )
+
+
+@when(parsers.parse('I run bc-container launch with the workspace-mount option '
+                    'set to "{host_path}" and no repo URL'))
+def run_launch_with_workspace_mount(host_path, ctx, fake_driver, controller, tmp_path):
+    bc_name = "shopsystem-messaging"
+    manifest_path = _zxtk_default_manifest(ctx, tmp_path, bc_name)
+    result = controller.launch(
+        bc_name=bc_name,
+        repo_url=None,
+        workspace_mount=host_path,
+        manifest_path=manifest_path,
+        credential_home=ctx.get("credential_home"),
+    )
+    ctx["result"] = result
+    ctx["container_name"] = f"bc-{bc_name}"
+    ctx["bc_name"] = bc_name
+    ctx["workspace_mount"] = host_path
+
+
+@when("I run bc-container launch with the docker-socket opt-in flag enabled")
+def run_launch_with_docker_socket_flag(ctx, fake_driver, controller, tmp_path):
+    bc_name = "shopsystem-messaging"
+    manifest_path = _zxtk_default_manifest(ctx, tmp_path, bc_name)
+    result = controller.launch(
+        bc_name=bc_name,
+        repo_url=ctx.get("repo_url"),
+        mount_docker_socket=True,
+        manifest_path=manifest_path,
+        credential_home=ctx.get("credential_home"),
+    )
+    ctx["result"] = result
+    ctx["container_name"] = f"bc-{bc_name}"
+    ctx["bc_name"] = bc_name
+
+
+@when("I run bc-container launch without the docker-socket opt-in flag")
+def run_launch_without_docker_socket_flag(ctx, fake_driver, controller, tmp_path):
+    bc_name = "shopsystem-messaging"
+    manifest_path = _zxtk_default_manifest(ctx, tmp_path, bc_name)
+    result = controller.launch(
+        bc_name=bc_name,
+        repo_url=ctx.get("repo_url"),
+        mount_docker_socket=False,
+        manifest_path=manifest_path,
+        credential_home=ctx.get("credential_home"),
+    )
+    ctx["result"] = result
+    ctx["container_name"] = f"bc-{bc_name}"
+    ctx["bc_name"] = bc_name
+
+
+@then(parsers.parse('the container has a bind mount whose source is the host '
+                    'path "{source}" and whose target is "{target}"'))
+def assert_bind_mount_source_target(source, target, ctx, fake_driver, controller):
+    container_name = ctx["container_name"]
+    bind_mounts = controller.get_bind_mounts(container_name)
+    matching = [
+        m for m in bind_mounts
+        if m.source == source and m.destination == target
+    ]
+    assert matching, (
+        f"Expected a bind mount source={source!r} target={target!r}; "
+        f"got bind mounts: {[(m.source, m.destination) for m in bind_mounts]}"
+    )
+
+
+@then("no git clone is performed for the launch")
+def assert_no_git_clone(ctx, fake_driver):
+    container_name = ctx["container_name"]
+    clone_calls = [
+        c for c in fake_driver.exec_calls
+        if c.container == container_name and c.command[:2] == ["git", "clone"]
+    ]
+    assert not clone_calls, (
+        "Expected NO git clone exec call for a workspace-mount launch; "
+        f"got: {[c.command for c in clone_calls]}"
+    )
+
+
+@then("the container's /workspace is the host tree presented unchanged")
+def assert_workspace_is_host_tree(ctx, fake_driver, controller):
+    container_name = ctx["container_name"]
+    host_path = ctx["workspace_mount"]
+    bind_mounts = controller.get_bind_mounts(container_name)
+    matching = [
+        m for m in bind_mounts
+        if m.source == host_path and m.destination == "/workspace"
+    ]
+    assert matching, (
+        f"Expected /workspace to be the bind-mounted host tree {host_path!r}; "
+        f"got: {[(m.source, m.destination) for m in bind_mounts]}"
+    )
+    # Presented unchanged: no provisioning op mutated the mounted tree.
+    assert not fake_driver.bd_bootstrap_ran(container_name), (
+        "A workspace-mount launch must not run bd bootstrap against the "
+        "mounted tree"
+    )
+    assert not fake_driver.shop_templates_update_ran(container_name), (
+        "A workspace-mount launch must not re-pour shop-templates over the "
+        "mounted tree"
+    )
+
+
+@then("no bd bootstrap is run against the mounted /workspace")
+def assert_no_bd_bootstrap_on_mount(ctx, fake_driver):
+    container_name = ctx["container_name"]
+    assert not fake_driver.bd_bootstrap_ran(container_name), (
+        "Expected NO bd bootstrap exec call for a workspace-mount launch "
+        "(clone-path provisioning must be skipped, lead-zxtk)"
+    )
+
+
+@then(parsers.parse('no shop-templates re-pour overwrites the mounted '
+                    '".claude/skills"'))
+def assert_no_shop_templates_repour(ctx, fake_driver):
+    container_name = ctx["container_name"]
+    assert not fake_driver.shop_templates_update_ran(container_name), (
+        "Expected NO shop-templates update (re-pour) exec call for a "
+        "workspace-mount launch (clone-path provisioning must be skipped)"
+    )
+
+
+@then(parsers.parse('the mounted /workspace ".beads" registry and '
+                    '".claude/skills" are byte-unchanged from the host tree '
+                    'after launch'))
+def assert_mounted_tree_byte_unchanged(ctx, fake_driver):
+    container_name = ctx["container_name"]
+    host_path = ctx["workspace_mount"]
+    assert fake_driver.mounted_tree_byte_unchanged(container_name, host_path), (
+        "The mounted /workspace .beads registry and .claude/skills must be "
+        "byte-unchanged after a workspace-mount launch (no provisioning op "
+        "may write to the live host tree, lead-zxtk)"
+    )
+
+
+@then(parsers.parse('the container has a bind mount whose source is the host '
+                    'docker socket "{socket_path}"'))
+def assert_docker_socket_bind_mount_present(socket_path, ctx, fake_driver, controller):
+    container_name = ctx["container_name"]
+    bind_mounts = controller.get_bind_mounts(container_name)
+    matching = [m for m in bind_mounts if m.source == socket_path]
+    assert matching, (
+        f"Expected a docker-socket bind mount with source {socket_path!r}; "
+        f"got: {[(m.source, m.destination) for m in bind_mounts]}"
+    )
+
+
+@then("docker inspect of the container shows the docker socket mount present")
+def assert_docker_inspect_socket_present(ctx, fake_driver):
+    container_name = ctx["container_name"]
+    mounts = fake_driver.get_mounts(container_name)
+    matching = [
+        m for m in mounts
+        if m.type == "bind" and m.source == "/var/run/docker.sock"
+    ]
+    assert matching, (
+        "docker inspect (get_mounts) must show the docker-socket mount "
+        f"present; got: {[(m.type, m.source, m.destination) for m in mounts]}"
+    )
+
+
+@then(parsers.parse('the container has no bind mount whose source is the host '
+                    'docker socket "{socket_path}"'))
+def assert_docker_socket_bind_mount_absent(socket_path, ctx, fake_driver, controller):
+    container_name = ctx["container_name"]
+    bind_mounts = controller.get_bind_mounts(container_name)
+    matching = [m for m in bind_mounts if m.source == socket_path]
+    assert not matching, (
+        f"Expected NO docker-socket bind mount (source {socket_path!r}) by "
+        f"default; got: {[(m.source, m.destination) for m in bind_mounts]}"
+    )
+
+
+@then("docker inspect of the container shows no docker socket mount present")
+def assert_docker_inspect_socket_absent(ctx, fake_driver):
+    container_name = ctx["container_name"]
+    mounts = fake_driver.get_mounts(container_name)
+    matching = [
+        m for m in mounts
+        if m.type == "bind" and m.source == "/var/run/docker.sock"
+    ]
+    assert not matching, (
+        "docker inspect (get_mounts) must show NO docker-socket mount by "
+        f"default; got: {[(m.type, m.source, m.destination) for m in mounts]}"
+    )

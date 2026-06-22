@@ -1584,3 +1584,73 @@ class FakeDockerDriver:
             if c.container == container_name and c.command[:2] == ["git", "clone"]:
                 return c
         return None
+
+    # --- lead-zxtk: workspace-mount host-tree model ------------------------
+    # A workspace-mount launch bind-mounts an existing host working tree at
+    # /workspace and must SKIP the clone AND all clone-path provisioning so the
+    # mounted tree's `.beads` registry and `.claude/skills` stay byte-unchanged.
+    # The model captures the host tree's `.beads`/`.claude/skills` content at
+    # setup time; the CURRENT content of the mounted tree is that same snapshot
+    # UNLESS a provisioning op (bd bootstrap, or `shop-templates update`) was
+    # exec'd against the container — either of which would mutate the live tree.
+    # So a launcher that fails to skip provisioning under workspace-mount reads
+    # RED here (the byte-unchanged assertion fails), giving the scenario teeth.
+
+    def set_host_tree_snapshot(
+        self, host_path: str, beads_registry: str, claude_skills: str
+    ) -> None:
+        """Record the host working tree's committed `.beads` registry blob and
+        poured `.claude/skills` content prior to launch (lead-zxtk)."""
+        if not hasattr(self, "_host_tree_snapshot"):
+            self._host_tree_snapshot: dict[str, dict[str, str]] = {}
+        self._host_tree_snapshot[host_path] = {
+            "beads": beads_registry,
+            "skills": claude_skills,
+        }
+
+    def bd_bootstrap_ran(self, container_name: str) -> bool:
+        """True if a `bd bootstrap` provisioning step was exec'd against the
+        container (lead-zxtk: must be False for a workspace-mount launch)."""
+        return any(
+            c.container == container_name and is_bd_bootstrap_command(c.command)
+            for c in self.exec_calls
+        )
+
+    def shop_templates_update_ran(self, container_name: str) -> bool:
+        """True if a `shop-templates update` re-pour was exec'd against the
+        container (lead-zxtk: must be False for a workspace-mount launch)."""
+        return any(
+            c.container == container_name
+            and c.command[:2] == ["shop-templates", "update"]
+            for c in self.exec_calls
+        )
+
+    def mounted_tree_byte_unchanged(
+        self, container_name: str, host_path: str
+    ) -> bool:
+        """True if the mounted host tree's `.beads`/`.claude/skills` are
+        byte-unchanged after launch (lead-zxtk).
+
+        The mounted tree is the bind-mount source recorded for the container.
+        Its content is byte-unchanged exactly when NO provisioning op mutated
+        it — i.e. neither `bd bootstrap` nor `shop-templates update` ran against
+        the container.  (The snapshot blobs themselves are the host-supplied
+        content; this model treats any provisioning exec as a mutation, which is
+        what a clone-path launch would do.)
+        """
+        snapshot = getattr(self, "_host_tree_snapshot", {}).get(host_path)
+        if snapshot is None:
+            return False
+        # Confirm the host path is actually bind-mounted at /workspace.
+        mounted = any(
+            m.type == "bind"
+            and m.source == host_path
+            and m.destination == CONTAINER_WORKSPACE
+            for m in self._mounts.get(container_name, [])
+        )
+        if not mounted:
+            return False
+        return not (
+            self.bd_bootstrap_ran(container_name)
+            or self.shop_templates_update_ran(container_name)
+        )

@@ -20,6 +20,10 @@ from bc_launcher.driver import ContainerMount, DockerDriver, RegistryDriver
 # ---------------------------------------------------------------------------
 
 CONTAINER_WORKSPACE = "/workspace"
+# Host path of the docker socket, bind-mounted into the container ONLY when the
+# opt-in lead-only docker-socket flag is enabled (lead-zxtk,
+# @scenario_hash:ff370a4e7e9dac5e / e177655ba09a73fa).
+DOCKER_SOCKET_PATH = "/var/run/docker.sock"
 AGENT_TMUX_SESSION = "agent"
 # The container user that owns the agent tmux session and all of its
 # clients (send-keys, capture-pane, has-session, attach-session).  The
@@ -646,6 +650,8 @@ class BcContainerController:
         agent_vault_addr: str | None = None,
         agent_vault_token: str | None = None,
         agent_vault_vault: str | None = None,
+        workspace_mount: str | None = None,
+        mount_docker_socket: bool = False,
         debug: bool = False,
     ) -> CommandResult:
         """
@@ -880,6 +886,32 @@ class BcContainerController:
         # credential coupling.  Each entry: (type, source, dest, readonly).
         mounts: list[tuple[str, str, str, bool]] = []
 
+        # --- workspace-mount (lead-zxtk, @scenario_hash:0bc8e4532c04bf72 /
+        #     9fc84c8424b2a223) ---
+        # When the operator supplies an existing host working tree via
+        # ``workspace_mount``, bind-mount that host path at the container's
+        # /workspace and SKIP the clone (and ALL clone-path provisioning: no
+        # bd bootstrap, no shop-templates re-pour).  This presents the live
+        # host tree unchanged inside the container — its committed `.beads`
+        # registry and poured `.claude/skills` are left byte-for-byte intact
+        # because no provisioning step writes to the mounted tree.  The clone
+        # block below is gated on ``repo_url and not workspace_mount`` so a
+        # workspace-mount launch never reaches it.
+        if workspace_mount:
+            mounts.append(("bind", workspace_mount, CONTAINER_WORKSPACE, False))
+
+        # --- opt-in lead-only docker-socket mount (lead-zxtk,
+        #     @scenario_hash:ff370a4e7e9dac5e / e177655ba09a73fa) ---
+        # The host docker socket is bind-mounted into the container ONLY when
+        # the opt-in flag is enabled (a lead-only capability that lets the
+        # launched shop drive docker itself).  By default the flag is absent
+        # and NO docker-socket mount is added, so an ordinary BC container
+        # carries no access to the host docker daemon.
+        if mount_docker_socket:
+            mounts.append(
+                ("bind", DOCKER_SOCKET_PATH, DOCKER_SOCKET_PATH, False)
+            )
+
         # SHOPMSG_DSN may be a postgres DSN (no socket mount needed) or a
         # unix socket path.  If the DSN value looks like a socket file, add a
         # bind mount for it.
@@ -944,8 +976,15 @@ class BcContainerController:
         # broker on outbound requests; the only Claude credential file present
         # is the placeholder .credentials.json mounted read-only above.
 
-        # Clone repository if URL provided
-        if repo_url:
+        # Clone repository if URL provided AND no workspace-mount is in effect.
+        # lead-zxtk: a workspace-mount launch bind-mounts an existing host tree
+        # at /workspace and must SKIP the clone AND all clone-path provisioning
+        # (bd bootstrap, shop-templates re-pour) so the mounted tree's
+        # `.beads`/`.claude/skills` stay byte-unchanged.  The entire clone +
+        # provisioning block lives under this guard, so when workspace_mount is
+        # set the launch proceeds straight to agent-start against the mounted
+        # tree.
+        if repo_url and not workspace_mount:
             # --- Launch-time clone trust env (bclaunch-5fji) ---
             # DEFECT 1: route the clone's HTTPS through the broker's MITM proxy
             # (:14322 with token:vault basic-auth) — NOT the bare control-API
