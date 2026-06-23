@@ -70,6 +70,60 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+  # bc-lead — the thin launcher-flavored image (bc-base + the docker CLI),
+  # published to ghcr.io/dstengle/shopsystem-bc-lead on the SAME "v*" tag push.
+  #
+  # bc-lead is `FROM ghcr.io/dstengle/shopsystem-bc-base:<this-version>`, so it
+  # MUST build AFTER bc-base has been pushed in this same run — `needs:
+  # build-and-publish` enforces that ordering. The pushed tag (github.ref_name)
+  # is passed as the BASE_VERSION build-arg so bc-lead:vX is built FROM
+  # bc-base:vX. The tagging (version + latest) and public-visibility PATCH
+  # mirror bc-base exactly.
+  build-and-publish-bc-lead:
+    needs: build-and-publish
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the bc-launcher repository
+        uses: actions/checkout@v4
+
+      - name: Log in to ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push bc-lead, tagging both the version and latest
+        uses: docker/build-push-action@v6
+        with:
+          context: ./docker/bc-lead
+          file: ./docker/bc-lead/Dockerfile
+          push: true
+          # Build bc-lead FROM the SAME bc-base version published in this run.
+          build-args: |
+            BASE_VERSION=${{ github.ref_name }}
+          # Mirror bc-base's tagging exactly: tag the SAME built digest with
+          # both the immutable version tag and the moving "latest" tag.
+          tags: |
+            ghcr.io/dstengle/shopsystem-bc-lead:${{ github.ref_name }}
+            ghcr.io/dstengle/shopsystem-bc-lead:latest
+
+      # Mirror the bc-base public-visibility PATCH for the shopsystem-bc-lead
+      # package. Same non-fatal idempotent reassertion (continue-on-error +
+      # "|| true"): a green build+push already publishes the package public for
+      # a user-owned package; this PATCH just reasserts the intent and never
+      # false-fails a successful build+push.
+      - name: Set package visibility to public
+        continue-on-error: true
+        run: |
+          gh api \
+            --method PATCH \
+            -H "Accept: application/vnd.github+json" \
+            "/users/dstengle/packages/container/shopsystem-bc-lead/visibility" \
+            -f visibility=public || true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
 # ROLLBACK (scenario 41 / be11d615375564e1):
 # Rollback is the published-by-version property: because each release is pushed
 # with its own immutable "v*" tag, every prior known-good digest stays pullable
