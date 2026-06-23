@@ -182,6 +182,25 @@ class DockerDriver(Protocol):
         """
         ...
 
+    def capture_pane(
+        self, container_name: str, tmux_session: str
+    ) -> str:
+        """Return the current rendered contents of a tmux session's pane.
+
+        lead-q3uy — used by the engage path to inspect, at a single instant,
+        whether the in-container agent runtime is presenting a blocking
+        interactive option screen (and whether that screen advertises an
+        Escape/dismiss affordance) AFTER the input-ready marker but BEFORE the
+        startup prompt is submitted.  This is a ONE-SHOT capture (distinct from
+        ``wait_for_pane_marker``, which polls until a marker appears): the
+        launcher reads the rendered screen so it can both classify it and, when
+        it auto-dismisses an escape-able screen, log the captured content as a
+        host-discoverable WARNING.  Same ``capture-pane`` surface
+        ``bc-container monitor`` reads, so the launcher needs no in-container
+        attach.
+        """
+        ...
+
     def messaging_db_reachable(
         self, dsn: str, container: str | None = None
     ) -> bool:
@@ -510,6 +529,23 @@ class RealDockerDriver:
         )
         result = self.exec_run(container, ["python3", "-c", connect_script])
         return result.returncode == 0
+
+    def capture_pane(
+        self, container_name: str, tmux_session: str
+    ) -> str:
+        """One-shot ``tmux capture-pane`` of the named session's pane.
+
+        lead-q3uy — the engage path reads the rendered pane once (not a poll)
+        to classify a blocking interactive option screen.  Runs as vscode for
+        the same reason every other tmux client call does (the agent tmux
+        server is vscode-owned and tmux refuses a cross-user connection).
+        """
+        result = subprocess.run(
+            ["docker", "exec", "-u", "vscode", container_name,
+             "tmux", "capture-pane", "-p", "-t", tmux_session],
+            capture_output=True, text=True, check=False,
+        )
+        return result.stdout
 
     def wait_for_pane_marker(
         self,

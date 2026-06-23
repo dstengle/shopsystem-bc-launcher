@@ -228,6 +228,16 @@ class FakeDockerDriver:
         #   "processing": prompt text the agent has committed and is working on
         self._agent_state: dict[str, dict[str, str | None]] = {}
 
+        # --- Blocking interactive option-screen model (lead-q3uy) ---
+        # container_name -> {"content": str, "escapable": bool,
+        #                    "dismissed": bool}.  When present and not yet
+        # dismissed, the option screen BLOCKS the input prompt: capture_pane
+        # returns its rendered content and any text send-keys is absorbed by
+        # the screen (not buffered into the agent input).  A discrete Escape
+        # send-keys dismisses an escapable screen; a non-escapable screen is
+        # never dismissed by Escape.
+        self._option_screen: dict[str, dict] = {}
+
         # --- Messaging readiness / beads / health simulation ---
         # Messaging reachability is modelled as reachable-by-default so that
         # existing launch scenarios (which configure a host SHOPMSG_DSN but
@@ -468,6 +478,35 @@ class FakeDockerDriver:
 
     def set_tmux_pane_content(self, container_name: str, content: str) -> None:
         self._tmux_pane[container_name] = content
+
+    def simulate_option_screen(
+        self,
+        container_name: str,
+        content: str,
+        *,
+        escapable: bool,
+    ) -> None:
+        """Model a blocking interactive option screen present on engage.
+
+        lead-q3uy — after the input-ready marker but before the startup prompt
+        is submitted, the agent runtime presents a blocking interactive option
+        screen.  The launcher reads the rendered pane via ``capture_pane`` to
+        classify it.  ``content`` is the rendered screen text the launcher
+        captures; ``escapable`` records whether the screen advertises an
+        Escape/dismiss affordance.
+
+        Faithful submit semantics: while the option screen is present it
+        BLOCKS the input prompt, so any text send-keys is absorbed by the
+        screen rather than landing in the agent's input buffer.  A discrete
+        ``Escape`` send-keys DISMISSES an escapable screen (after which the
+        input prompt is reachable again and a text+Enter submit commits as
+        normal).  A non-escapable screen is NOT dismissed by Escape.
+        """
+        self._option_screen[container_name] = {
+            "content": content,
+            "escapable": escapable,
+            "dismissed": False,
+        }
 
     def set_mounts(self, container_name: str, mounts: list[ContainerMount]) -> None:
         self._mounts[container_name] = mounts
@@ -929,6 +968,30 @@ class FakeDockerDriver:
             return True
         return False
 
+    def capture_pane(
+        self, container_name: str, tmux_session: str
+    ) -> str:
+        """One-shot pane capture (lead-q3uy).
+
+        Records the call (as a capture-pane exec) so tests can assert the
+        engage path read the pane, and returns the blocking option screen's
+        rendered content when one is present and not yet dismissed; otherwise
+        falls back to whatever pane content was configured.
+        """
+        self._op_seq += 1
+        self.exec_calls.append(
+            ExecCall(
+                container=container_name,
+                command=["tmux", "capture-pane", "-p", "-t", tmux_session],
+                user="vscode",
+                env=None,
+            )
+        )
+        screen = self._option_screen.get(container_name)
+        if screen and not screen.get("dismissed"):
+            return screen["content"]
+        return self._tmux_pane.get(container_name, "")
+
     def wait_for_pane_marker(
         self,
         container_name: str,
@@ -1161,6 +1224,21 @@ class FakeDockerDriver:
             state = self._agent_state.setdefault(
                 container_name, {"buffer": None, "processing": None}
             )
+
+            # lead-q3uy — a present, not-yet-dismissed blocking option screen
+            # intercepts keystrokes.  A discrete Escape send-keys DISMISSES an
+            # escapable screen (after which the input prompt is reachable
+            # again); any other keystream is absorbed by the screen and does
+            # NOT reach the agent input buffer.  A non-escapable screen is not
+            # dismissed by Escape.
+            screen = self._option_screen.get(container_name)
+            if screen and not screen.get("dismissed"):
+                if payload == ["Escape"] and screen.get("escapable"):
+                    screen["dismissed"] = True
+                # Whether dismissed or not, the screen consumed this keystream;
+                # nothing lands in the agent input buffer.
+                return subprocess.CompletedProcess(command, 0, "", "")
+
             if payload and payload[-1] == "Enter":
                 text_tokens = payload[:-1]
                 text = " ".join(text_tokens)

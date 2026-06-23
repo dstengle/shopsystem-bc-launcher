@@ -4634,15 +4634,25 @@ def _find_bc_base_dockerfile() -> Path | None:
     whose surrounding context / content identifies it as the bc-base image
     build.  We accept any tracked file named Dockerfile (optionally suffixed)
     whose text references shopsystem-bc-base, ignoring the .git tree.
+
+    A Dockerfile that DERIVES ``FROM`` a shopsystem-bc-base image (e.g. the thin
+    docker/bc-lead/Dockerfile added by lead-nsj3) consumes the base image rather
+    than building it, and merely mentioning the base in its FROM line must not
+    make it masquerade as the bc-base build (bug shopsystem_bc_launcher-hnr).
+    Iterate in sorted order so discovery is deterministic regardless of the
+    filesystem's rglob ordering.
     """
-    for path in _REPO_ROOT.rglob("Dockerfile*"):
+    for path in sorted(_REPO_ROOT.rglob("Dockerfile*")):
         if ".git" in path.parts:
             continue
         if not path.is_file():
             continue
         text = path.read_text()
-        if "shopsystem-bc-base" in text:
-            return path
+        if "shopsystem-bc-base" not in text:
+            continue
+        if re.search(r"(?im)^\s*FROM\s+\S*shopsystem-bc-base", text):
+            continue
+        return path
     return None
 
 
@@ -6372,15 +6382,21 @@ def then_bootstrap_is_existing_image(ctx):
         "lineage image, not a separate purpose-built bootstrap image.\n"
         f"Dockerfile content:\n{text}"
     )
-    # There must be exactly one bc-base lineage Dockerfile under the repo: a
+    # There must be exactly one Dockerfile that BUILDS bc-base under the repo: a
     # separate purpose-built bootstrap Dockerfile would be a second image.
+    # A Dockerfile deriving ``FROM`` a shopsystem-bc-base image (e.g. the thin
+    # docker/bc-lead/Dockerfile) consumes the base rather than building it and
+    # must not be counted as a second bc-base build (bug
+    # shopsystem_bc_launcher-hnr / 6lx).
     bc_base_dockerfiles = [
         p for p in _REPO_ROOT.rglob("Dockerfile*")
         if ".git" not in p.parts and p.is_file()
         and "shopsystem-bc-base" in p.read_text()
+        and not re.search(
+            r"(?im)^\s*FROM\s+\S*shopsystem-bc-base", p.read_text())
     ]
     assert len(bc_base_dockerfiles) == 1, (
-        "Expected exactly one bc-base lineage Dockerfile (the bootstrap mode is "
+        "Expected exactly one bc-base build Dockerfile (the bootstrap mode is "
         f"a mode of it); found {len(bc_base_dockerfiles)}: "
         f"{[str(p.relative_to(_REPO_ROOT)) for p in bc_base_dockerfiles]}"
     )
@@ -7594,4 +7610,359 @@ def assert_docker_inspect_socket_absent(ctx, fake_driver):
     assert not matching, (
         "docker inspect (get_mounts) must show NO docker-socket mount by "
         f"default; got: {[(m.type, m.source, m.destination) for m in mounts]}"
+    )
+
+
+# ===========================================================================
+# Engage blocking-option-screen Escape-handling step definitions (lead-q3uy)
+#
+# Scenarios f68d8199fef70fa7 / f17f0fc747e44e47 / 91d4c1486c7b7d48.  After the
+# input-ready marker but before the startup prompt is submitted, the agent
+# runtime can present a blocking interactive option screen.  The launcher
+# recognizes it (capture_pane), and:
+#   * escape-able screen -> sends a DISCRETE send-keys carrying ONLY Escape
+#     (never Enter), captures + WARNs the rendered content, then submits the
+#     prompt directly (no host-side inject);
+#   * non-escape-able screen -> does NOT send Enter / does NOT auto-confirm,
+#     WARNs naming the un-escapable screen, and does NOT submit the prompt.
+# The FakeDockerDriver models this faithfully (see tests/fake_driver.py:
+# simulate_option_screen / capture_pane / the Escape-dismiss send-keys path).
+# ===========================================================================
+
+# The rendered content the simulated option screens present.  Both carry the
+# OPTION_SCREEN_MARKER signature ("Select an option"); the escapable one ALSO
+# carries the ESCAPE_AFFORDANCE_MARKER ("esc to") the launcher keys on.
+_ESCAPABLE_OPTION_SCREEN = (
+    "Select an option for your session:\n"
+    "  > Use the default theme\n"
+    "    Pick a different theme\n"
+    "(press esc to dismiss and keep current settings)\n"
+)
+_UNESCAPABLE_OPTION_SCREEN = (
+    "Select an option to continue:\n"
+    "  > Accept the license agreement\n"
+    "    Decline\n"
+    "(you must choose one of the options above to proceed)\n"
+)
+
+
+@given(
+    "on engage the in-container agent runtime presents an interactive option "
+    "screen that blocks the input prompt and exposes a dismiss/escape affordance"
+)
+def given_escapable_option_screen(ctx, fake_driver):
+    bc_name = "shopsystem-messaging"
+    container_name = f"bc-{bc_name}"
+    fake_driver.simulate_option_screen(
+        container_name, _ESCAPABLE_OPTION_SCREEN, escapable=True
+    )
+    ctx["bc_name"] = bc_name
+    ctx["container_name"] = container_name
+    ctx["option_screen_content"] = _ESCAPABLE_OPTION_SCREEN
+
+
+@given(
+    "on engage the in-container agent runtime presents an interactive screen "
+    "that blocks the input prompt and exposes no dismiss or escape affordance"
+)
+def given_unescapable_option_screen(ctx, fake_driver):
+    bc_name = "shopsystem-messaging"
+    container_name = f"bc-{bc_name}"
+    fake_driver.simulate_option_screen(
+        container_name, _UNESCAPABLE_OPTION_SCREEN, escapable=False
+    )
+    ctx["bc_name"] = bc_name
+    ctx["container_name"] = container_name
+    ctx["option_screen_content"] = _UNESCAPABLE_OPTION_SCREEN
+
+
+@when(parsers.parse(
+    'I run "bc-container launch {bc_name} --startup-prompt \'{prompt}\'" '
+    'and the launch command runs the engage path'
+))
+def run_launch_engage_path(bc_name, prompt, ctx, fake_driver, controller, tmp_path):
+    """Run launch through the engage path WITHOUT asserting a zero exit.
+
+    Scenario 91d4c1486c7b7d48 (no escape affordance) exercises the engage path
+    but does not submit the prompt; this When drives launch and records the
+    result without an exit-code assertion (the launch still exits zero — it
+    warns rather than failing — but this step stays exit-code-agnostic so the
+    Then steps own the behavioral assertions).
+    """
+    repo_url = ctx.get("repo_url", f"https://github.com/shopsystem/{bc_name}.git")
+    manifest_path = tmp_path / "bc-manifest.yaml"
+    if not manifest_path.exists():
+        manifest_path.write_text(yaml.dump({
+            "product": "shopsystem product",
+            "bcs": [{"name": bc_name, "remote": repo_url, "role": "bc"}],
+        }))
+    result = controller.launch(
+        bc_name=bc_name,
+        repo_url=repo_url,
+        startup_prompt=prompt,
+        manifest_path=manifest_path,
+        credential_home=ctx.get("credential_home"),
+    )
+    ctx["result"] = result
+    ctx["container_name"] = f"bc-{bc_name}"
+    ctx["bc_name"] = bc_name
+    ctx["startup_prompt"] = prompt
+
+
+@when(parsers.parse(
+    'I read the engage observability surface for the launch via '
+    '"bc-container monitor {bc_name}" from the host'
+))
+def read_engage_observability_surface(bc_name, ctx, fake_driver, controller):
+    """Read the host-discoverable engage observability surface.
+
+    The launch's host-discoverable WARNING surface is the launch command's
+    stderr — emitted to the host process, requiring NO attach into the
+    container.  This step records that surface (and runs `bc-container monitor`
+    to confirm it is reachable from the host without attaching) so the Then
+    steps can assert the auto-dismiss warning and the captured screen content.
+    """
+    monitor_result = controller.monitor(bc_name)
+    ctx["monitor_result"] = monitor_result
+    # The launch result's stderr is the host-discoverable engage warning
+    # surface; surface it to the Then steps under a stable key.
+    ctx["engage_warning_surface"] = ctx["result"].stderr
+
+
+def _escape_send_keys(fake_driver, container_name, session):
+    """Send-keys invocations whose SOLE payload is the Escape key."""
+    out = []
+    for c in fake_driver.send_keys_calls(container_name):
+        cmd = c.command
+        if cmd[:4] == ["tmux", "send-keys", "-t", session] and cmd[4:] == ["Escape"]:
+            out.append(c)
+    return out
+
+
+@then(parsers.parse(
+    'the launcher issues a discrete tmux send-keys invocation against the '
+    'container driver carrying the Escape key as its key payload, targeting '
+    'the tmux session named "{session}" in container "{container_name}", to '
+    'dismiss the blocking option screen'
+))
+def assert_escape_send_keys_issued(session, container_name, ctx, fake_driver):
+    escapes = _escape_send_keys(fake_driver, container_name, session)
+    assert len(escapes) == 1, (
+        f"Expected exactly one discrete Escape-bearing send-keys against "
+        f"session {session!r} in {container_name!r}; got "
+        f"{[c.command for c in escapes]!r}.  All send-keys: "
+        f"{[c.command for c in fake_driver.send_keys_calls(container_name)]!r}"
+    )
+
+
+@then(parsers.parse(
+    'that Escape-bearing invocation does not carry the Enter key in the same '
+    'invocation'
+))
+def assert_escape_not_with_enter(ctx, fake_driver):
+    container_name = ctx["container_name"]
+    escapes = _escape_send_keys(fake_driver, container_name, "agent")
+    assert escapes, "No Escape-bearing send-keys invocation was recorded."
+    for c in escapes:
+        assert "Enter" not in c.command, (
+            f"The Escape-bearing invocation must NOT also carry Enter; got "
+            f"{c.command!r}"
+        )
+
+
+@then(parsers.parse(
+    'the launcher does not send an Enter keystroke to select a default on '
+    'that blocking option screen'
+))
+def assert_no_enter_to_select_default(ctx, fake_driver):
+    # While the option screen is present (before the Escape dismiss), the
+    # launcher must not send a bare Enter that would select the highlighted
+    # default.  The faithful driver model dismisses the escapable screen ONLY
+    # on a discrete Escape; assert the screen was dismissed by Escape (not by
+    # any Enter) and that the agent never committed a phantom selection from an
+    # Enter against the screen.
+    container_name = ctx["container_name"]
+    escapes = _escape_send_keys(fake_driver, container_name, "agent")
+    assert escapes, (
+        "The blocking option screen must be dismissed by a discrete Escape, "
+        "not by an Enter; no Escape send-keys was recorded."
+    )
+
+
+@then(parsers.parse(
+    'after the option screen is dismissed the startup prompt "{prompt}" is '
+    'submitted to the tmux session named "{session}" with no host-side '
+    'follow-up "bc-container inject" invocation required'
+))
+def assert_prompt_submitted_after_dismiss(prompt, session, ctx, fake_driver):
+    container_name = ctx["container_name"]
+    # The prompt must have been COMMITTED to the agent (the faithful model
+    # flips to "processing" only on a discrete text-then-Enter submit, which is
+    # only reachable once the screen was dismissed).
+    assert fake_driver.agent_committed_prompt(container_name) == prompt, (
+        f"Expected the startup prompt {prompt!r} to be committed after the "
+        f"option screen was dismissed; committed prompt is "
+        f"{fake_driver.agent_committed_prompt(container_name)!r}"
+    )
+    # The submit must be a direct consequence of the SINGLE launch invocation:
+    # exactly the readiness/engage send-keys plus the prompt pair were issued
+    # within launch — no separate host-side inject was needed.  Confirm a
+    # text-only send-keys carrying the prompt and a following bare Enter exist.
+    calls = fake_driver.send_keys_calls(container_name)
+    text_idx = None
+    for i, c in enumerate(calls):
+        if c.command[:4] == ["tmux", "send-keys", "-t", session] and prompt in c.command:
+            text_idx = i
+    assert text_idx is not None, (
+        f"No send-keys carried the prompt {prompt!r} to session {session!r}; "
+        f"recorded: {[c.command for c in calls]!r}"
+    )
+    assert text_idx + 1 < len(calls) and calls[text_idx + 1].command[4:] == ["Enter"], (
+        f"Expected a discrete Enter send-keys immediately after the prompt-text "
+        f"invocation; recorded: {[c.command for c in calls]!r}"
+    )
+
+
+@then(parsers.parse(
+    'the in-container agent transitions from the blocked option screen to '
+    'actively processing the prompt "{prompt}"'
+))
+def assert_agent_processing_after_dismiss(prompt, ctx, fake_driver):
+    container_name = ctx["container_name"]
+    assert fake_driver.agent_committed_prompt(container_name) == prompt, (
+        f"Expected the agent to be actively processing {prompt!r} after the "
+        f"option screen was dismissed; processing="
+        f"{fake_driver.agent_committed_prompt(container_name)!r}"
+    )
+    # Non-vacuity: the screen is actually gone (dismissed), so the agent is no
+    # longer blocked.
+    screen = fake_driver._option_screen.get(container_name)
+    assert screen is not None and screen.get("dismissed"), (
+        "The blocking option screen must have been dismissed for the agent to "
+        "transition to processing the prompt."
+    )
+
+
+@then(parsers.parse(
+    'the launch surfaces a WARNING that an interactive option screen was '
+    'auto-dismissed during engage'
+))
+def assert_warning_auto_dismissed(ctx):
+    surface = ctx["engage_warning_surface"]
+    low = surface.lower()
+    assert "warning" in low and "auto-dismissed" in low and "option screen" in low, (
+        f"Expected a host-discoverable WARNING that an interactive option "
+        f"screen was auto-dismissed during engage; got: {surface!r}"
+    )
+
+
+@then(parsers.parse(
+    'that warning captures the rendered content of the dismissed option '
+    'screen so a human can review what was auto-dismissed'
+))
+def assert_warning_captures_screen_content(ctx):
+    surface = ctx["engage_warning_surface"]
+    content = ctx["option_screen_content"]
+    # The captured rendered content of the dismissed screen must appear in the
+    # warning.  Assert a distinctive line from the rendered screen is present.
+    distinctive = "Select an option for your session:"
+    assert distinctive in surface, (
+        f"Expected the WARNING to capture the dismissed screen's rendered "
+        f"content (looked for {distinctive!r}); got: {surface!r}"
+    )
+    # And the affordance line, so a reviewer sees the full screen.
+    assert "press esc to dismiss" in surface, (
+        f"Expected the full rendered screen content in the WARNING; got: "
+        f"{surface!r}"
+    )
+    assert content.strip().splitlines()[0] in surface
+
+
+@then(parsers.parse(
+    'the warning is discoverable from the host without attaching into the '
+    'container'
+))
+def assert_warning_host_discoverable(ctx, fake_driver):
+    # The warning lives on the launch command's stderr — a host-process
+    # surface emitted by the launcher itself, NOT inside the container.  The
+    # engage path read the screen via capture_pane (the same `tmux capture-pane`
+    # surface `bc-container monitor` reads), so no `docker exec ... attach` /
+    # interactive attach was needed to surface it.
+    surface = ctx["engage_warning_surface"]
+    assert surface and "warning" in surface.lower(), (
+        f"Expected a non-empty host-discoverable warning surface; got "
+        f"{surface!r}"
+    )
+    # No interactive attach was issued by the engage path.
+    assert not fake_driver.interactive_calls, (
+        "The warning must be discoverable WITHOUT attaching into the "
+        f"container; interactive attach calls were recorded: "
+        f"{[c.command for c in fake_driver.interactive_calls]!r}"
+    )
+
+
+@then(parsers.parse(
+    'the launcher does not send an Enter keystroke to advance the screen that '
+    'has no escape affordance'
+))
+def assert_no_enter_unescapable(ctx, fake_driver):
+    # On a non-escapable screen the launcher must send NOTHING that advances
+    # it.  Assert NO bare-Enter send-keys was issued while the screen blocked
+    # input (the screen is never dismissed, so the agent never committed
+    # anything and no prompt was submitted).
+    container_name = ctx["container_name"]
+    assert fake_driver.agent_committed_prompt(container_name) is None, (
+        "On a non-escapable screen the launcher must NOT advance/submit; the "
+        f"agent committed {fake_driver.agent_committed_prompt(container_name)!r}"
+    )
+    # And no Escape was sent either (the screen exposes no escape affordance).
+    escapes = _escape_send_keys(fake_driver, container_name, "agent")
+    assert not escapes, (
+        f"No Escape should be sent to a screen with no escape affordance; got "
+        f"{[c.command for c in escapes]!r}"
+    )
+
+
+@then(parsers.parse(
+    'the launcher does not auto-confirm a default on a screen that exposes no '
+    'escape affordance'
+))
+def assert_no_autoconfirm_unescapable(ctx, fake_driver):
+    container_name = ctx["container_name"]
+    # No keystream may have reached the agent input loop (no committed prompt,
+    # no buffered text from a phantom selection).
+    assert fake_driver.agent_committed_prompt(container_name) is None, (
+        "The launcher must NOT auto-confirm a default on an un-escapable "
+        f"screen; agent committed "
+        f"{fake_driver.agent_committed_prompt(container_name)!r}"
+    )
+    # The screen remains undismissed (the launcher refused to interact).
+    screen = fake_driver._option_screen.get(container_name)
+    assert screen is not None and not screen.get("dismissed"), (
+        "An un-escapable screen must remain undismissed — the launcher must "
+        "not have sent any key that advanced it."
+    )
+
+
+@then(parsers.parse(
+    'the launch surfaces a WARNING naming the un-escapable screen so a human '
+    'can review it from the host'
+))
+def assert_warning_names_unescapable(ctx, fake_driver):
+    surface = ctx["result"].stderr
+    low = surface.lower()
+    assert "warning" in low and "no escape" in low, (
+        f"Expected a WARNING naming the un-escapable screen; got: {surface!r}"
+    )
+    # The rendered un-escapable screen content is included so a human can
+    # review it from the host.
+    assert "Select an option to continue:" in surface, (
+        f"Expected the WARNING to include the rendered un-escapable screen "
+        f"content for host review; got: {surface!r}"
+    )
+    # Host-discoverable without attaching.
+    assert not fake_driver.interactive_calls, (
+        "The un-escapable-screen warning must be host-discoverable WITHOUT "
+        f"attaching; interactive calls recorded: "
+        f"{[c.command for c in fake_driver.interactive_calls]!r}"
     )

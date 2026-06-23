@@ -258,6 +258,39 @@ CLAUDE_READY_MARKER = "Accessing workspace:"
 CLAUDE_INPUT_READY_MARKER = "bypass permissions on"
 CLAUDE_READINESS_TIMEOUT_SECONDS = 60.0
 
+# ---------------------------------------------------------------------------
+# Blocking interactive option-screen handling on engage (lead-q3uy)
+# ---------------------------------------------------------------------------
+#
+# After the input-ready marker is observed (step 4) but BEFORE the startup
+# prompt is submitted (step 5), the in-container agent runtime can present a
+# blocking interactive option screen (e.g. a "select an option" / settings /
+# theme chooser) that absorbs keystrokes — so a naive prompt submission would
+# be eaten by the screen instead of reaching the input prompt.  The launcher
+# captures the pane at this point and recognizes a blocking option screen by
+# the OPTION_SCREEN_MARKER signature.
+#
+# Disposition (lead-q3uy):
+#   * If the captured screen ALSO carries an ESCAPE_AFFORDANCE_MARKER (the
+#     screen advertises an Escape/dismiss key), send a DISCRETE tmux send-keys
+#     carrying ONLY the Escape key (NEVER Enter) to dismiss it, CAPTURE the
+#     rendered screen content, log it as a host-discoverable WARNING (the same
+#     launch-stderr surface every other engage warning uses), then proceed to
+#     submit the startup prompt directly — no host-side `bc-container inject`.
+#   * If the screen exposes NO escape affordance, do NOT send Enter and do NOT
+#     auto-confirm a default (pressing Enter would blindly select whatever
+#     option is highlighted); instead surface a WARNING NAMING the un-escapable
+#     screen so a human can review it from the host, and do NOT submit the
+#     prompt into a screen that would swallow it.
+#
+# Detection keys on rendered-pane substrings, mirroring the existing
+# CLAUDE_*_MARKER readiness-marker idiom rather than inventing a new seam.  The
+# ESCAPE key NAME is the tmux key-name token sent as the SOLE send-keys payload
+# (a discrete pty write that the TUI processes as a single Escape keypress).
+OPTION_SCREEN_MARKER = "Select an option"
+ESCAPE_AFFORDANCE_MARKER = "esc to"
+ESCAPE_KEY_NAME = "Escape"
+
 
 def _container_name(bc_name: str) -> str:
     return f"bc-{bc_name}"
@@ -1529,6 +1562,67 @@ class BcContainerController:
                     stdout="".join(out_lines),
                     stderr="".join(err_lines),
                 )
+            # Step 4b: blocking interactive option-screen handling (lead-q3uy).
+            #
+            # After the input-ready marker but BEFORE the prompt is submitted,
+            # the agent runtime can present a blocking interactive option
+            # screen that absorbs keystrokes.  Capture the pane ONCE and
+            # classify it:
+            #   * recognized blocking option screen WITH an escape affordance →
+            #     send a DISCRETE send-keys carrying ONLY the Escape key (never
+            #     Enter — and never an Enter to "select a default"), capture the
+            #     dismissed screen's content, log it as a host-discoverable
+            #     WARNING, then fall through to submit the prompt directly;
+            #   * recognized blocking option screen with NO escape affordance →
+            #     do NOT send Enter / do NOT auto-confirm a default; surface a
+            #     WARNING naming the un-escapable screen and do NOT submit the
+            #     prompt (which the screen would swallow);
+            #   * no blocking option screen → proceed to submit as normal.
+            pane = self._driver.capture_pane(container, AGENT_TMUX_SESSION)
+            if OPTION_SCREEN_MARKER in pane:
+                if ESCAPE_AFFORDANCE_MARKER in pane:
+                    # Capture the rendered content BEFORE dismissing, so the
+                    # WARNING records exactly what was auto-dismissed.
+                    dismissed_content = pane
+                    # Discrete send-keys carrying ONLY the Escape key payload —
+                    # NOT Enter, and NOT a text+Enter pair.  This dismisses the
+                    # escape-able screen without selecting any default option.
+                    self._driver.exec_run(
+                        container,
+                        ["tmux", "send-keys", "-t", AGENT_TMUX_SESSION,
+                         ESCAPE_KEY_NAME],
+                        user=AGENT_CONTAINER_USER,
+                    )
+                    err_lines.append(
+                        "warning: an interactive option screen was "
+                        "auto-dismissed during engage (sent Escape to the "
+                        f"tmux session {AGENT_TMUX_SESSION!r}); rendered "
+                        "content of the dismissed screen follows so a human "
+                        "can review what was auto-dismissed (lead-q3uy):\n"
+                        f"{dismissed_content}\n"
+                    )
+                    out_lines.append(
+                        "Auto-dismissed a blocking interactive option screen "
+                        "with Escape during engage (lead-q3uy)\n"
+                    )
+                else:
+                    # No escape affordance: refuse to auto-confirm.  Pressing
+                    # Enter here would blindly select whatever option is
+                    # highlighted, so send NOTHING and do NOT submit the prompt.
+                    err_lines.append(
+                        "warning: engage encountered a blocking interactive "
+                        "screen with NO escape/dismiss affordance; the launcher "
+                        "did NOT send Enter and did NOT auto-confirm a default; "
+                        "the startup prompt was NOT submitted.  Un-escapable "
+                        "screen content follows so a human can review it from "
+                        f"the host (lead-q3uy):\n{pane}\n"
+                    )
+                    return CommandResult(
+                        exit_code=0,
+                        stdout="".join(out_lines),
+                        stderr="".join(err_lines),
+                    )
+
             # Step 5: inject the startup prompt into Claude Code's input.
             #
             # Two DISCRETE send-keys invocations (text first, Enter second),
