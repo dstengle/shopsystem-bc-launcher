@@ -46,7 +46,7 @@ RUN pip install --no-cache-dir \
     "shopsystem-messaging @ git+https://github.com/dstengle/shopsystem-messaging.git@v0.4.0" \
     "scenarios @ git+https://github.com/dstengle/shopsystem-scenarios@v0.2.0" \
     "shop-templates @ git+https://github.com/dstengle/shopsystem-templates.git@${SHOP_TEMPLATES_VERSION}" \
-    "shopsystem-bc-launcher @ git+https://github.com/dstengle/shopsystem-bc-launcher.git@v0.3.6"
+    "shopsystem-bc-launcher @ git+https://github.com/dstengle/shopsystem-bc-launcher.git@v0.3.8"
 
 # agent-vault — the in-container broker client (bclaunch-9rr). The agent runs
 # wrapped as `agent-vault run -- claude`; agent-vault establishes the proxy
