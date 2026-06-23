@@ -267,6 +267,52 @@ class FakeDockerDriver:
         # the prompt no matter how many Escapes are sent, so the input-ready
         # marker is NEVER observed — exercising the bounded-timeout path.
         self._readiness_prompt: dict[str, dict] = {}
+
+        # --- Self-advance readiness model (lead-gw9v / lead-c713) -----------
+        # Models how the in-container agent runtime resolves the
+        # workspace-trust gate during the INITIAL readiness wait, for the three
+        # cases the lead-gw9v scenarios pin:
+        #
+        #   "self_advance" — bc-base bakes `bypassPermissionsModeAccepted`, so
+        #       claude self-advances past the workspace-trust prompt straight to
+        #       the input-ready marker "bypass permissions on".  The transient
+        #       PRE-trust banner "Accessing workspace:" is NEVER caught by the
+        #       launcher's polling (banner wait times out), but the pane is
+        #       ALREADY at input-ready: capture_pane returns the input-ready
+        #       marker and wait_for_pane_marker(input-ready) succeeds.  The
+        #       launcher must treat the agent as up and SKIP the trust-accept
+        #       Enter.
+        #
+        #   "pre_trust" — the agent first renders the transient banner
+        #       "Accessing workspace:" (banner wait succeeds); the input-ready
+        #       marker becomes observable only AFTER a trust-accept Enter is
+        #       sent.  Until the trust-accept Enter is sent, neither the
+        #       input-ready marker is observable nor does capture_pane show it.
+        #
+        #   "neither" — the agent comes up wedged: the banner is never observed
+        #       (banner wait times out) AND the input-ready marker is never
+        #       observed within the readiness timeout (input-ready wait times
+        #       out, capture_pane never shows it).  The launcher must warn and
+        #       abort non-zero WITHOUT injecting.
+        #
+        # container_name -> mode string.  Absent means "use the default model"
+        # (both markers observable by default), preserving every pre-existing
+        # launch scenario.
+        self._self_advance_mode: dict[str, str] = {}
+        # Per-container flag set once the input-ready marker has been observed
+        # (via a successful input-ready marker wait OR a self-advance capture).
+        # A bare-Enter send-keys issued BEFORE this flag is set, while a
+        # self-advance mode is configured, is the trust-accept Enter (the
+        # claude-launch keystream is a text+Enter call, not a bare Enter, and
+        # the prompt-submit Enter arrives only AFTER input-ready is observed).
+        self._input_ready_observed: set[str] = set()
+        # Per-container count of trust-accept Enter keystrokes the launcher
+        # sent — recognised as a bare Enter send-keys issued while the agent's
+        # input buffer is EMPTY (the trust-accept Enter commits nothing; the
+        # two-call submit's second Enter arrives with the prompt text buffered).
+        # The self-advance scenario asserts this is ZERO (Enter SKIPPED); the
+        # pre-trust scenario asserts it is >= 1 (Enter SENT).
+        self._trust_accept_enter_count: dict[str, int] = {}
         # lead-cw7m — simulated monotonic clock backing self.monotonic(), used
         # by the controller's bounded readiness-wait scan-dismiss loop so the
         # never-clears bounded-timeout path terminates without real sleeping.
@@ -593,6 +639,38 @@ class FakeDockerDriver:
             "dismissed": False,
             "escape_count": 0,
         }
+
+    def simulate_self_advance_readiness(
+        self, container_name: str, mode: str
+    ) -> None:
+        """Model how the agent resolves the workspace-trust gate during the
+        INITIAL readiness wait (lead-gw9v).
+
+        ``mode`` is one of:
+          * "self_advance" — claude self-advanced past trust straight to the
+            input-ready marker; the transient banner is never caught.
+          * "pre_trust" — the transient trust banner is rendered first; the
+            input-ready marker becomes observable only after a trust-accept
+            Enter is sent.
+          * "neither" — neither marker is reached within the readiness timeout.
+
+        See the ``_self_advance_mode`` field doc for the full per-mode
+        wait/capture semantics this drives.
+        """
+        assert mode in ("self_advance", "pre_trust", "neither"), mode
+        self._self_advance_mode[container_name] = mode
+        self._trust_accept_enter_count.setdefault(container_name, 0)
+
+    def trust_accept_enter_count(self, container_name: str) -> int:
+        """How many trust-accept Enter keystrokes the launcher sent during the
+        readiness wait (lead-gw9v).
+
+        Recognised as a bare Enter send-keys issued while the agent input
+        buffer is empty (the trust-accept Enter commits nothing).  ZERO in the
+        self-advance case (Enter SKIPPED); >= 1 in the pre-trust case (Enter
+        SENT).
+        """
+        return self._trust_accept_enter_count.get(container_name, 0)
 
     def monotonic(self) -> float:
         """Deterministic, strictly-advancing monotonic clock for tests
@@ -1142,6 +1220,33 @@ class FakeDockerDriver:
             # screen and returning from launch" — not the earlier engage keys.
             screen["detected"] = True
             return screen["content"]
+        # lead-gw9v — self-advance readiness modes drive the pane the launcher
+        # captures during the initial readiness wait.
+        mode = self._self_advance_mode.get(container_name)
+        if mode is not None:
+            from bc_launcher.controller import CLAUDE_INPUT_READY_MARKER
+            if mode == "self_advance":
+                # The agent self-advanced past trust: the pane is ALREADY at
+                # the input-ready marker (no transient banner), so the launcher
+                # can detect input-ready from the capture and skip the
+                # trust-accept Enter.
+                self._input_ready_observed.add(container_name)
+                return (
+                    "claude is ready\n"
+                    f"{CLAUDE_INPUT_READY_MARKER}\n"
+                )
+            if mode == "pre_trust":
+                # Before the trust-accept Enter, the pane shows the transient
+                # trust banner (NOT the input-ready marker).  After trust is
+                # accepted, the input-ready marker is observable via the marker
+                # wait; the capture here is not relied upon on that path.
+                if self._trust_accept_enter_count.get(container_name, 0) >= 1:
+                    return f"{CLAUDE_INPUT_READY_MARKER}\n"
+                return "Accessing workspace:\nQuick safety check\n"
+            if mode == "neither":
+                # Wedged: neither the banner nor the input-ready marker is
+                # ever present.
+                return "agent is still booting; no input prompt yet\n"
         return self._tmux_pane.get(container_name, "")
 
     def wait_for_pane_marker(
@@ -1169,7 +1274,10 @@ class FakeDockerDriver:
         self.wait_for_marker_calls.append((container_name, tmux_session, marker))
 
         key = (container_name, tmux_session, marker)
-        from bc_launcher.controller import CLAUDE_INPUT_READY_MARKER
+        from bc_launcher.controller import (
+            CLAUDE_INPUT_READY_MARKER,
+            CLAUDE_READY_MARKER,
+        )
         if marker == CLAUDE_INPUT_READY_MARKER:
             self._last_input_ready_wait_op[container_name] = self._op_seq
             # lead-cw7m — a blocking readiness-wait prompt prevents the agent
@@ -1180,6 +1288,33 @@ class FakeDockerDriver:
             rp = self._readiness_prompt.get(container_name)
             if rp is not None and not rp.get("dismissed"):
                 return False
+
+        # lead-gw9v — self-advance readiness modes.  Resolve the workspace-trust
+        # gate per the configured mode (see ``_self_advance_mode`` doc).
+        mode = self._self_advance_mode.get(container_name)
+        if mode is not None:
+            if marker == CLAUDE_READY_MARKER:
+                # The transient PRE-trust banner is observed FIRST only in the
+                # pre-trust mode; in self-advance and neither modes it is never
+                # caught by polling.
+                return mode == "pre_trust"
+            if marker == CLAUDE_INPUT_READY_MARKER:
+                if mode == "self_advance":
+                    # Already at input-ready; the marker is observable now.
+                    self._input_ready_observed.add(container_name)
+                    return True
+                if mode == "neither":
+                    # Never reaches input-ready within the readiness timeout.
+                    return False
+                if mode == "pre_trust":
+                    # Input-ready becomes observable only AFTER the trust-accept
+                    # Enter has been sent.
+                    observed = self._trust_accept_enter_count.get(
+                        container_name, 0
+                    ) >= 1
+                    if observed:
+                        self._input_ready_observed.add(container_name)
+                    return observed
 
         if key in self._marker_timeouts:
             return False
@@ -1449,6 +1584,28 @@ class FakeDockerDriver:
                     # Bare Enter (e.g. trust-accept, the two-call submit's
                     # second invocation, or the empty-text inject workaround):
                     # a discrete submit keypress — commit whatever is buffered.
+                    # lead-gw9v — a BARE Enter send-keys issued BEFORE the
+                    # input-ready marker has been observed, while a self-advance
+                    # mode is configured, is the trust-accept Enter.  Count it
+                    # so the scenarios can assert the launcher SKIPPED it on the
+                    # self-advance path (input-ready observed first, no trust
+                    # Enter) and SENT it on the pre-trust path.  The
+                    # claude-launch keystream is a text+Enter call (not a bare
+                    # Enter); the prompt-submit Enter arrives only AFTER
+                    # input-ready is observed.  This counting is independent of
+                    # the buffer-commit model (Step 1's text+Enter paste leaves
+                    # the claude command buffered, which the trust Enter would
+                    # otherwise "commit" — so the buffer state is NOT a reliable
+                    # discriminator here).
+                    if (
+                        container_name in self._self_advance_mode
+                        and container_name not in self._input_ready_observed
+                    ):
+                        self._trust_accept_enter_count[container_name] = (
+                            self._trust_accept_enter_count.get(
+                                container_name, 0
+                            ) + 1
+                        )
                     if state.get("buffer"):
                         state["processing"] = state["buffer"]
                         state["buffer"] = None

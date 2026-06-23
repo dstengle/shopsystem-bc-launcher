@@ -9242,6 +9242,347 @@ def then_pulled_reports_new_version(image_ref, new, ctx):
     )
 
 
+# ===========================================================================
+# Readiness-wait SELF-ADVANCE step definitions (lead-gw9v / lead-c713)
+#
+# Scenarios e30b15363815abed / f3784811e04a224d / 9fa36102d756a8fb.  During the
+# INITIAL readiness wait the launcher must resolve the workspace-trust gate by
+# polling for EITHER the transient PRE-trust banner "Accessing workspace:"
+# (→ accept trust with Enter → input-ready → inject) OR the input-ready marker
+# "bypass permissions on" already being present because claude self-advanced
+# past the workspace-trust prompt (→ treat agent as up, SKIP the trust-accept
+# Enter, → inject), aborting non-zero ONLY if NEITHER is reached within the
+# readiness timeout.  This fixes the prior hard-gate that aborted with an
+# "agent-startup failure" the instant the transient banner was not caught.
+#
+# These COMPOSE with — and do NOT supersede — lead-cw7m's step-4 auto-dismiss.
+# The FakeDockerDriver models the three modes faithfully (see
+# tests/fake_driver.py: simulate_self_advance_readiness / the
+# wait_for_pane_marker + capture_pane mode blocks / the trust-accept Enter
+# counter).
+# ===========================================================================
+
+_SELF_ADVANCE_STARTUP_PROMPT = "bd prime"
+
+
+def _launch_with_self_advance_mode(ctx, fake_driver, controller, tmp_path, mode):
+    """Configure a self-advance readiness mode and run launch (lead-gw9v).
+
+    Both readiness barriers (messaging DB, agent-vault broker) pass; the
+    workspace-trust gate during the initial readiness wait is resolved per
+    ``mode`` (see fake_driver.simulate_self_advance_readiness).
+    """
+    bc_name = "shopsystem-messaging"
+    container_name = f"bc-{bc_name}"
+    repo_url = f"https://github.com/shopsystem/{bc_name}.git"
+    dsn = _READINESS_DSN
+    fake_driver.set_dsn_reachable(dsn, reachable=True)
+    fake_driver.simulate_self_advance_readiness(container_name, mode)
+    manifest_path = tmp_path / "bc-manifest.yaml"
+    if not manifest_path.exists():
+        manifest_path.write_text(yaml.dump({
+            "product": "shopsystem product",
+            "bcs": [{"name": bc_name, "remote": repo_url, "role": "bc"}],
+        }))
+    result = controller.launch(
+        bc_name=bc_name,
+        repo_url=repo_url,
+        shopmsg_dsn=dsn,
+        startup_prompt=_SELF_ADVANCE_STARTUP_PROMPT,
+        manifest_path=manifest_path,
+        credential_home=ctx.get("credential_home"),
+    )
+    ctx["result"] = result
+    ctx["container_name"] = container_name
+    ctx["bc_name"] = bc_name
+    ctx["startup_prompt"] = _SELF_ADVANCE_STARTUP_PROMPT
+
+
+# --- shared Given: the three readiness modes --------------------------------
+
+@given(parsers.parse(
+    'during the initial readiness wait the in-container agent runtime '
+    'self-advances past the workspace-trust prompt so the agent pane shows the '
+    'input-ready marker "{input_marker}" without the transient workspace-trust '
+    'banner "{banner}" ever being caught by the launcher\'s polling'
+))
+def given_self_advance(input_marker, banner, ctx):
+    ctx["_self_advance_mode"] = "self_advance"
+    ctx["_self_advance_input_marker"] = input_marker
+    ctx["_self_advance_banner"] = banner
+
+
+@given(parsers.parse(
+    'during the initial readiness wait the in-container agent runtime first '
+    'renders the transient workspace-trust banner "{banner}" before reaching '
+    'the input-ready marker "{input_marker}"'
+))
+def given_pre_trust(banner, input_marker, ctx):
+    ctx["_self_advance_mode"] = "pre_trust"
+    ctx["_self_advance_input_marker"] = input_marker
+    ctx["_self_advance_banner"] = banner
+
+
+@given(parsers.parse(
+    'during the initial readiness wait the agent pane never shows the transient '
+    'workspace-trust banner "{banner}" and never shows the input-ready marker '
+    '"{input_marker}" within the readiness timeout'
+))
+def given_neither_marker(banner, input_marker, ctx):
+    ctx["_self_advance_mode"] = "neither"
+    ctx["_self_advance_input_marker"] = input_marker
+    ctx["_self_advance_banner"] = banner
+
+
+# --- shared When ------------------------------------------------------------
+
+@when(parsers.parse(
+    'I run "bc-container launch {bc_name} --startup-prompt \'{prompt}\'" and '
+    'the launch command runs the agent-readiness sequence'
+))
+def when_launch_runs_readiness(bc_name, prompt, ctx, fake_driver, controller, tmp_path):
+    _launch_with_self_advance_mode(
+        ctx, fake_driver, controller, tmp_path, ctx["_self_advance_mode"]
+    )
+
+
+# --- e30b15363815abed: self-advance Then steps ------------------------------
+
+@then(parsers.parse(
+    'the launcher detects that the agent pane is already at the input-ready '
+    'marker "{input_marker}" and treats the agent as up'
+))
+def then_detects_self_advanced(input_marker, ctx, fake_driver):
+    container_name = ctx["container_name"]
+    # Treating the agent as up means launch proceeded to inject and exited zero.
+    assert ctx["result"].exit_code == 0, (
+        f"Expected the launcher to treat the self-advanced agent as up and "
+        f"exit zero; got {ctx['result'].exit_code} / stderr: "
+        f"{ctx['result'].stderr!r}"
+    )
+    committed = fake_driver.agent_committed_prompt(container_name)
+    assert committed == ctx["startup_prompt"], (
+        f"Expected the startup prompt {ctx['startup_prompt']!r} to be injected "
+        f"after detecting input-ready; committed={committed!r}"
+    )
+
+
+@then(parsers.parse(
+    'the launcher does not abort the readiness sequence with an '
+    '"{failure_text}" warning for the transient trust banner "{banner}" not '
+    'being seen'
+))
+def then_no_agent_startup_abort(failure_text, banner, ctx):
+    result = ctx["result"]
+    assert result.exit_code == 0, (
+        f"Expected NO abort (exit zero) on the self-advance path; got "
+        f"{result.exit_code} / stderr: {result.stderr!r}"
+    )
+    assert "agent-startup failure" not in result.stderr, (
+        "The launcher must NOT abort with an 'agent-startup failure' for the "
+        f"transient banner {banner!r} not being seen when the agent has "
+        f"self-advanced to input-ready; stderr: {result.stderr!r}"
+    )
+
+
+@then(parsers.parse(
+    'the launcher does not keep hard-waiting for the transient trust banner '
+    '"{banner}" until the readiness timeout'
+))
+def then_no_hard_wait_for_banner(banner, ctx, fake_driver):
+    container_name = ctx["container_name"]
+    from bc_launcher.controller import (
+        CLAUDE_READY_MARKER,
+        CLAUDE_READINESS_TIMEOUT_SECONDS,
+        READINESS_DISMISS_POLL_SECONDS,
+    )
+    # The banner marker corresponds to CLAUDE_READY_MARKER.
+    assert banner == CLAUDE_READY_MARKER, (
+        f"Scenario banner {banner!r} must be the controller's "
+        f"CLAUDE_READY_MARKER {CLAUDE_READY_MARKER!r}"
+    )
+    banner_waits = [
+        (c, s, m) for (c, s, m) in fake_driver.wait_for_marker_calls
+        if c == container_name and m == CLAUDE_READY_MARKER
+    ]
+    # A bounded poll loop may attempt the banner a FINITE small number of
+    # times, but it must NOT have exhausted the full readiness timeout hard-
+    # waiting for the banner: it broke out on detecting input-ready instead.
+    max_attempts = (
+        CLAUDE_READINESS_TIMEOUT_SECONDS / READINESS_DISMISS_POLL_SECONDS
+    )
+    assert len(banner_waits) < max_attempts, (
+        f"The launcher kept hard-waiting for the banner {banner!r} "
+        f"({len(banner_waits)} attempts >= the full-timeout budget "
+        f"{max_attempts}); it should have detected input-ready and stopped."
+    )
+    # And the launch did NOT time out: it exited zero having injected.
+    assert ctx["result"].exit_code == 0
+
+
+@then(parsers.parse(
+    'the launcher skips the trust-accept Enter keystroke that would otherwise '
+    'be sent to accept the workspace-trust prompt'
+))
+def then_skips_trust_enter(ctx, fake_driver):
+    container_name = ctx["container_name"]
+    assert fake_driver.trust_accept_enter_count(container_name) == 0, (
+        "On the self-advance path the launcher must SKIP the trust-accept "
+        "Enter (the pane is already at input-ready, there is no trust prompt "
+        "to accept); a trust-accept Enter was recorded: "
+        f"{fake_driver.trust_accept_enter_count(container_name)}"
+    )
+
+
+@then(parsers.parse(
+    'the launcher submits the startup prompt "{prompt}" to the tmux session '
+    'named "{session}" in container "{container_name}" with no host-side '
+    'follow-up "{inject_cmd}" invocation required'
+))
+def then_submits_prompt_no_host_inject(
+    prompt, session, container_name, inject_cmd, ctx, fake_driver
+):
+    # The prompt was COMMITTED to the agent within the SINGLE launch
+    # invocation — no separate host-side `bc-container inject` was needed.
+    assert fake_driver.agent_committed_prompt(container_name) == prompt, (
+        f"Expected the startup prompt {prompt!r} to be committed to the agent "
+        f"within launch (BC online, no host-side inject); committed prompt is "
+        f"{fake_driver.agent_committed_prompt(container_name)!r}"
+    )
+    # The submit is a text-only send-keys carrying the prompt followed by a
+    # discrete bare Enter — both issued within this launch.
+    calls = fake_driver.send_keys_calls(container_name)
+    text_idx = None
+    for i, c in enumerate(calls):
+        if c.command[:4] == ["tmux", "send-keys", "-t", session] and prompt in c.command:
+            text_idx = i
+    assert text_idx is not None, (
+        f"No send-keys carried the prompt {prompt!r} to session {session!r}; "
+        f"recorded: {[c.command for c in calls]!r}"
+    )
+    assert text_idx + 1 < len(calls) and calls[text_idx + 1].command[4:] == ["Enter"], (
+        f"Expected a discrete Enter send-keys immediately after the prompt-text "
+        f"invocation; recorded: {[c.command for c in calls]!r}"
+    )
+    # No interactive attach was needed (no host-side inject).
+    assert not fake_driver.interactive_calls, (
+        "Inject must require NO interactive attach / host-side inject; "
+        f"interactive calls: {[c.command for c in fake_driver.interactive_calls]!r}"
+    )
+
+
+@then(parsers.parse(
+    'the launch command exits zero with the BC online unattended'
+))
+def then_exits_zero_online(ctx, fake_driver):
+    assert ctx["result"].exit_code == 0, (
+        f"Expected exit zero (BC online unattended); got "
+        f"{ctx['result'].exit_code} / stderr: {ctx['result'].stderr!r}"
+    )
+    committed = fake_driver.agent_committed_prompt(ctx["container_name"])
+    assert committed == ctx["startup_prompt"], (
+        f"Expected the BC online with the startup prompt {ctx['startup_prompt']!r} "
+        f"committed; committed={committed!r}"
+    )
+
+
+# --- f3784811e04a224d: pre-trust Then steps ---------------------------------
+
+@then(parsers.parse(
+    'the launcher observes the transient workspace-trust banner "{banner}" and '
+    'sends a trust-accept Enter keystroke to the tmux session named "{session}" '
+    'in container "{container_name}"'
+))
+def then_observes_banner_sends_trust_enter(
+    banner, session, container_name, ctx, fake_driver
+):
+    from bc_launcher.controller import CLAUDE_READY_MARKER
+    # The banner marker wait was recorded (the launcher polled for it).
+    banner_waits = [
+        m for (c, _s, m) in fake_driver.wait_for_marker_calls
+        if c == container_name and m == CLAUDE_READY_MARKER
+    ]
+    assert banner_waits, (
+        f"Expected the launcher to poll for the trust banner {banner!r}; "
+        f"recorded waits: {fake_driver.wait_for_marker_calls!r}"
+    )
+    # REGRESSION GUARD: the pre-trust path MUST send the trust-accept Enter.
+    assert fake_driver.trust_accept_enter_count(container_name) >= 1, (
+        "The pre-trust path must SEND the trust-accept Enter to accept the "
+        "workspace-trust prompt; none was recorded."
+    )
+
+
+@then(parsers.parse(
+    'after accepting trust the launcher waits for and observes the input-ready '
+    'marker "{input_marker}"'
+))
+def then_after_trust_observes_input_ready(input_marker, ctx, fake_driver):
+    container_name = ctx["container_name"]
+    from bc_launcher.controller import CLAUDE_INPUT_READY_MARKER
+    assert input_marker == CLAUDE_INPUT_READY_MARKER
+    markers = [
+        m for (c, _s, m) in fake_driver.wait_for_marker_calls
+        if c == container_name
+    ]
+    assert CLAUDE_INPUT_READY_MARKER in markers, (
+        f"Expected an input-ready marker wait for {input_marker!r}; "
+        f"recorded: {markers!r}"
+    )
+    # Input-ready was actually reached (the launch proceeded to inject).
+    assert fake_driver.agent_committed_prompt(container_name) == ctx["startup_prompt"]
+
+
+# --- 9fa36102d756a8fb: neither-marker Then steps ----------------------------
+
+@then(parsers.parse(
+    'the launcher does not submit the startup prompt "{prompt}" to the tmux '
+    'session named "{session}" in container "{container_name}"'
+))
+def then_does_not_submit_prompt(prompt, session, container_name, ctx, fake_driver):
+    # No prompt was committed to the agent, and no send-keys carried the prompt
+    # text — injection was suppressed because input-ready was never reached.
+    assert fake_driver.agent_committed_prompt(container_name) != prompt, (
+        f"The startup prompt {prompt!r} must NOT be submitted when neither "
+        f"readiness marker is reached; it was committed to the agent."
+    )
+    for c in fake_driver.send_keys_calls(container_name):
+        assert prompt not in c.command, (
+            f"A send-keys carried the prompt {prompt!r} despite neither marker "
+            f"being reached: {c.command!r}"
+        )
+
+
+@then(parsers.parse(
+    'the launcher surfaces a host-discoverable WARNING that the agent never '
+    'reached input-ready within the readiness timeout'
+))
+def then_warns_never_reached_input_ready(ctx):
+    surface = ctx["result"].stderr
+    low = surface.lower()
+    assert "warning" in low, (
+        f"Expected a host-discoverable WARNING on the neither-marker path; "
+        f"got stderr: {surface!r}"
+    )
+    assert "input-ready" in low, (
+        f"Expected the WARNING to state the agent never reached input-ready; "
+        f"got stderr: {surface!r}"
+    )
+    assert "timeout" in low or "readiness timeout" in low or "did not become ready" in low, (
+        f"Expected the WARNING to reference the readiness timeout; got stderr: "
+        f"{surface!r}"
+    )
+
+
+@then(parsers.parse('the launch command exits non-zero'))
+def then_exits_non_zero(ctx):
+    assert ctx["result"].exit_code != 0, (
+        f"Expected a non-zero exit when neither readiness marker is reached; "
+        f"got exit_code {ctx['result'].exit_code} / stderr: "
+        f"{ctx['result'].stderr!r}"
+    )
+
+
 @then(parsers.parse('the installed dependency version is no longer the '
                     'previously hard-pinned "{old}"'))
 def then_no_longer_old_version(old, ctx):

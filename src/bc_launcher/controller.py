@@ -1695,24 +1695,98 @@ class BcContainerController:
                  "Enter"],
                 user=AGENT_CONTAINER_USER,
             )
-            # Step 2: wait for the PRE-trust workspace-trust banner.
-            # CLAUDE_READY_MARKER is "Accessing workspace:" — the first
-            # claude-output line that appears after invocation, BEFORE
-            # trust is accepted.  (The earlier "Claude Code v" marker was
-            # the POST-trust banner and produced the chicken-and-egg
-            # deadlock that this fix addresses.)
-            ready = self._driver.wait_for_pane_marker(
-                container,
-                AGENT_TMUX_SESSION,
-                CLAUDE_READY_MARKER,
-                CLAUDE_READINESS_TIMEOUT_SECONDS,
+            # Step 2/3: bounded readiness wait that resolves the workspace-trust
+            # gate by polling for EITHER of two markers (lead-gw9v / lead-c713),
+            # integrated with — and feeding into — the step-4 input-ready loop:
+            #
+            #   * CLAUDE_READY_MARKER ("Accessing workspace:") — the PRE-trust
+            #     banner that appears BEFORE trust is accepted.  When it is
+            #     observed first, the trust prompt is live: accept it with a
+            #     bare Enter (step 3) and fall through to the step-4 input-ready
+            #     wait.  This is the pre-trust path and it is UNCHANGED.
+            #
+            #   * CLAUDE_INPUT_READY_MARKER ("bypass permissions on") — the
+            #     POST-trust input-ready marker.  bc-base bakes
+            #     `bypassPermissionsModeAccepted`, so claude can SELF-ADVANCE
+            #     past the workspace-trust prompt straight to input-ready; the
+            #     transient "Accessing workspace:" banner is then never caught
+            #     by polling.  When the pane is ALREADY at input-ready, treat
+            #     claude as UP: SKIP the trust-accept Enter (there is no trust
+            #     prompt to accept) and proceed directly to inject — do NOT
+            #     hard-require the transient banner and do NOT abort.
+            #
+            # The PRIOR shape hard-gated on CLAUDE_READY_MARKER and ABORTED with
+            # an "agent-startup failure" the instant the transient banner was
+            # not caught — which dropped every self-advancing unattended launch
+            # even though claude was healthy and sitting at input-ready.  The
+            # loop below removes that hard gate while keeping the pre-trust path
+            # intact and bounding the whole wait by the readiness timeout.
+            trust_accepted = False
+            input_ready = False
+            deadline = (
+                self._monotonic() + CLAUDE_READINESS_TIMEOUT_SECONDS
             )
-            if not ready:
+            while True:
+                remaining = deadline - self._monotonic()
+                if remaining <= 0:
+                    break
+                per_attempt = min(
+                    READINESS_DISMISS_POLL_SECONDS, remaining
+                )
+                # Poll for the PRE-trust banner first so the pre-trust path
+                # (banner observed → accept trust with Enter) is unchanged.
+                banner = self._driver.wait_for_pane_marker(
+                    container,
+                    AGENT_TMUX_SESSION,
+                    CLAUDE_READY_MARKER,
+                    per_attempt,
+                )
+                if banner:
+                    # Step 3: accept the workspace-trust prompt (default "Yes, I
+                    # trust").  Empirically verified (2026-05-29) that
+                    # --dangerously-skip-permissions does NOT, on its own,
+                    # bypass workspace trust when the prompt IS presented; this
+                    # Enter advances past it.  It fires ONLY on the pre-trust
+                    # path — never when claude self-advanced (below).
+                    self._driver.exec_run(
+                        container,
+                        ["tmux", "send-keys", "-t", AGENT_TMUX_SESSION, "Enter"],
+                        user=AGENT_CONTAINER_USER,
+                    )
+                    trust_accepted = True
+                    break
+                # Banner not caught this attempt.  Capture the pane: if claude
+                # has SELF-ADVANCED past the trust prompt straight to the
+                # input-ready marker, treat it as up and SKIP the trust-accept
+                # Enter entirely.
+                pane = self._driver.capture_pane(
+                    container, AGENT_TMUX_SESSION
+                )
+                if CLAUDE_INPUT_READY_MARKER in pane:
+                    input_ready = True
+                    out_lines.append(
+                        "Agent self-advanced past the workspace-trust prompt "
+                        "to the input-ready marker "
+                        f"{CLAUDE_INPUT_READY_MARKER!r}; treating the agent as "
+                        "up and skipping the trust-accept Enter (lead-gw9v)\n"
+                    )
+                    break
+                # Neither marker yet.  Keep polling until the deadline.
+                if self._monotonic() >= deadline:
+                    break
+            if not trust_accepted and not input_ready:
+                # Neither the PRE-trust banner nor the self-advanced input-ready
+                # marker was reached within the readiness timeout: claude (or
+                # its tmux session) never came up.  Warn (host-discoverable)
+                # and abort WITHOUT injecting.
                 reason = (
                     f"agent-startup failure: Claude Code did not become ready "
-                    f"within {CLAUDE_READINESS_TIMEOUT_SECONDS:.0f}s "
-                    f"(marker {CLAUDE_READY_MARKER!r} not seen; claude or its "
-                    f"tmux session never started); startup prompt NOT injected"
+                    f"within {CLAUDE_READINESS_TIMEOUT_SECONDS:.0f}s — the agent "
+                    f"never reached input-ready: neither the workspace-trust "
+                    f"banner {CLAUDE_READY_MARKER!r} nor the input-ready marker "
+                    f"{CLAUDE_INPUT_READY_MARKER!r} was observed within the "
+                    f"readiness timeout (claude or its tmux session never "
+                    f"started); startup prompt NOT injected"
                 )
                 diag_path = self._write_launch_diagnostic(
                     bc_name, CAUSE_MARKER_AGENT_STARTUP, reason
@@ -1726,22 +1800,10 @@ class BcContainerController:
                     stdout="".join(out_lines),
                     stderr="".join(err_lines),
                 )
-            # Step 3: accept workspace-trust prompt (default "Yes, I trust").
-            # Empirically verified (2026-05-29) that
-            # --dangerously-skip-permissions does NOT bypass workspace trust:
-            # `claude --dangerously-skip-permissions` in a fresh directory
-            # still presents the "Quick safety check" / "Yes, I trust this
-            # folder" prompt.  So this Enter is still required to advance
-            # to the main input UI; it now correctly fires AFTER a PRE-trust
-            # marker (step 2) rather than after a POST-trust banner.
-            self._driver.exec_run(
-                container,
-                ["tmux", "send-keys", "-t", AGENT_TMUX_SESSION, "Enter"],
-                user=AGENT_CONTAINER_USER,
-            )
             # Step 4: wait for the POST-trust input-ready marker, with
             # bounded auto-dismissal of unexpected interactive prompts
-            # (lead-cw7m / lead-c713).
+            # (lead-cw7m / lead-c713).  SKIPPED when claude already
+            # self-advanced to input-ready above (lead-gw9v).
             #
             # CLAUDE_INPUT_READY_MARKER is "bypass permissions on" — only
             # present once the trust prompt has cleared AND
@@ -1762,87 +1824,92 @@ class BcContainerController:
             # on timeout WITHOUT input-ready the loop STOPS attempting
             # dismissals (no infinite loop), warns, and proceeds WITHOUT
             # injecting.
-            input_ready = False
-            deadline = (
-                self._monotonic() + CLAUDE_READINESS_TIMEOUT_SECONDS
-            )
-            while True:
-                remaining = deadline - self._monotonic()
-                if remaining <= 0:
-                    break
-                per_attempt = min(
-                    READINESS_DISMISS_POLL_SECONDS, remaining
-                )
-                input_ready = self._driver.wait_for_pane_marker(
-                    container,
-                    AGENT_TMUX_SESSION,
-                    CLAUDE_INPUT_READY_MARKER,
-                    per_attempt,
-                )
-                if input_ready:
-                    break
-                # Input-ready not yet observed within this attempt.  Capture
-                # the pane and look for a blocking readiness-wait prompt to
-                # auto-dismiss with Esc.
-                pane = self._driver.capture_pane(
-                    container, AGENT_TMUX_SESSION
-                )
-                prompt_name = _readiness_wait_blocking_prompt(pane)
-                if prompt_name is None:
-                    # No Esc-dismissable prompt is blocking; nothing more to
-                    # do this iteration — keep polling until the deadline.
-                    if self._monotonic() >= deadline:
-                        break
-                    continue
-                # Send a DISCRETE send-keys carrying ONLY the Escape key
-                # payload — NOT Enter, and NOT '1'.  This declines the prompt
-                # with its own non-committal default (e.g. does NOT enable the
-                # fullscreen renderer) and lets the readiness loop proceed.
-                self._driver.exec_run(
-                    container,
-                    ["tmux", "send-keys", "-t", AGENT_TMUX_SESSION,
-                     ESCAPE_KEY_NAME],
-                    user=AGENT_CONTAINER_USER,
-                )
-                err_lines.append(
-                    "warning: an unexpected interactive prompt was "
-                    "auto-dismissed during the readiness wait (sent Escape "
-                    f"to the tmux session {AGENT_TMUX_SESSION!r}, NOT Enter, "
-                    "so no default was confirmed and the fullscreen renderer "
-                    f"was NOT enabled); the prompt was: {prompt_name!r} "
-                    "(lead-cw7m)\n"
-                )
-                out_lines.append(
-                    "Auto-dismissed an unexpected interactive prompt with "
-                    "Escape during the readiness wait (lead-cw7m): "
-                    f"{prompt_name!r}\n"
-                )
-                # Continue the loop: re-wait for the input-ready marker.
+            #
+            # lead-gw9v: when claude SELF-ADVANCED past the trust prompt (above),
+            # input_ready is already True and the agent is already at the
+            # input-ready marker — there is nothing left to wait for or dismiss,
+            # so this whole loop is SKIPPED and we proceed straight to inject.
             if not input_ready:
-                # BOUNDED: the scan-dismiss loop terminated at the 60s
-                # deadline rather than looping indefinitely.  Stop attempting
-                # dismissals, warn that the main input did not become ready,
-                # and proceed WITHOUT injecting the startup prompt.
-                reason = (
-                    f"readiness failure: Claude Code workspace-trust prompt "
-                    f"did not clear / main input did not become ready within "
-                    f"{CLAUDE_READINESS_TIMEOUT_SECONDS:.0f} seconds "
-                    f"(marker {CLAUDE_INPUT_READY_MARKER!r} not seen; the "
-                    f"readiness barrier never reported both supporting servers "
-                    f"ready); startup prompt NOT injected"
+                deadline = (
+                    self._monotonic() + CLAUDE_READINESS_TIMEOUT_SECONDS
                 )
-                diag_path = self._write_launch_diagnostic(
-                    bc_name, CAUSE_MARKER_READINESS, reason
-                )
-                err_lines.append("warning: " + reason + "\n")
-                err_lines.append(
-                    f"launch diagnostic persisted to {diag_path}\n"
-                )
-                return CommandResult(
-                    exit_code=1,
-                    stdout="".join(out_lines),
-                    stderr="".join(err_lines),
-                )
+                while True:
+                    remaining = deadline - self._monotonic()
+                    if remaining <= 0:
+                        break
+                    per_attempt = min(
+                        READINESS_DISMISS_POLL_SECONDS, remaining
+                    )
+                    input_ready = self._driver.wait_for_pane_marker(
+                        container,
+                        AGENT_TMUX_SESSION,
+                        CLAUDE_INPUT_READY_MARKER,
+                        per_attempt,
+                    )
+                    if input_ready:
+                        break
+                    # Input-ready not yet observed within this attempt.  Capture
+                    # the pane and look for a blocking readiness-wait prompt to
+                    # auto-dismiss with Esc.
+                    pane = self._driver.capture_pane(
+                        container, AGENT_TMUX_SESSION
+                    )
+                    prompt_name = _readiness_wait_blocking_prompt(pane)
+                    if prompt_name is None:
+                        # No Esc-dismissable prompt is blocking; nothing more to
+                        # do this iteration — keep polling until the deadline.
+                        if self._monotonic() >= deadline:
+                            break
+                        continue
+                    # Send a DISCRETE send-keys carrying ONLY the Escape key
+                    # payload — NOT Enter, and NOT '1'.  This declines the
+                    # prompt with its own non-committal default (e.g. does NOT
+                    # enable the fullscreen renderer) and lets the loop proceed.
+                    self._driver.exec_run(
+                        container,
+                        ["tmux", "send-keys", "-t", AGENT_TMUX_SESSION,
+                         ESCAPE_KEY_NAME],
+                        user=AGENT_CONTAINER_USER,
+                    )
+                    err_lines.append(
+                        "warning: an unexpected interactive prompt was "
+                        "auto-dismissed during the readiness wait (sent Escape "
+                        f"to the tmux session {AGENT_TMUX_SESSION!r}, NOT Enter, "
+                        "so no default was confirmed and the fullscreen "
+                        f"renderer was NOT enabled); the prompt was: "
+                        f"{prompt_name!r} (lead-cw7m)\n"
+                    )
+                    out_lines.append(
+                        "Auto-dismissed an unexpected interactive prompt with "
+                        "Escape during the readiness wait (lead-cw7m): "
+                        f"{prompt_name!r}\n"
+                    )
+                    # Continue the loop: re-wait for the input-ready marker.
+                if not input_ready:
+                    # BOUNDED: the scan-dismiss loop terminated at the 60s
+                    # deadline rather than looping indefinitely.  Stop
+                    # attempting dismissals, warn that the main input did not
+                    # become ready, and proceed WITHOUT injecting.
+                    reason = (
+                        f"readiness failure: Claude Code workspace-trust prompt "
+                        f"did not clear / main input did not become ready "
+                        f"within {CLAUDE_READINESS_TIMEOUT_SECONDS:.0f} seconds "
+                        f"(marker {CLAUDE_INPUT_READY_MARKER!r} not seen; the "
+                        f"readiness barrier never reported both supporting "
+                        f"servers ready); startup prompt NOT injected"
+                    )
+                    diag_path = self._write_launch_diagnostic(
+                        bc_name, CAUSE_MARKER_READINESS, reason
+                    )
+                    err_lines.append("warning: " + reason + "\n")
+                    err_lines.append(
+                        f"launch diagnostic persisted to {diag_path}\n"
+                    )
+                    return CommandResult(
+                        exit_code=1,
+                        stdout="".join(out_lines),
+                        stderr="".join(err_lines),
+                    )
             # Step 4b: blocking interactive option-screen handling (lead-q3uy).
             #
             # After the input-ready marker but BEFORE the prompt is submitted,
