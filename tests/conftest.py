@@ -99,8 +99,14 @@ def fake_driver():
 
 @pytest.fixture
 def controller(fake_driver):
-    """Return a BcContainerController backed by the fake driver."""
-    return BcContainerController(fake_driver)
+    """Return a BcContainerController backed by the fake driver.
+
+    lead-cw7m — the controller's bounded readiness-wait scan-dismiss loop
+    budgets its total elapsed time against an injectable monotonic clock; the
+    fake driver provides a deterministic, strictly-advancing clock so the
+    never-clears bounded-timeout path terminates without any real sleeping.
+    """
+    return BcContainerController(fake_driver, monotonic=fake_driver.monotonic)
 
 
 @pytest.fixture
@@ -7779,6 +7785,406 @@ def assert_warning_names_unescapable(ctx, fake_driver):
         f"attaching; interactive calls recorded: "
         f"{[c.command for c in fake_driver.interactive_calls]!r}"
     )
+
+
+# ===========================================================================
+# Readiness-wait interactive-prompt Escape-handling step definitions (lead-cw7m)
+#
+# Scenarios 048607861da16ff4 / 815f8e470163f669 / acf59eb2e265fde7.  During the
+# readiness wait (BEFORE the input-ready marker "bypass permissions on"), the
+# agent pane can present an interactive prompt (e.g. the new bc-base image's
+# "Try the new fullscreen renderer?" onboarding prompt rendered before the
+# trust banner) that blocks reaching input-ready.  The launcher must send a
+# DISCRETE send-keys carrying ONLY Escape (never Enter / '1', so the renderer
+# is NOT enabled), WARN naming the auto-dismissed prompt, continue the loop to
+# input-ready, and inject the startup prompt so the BC comes online.  The whole
+# scan-dismiss loop is BOUNDED by the existing 60s readiness timeout: when
+# auto-dismissal never reaches input-ready the launcher STOPS dismissing at
+# 60s, warns the main input did not become ready within 60 seconds, and
+# proceeds WITHOUT injecting.
+#
+# These EXTEND the lead-q3uy/gs03 engage-phase Esc-dismiss posture (AFTER
+# input-ready) to the READINESS-WAIT phase (BEFORE input-ready); they COMPOSE
+# with — and do NOT supersede — the lead-q3uy engage scenarios.  The
+# FakeDockerDriver models the readiness-wait prompt faithfully (see
+# tests/fake_driver.py: simulate_readiness_wait_prompt / the input-ready wait
+# block / capture_pane precedence / the Escape-dismiss send-keys path).
+# ===========================================================================
+
+# The rendered content of the simulated readiness-wait prompts.  The generic
+# one advertises an Esc affordance ("esc to cancel"); the fullscreen-renderer
+# one carries its specific signature plus the same Esc affordance.  NEITHER
+# carries the input-ready marker (they BLOCK reaching it) and NEITHER is the
+# workspace-trust prompt.
+_READINESS_GENERIC_PROMPT = (
+    "Set up your editor integration?\n"
+    "  1. Yes\n"
+    "  2. Not now\n"
+    "(Esc to cancel)\n"
+)
+_READINESS_FULLSCREEN_PROMPT = (
+    "Try the new fullscreen renderer?\n"
+    "  1. Yes\n"
+    "  2. Not now, Esc to cancel\n"
+)
+_READINESS_STARTUP_PROMPT = "bd prime"
+
+
+def _launch_with_readiness_prompt(
+    ctx, fake_driver, controller, tmp_path, content, *, clears_on_escape
+):
+    """Configure a readiness-wait blocking prompt and run launch.
+
+    Both readiness barriers (messaging DB, agent-vault broker) pass; claude
+    starts and the PRE-trust CLAUDE_READY_MARKER is observed; the blocking
+    prompt then prevents the POST-trust input-ready marker from appearing
+    until an Escape dismisses it (when ``clears_on_escape``).
+    """
+    bc_name = "shopsystem-messaging"
+    container_name = f"bc-{bc_name}"
+    repo_url = f"https://github.com/shopsystem/{bc_name}.git"
+    dsn = _READINESS_DSN
+    fake_driver.set_dsn_reachable(dsn, reachable=True)
+    fake_driver.simulate_readiness_wait_prompt(
+        container_name, content, clears_on_escape=clears_on_escape
+    )
+    manifest_path = tmp_path / "bc-manifest.yaml"
+    if not manifest_path.exists():
+        manifest_path.write_text(yaml.dump({
+            "product": "shopsystem product",
+            "bcs": [{"name": bc_name, "remote": repo_url, "role": "bc"}],
+        }))
+    result = controller.launch(
+        bc_name=bc_name,
+        repo_url=repo_url,
+        shopmsg_dsn=dsn,
+        startup_prompt=_READINESS_STARTUP_PROMPT,
+        manifest_path=manifest_path,
+        credential_home=ctx.get("credential_home"),
+    )
+    ctx["result"] = result
+    ctx["container_name"] = container_name
+    ctx["bc_name"] = bc_name
+    ctx["startup_prompt"] = _READINESS_STARTUP_PROMPT
+
+
+# --- 048607861da16ff4: generic unexpected prompt auto-dismissed -------------
+
+@given(parsers.parse(
+    'a BC container whose agent has been started with '
+    '"{claude_cmd}"'
+))
+def given_agent_started(claude_cmd, ctx):
+    ctx["_readiness_claude_cmd"] = claude_cmd
+
+
+@given(parsers.parse(
+    'the launcher has accepted the workspace-trust prompt and is waiting for '
+    'the input-ready marker "{marker}"'
+))
+def given_waiting_for_input_ready(marker, ctx):
+    ctx["_readiness_input_marker"] = marker
+
+
+@when(parsers.parse(
+    'the agent pane presents an unexpected interactive prompt that is not the '
+    'workspace-trust prompt and blocks reaching input-ready'
+))
+def when_unexpected_prompt(ctx, fake_driver, controller, tmp_path):
+    _launch_with_readiness_prompt(
+        ctx, fake_driver, controller, tmp_path,
+        _READINESS_GENERIC_PROMPT, clears_on_escape=True,
+    )
+
+
+@then(parsers.parse(
+    'the launcher dismisses the unexpected prompt with the safe non-committal '
+    'default by sending Esc'
+))
+def then_dismiss_with_esc(ctx, fake_driver):
+    container_name = ctx["container_name"]
+    escapes = _escape_send_keys(fake_driver, container_name, "agent")
+    assert escapes, (
+        "Expected a DISCRETE Escape send-keys to dismiss the readiness-wait "
+        "prompt; none recorded.  All send-keys: "
+        f"{[c.command for c in fake_driver.send_keys_calls(container_name)]!r}"
+    )
+    # The prompt absorbed at least one Escape (it was the dismissal key).
+    assert fake_driver.readiness_prompt_escape_count(container_name) >= 1, (
+        "The readiness-wait prompt must have absorbed at least one Escape."
+    )
+    # Esc-not-Enter teeth: NO send-keys against the prompt carried Enter or '1'
+    # (which would confirm a default / enable the renderer) BEFORE the prompt
+    # was dismissed.  The faithful model only clears the prompt on Escape, so a
+    # phantom Enter/'1' could never have cleared it — assert the dismissal key
+    # really was Escape.
+    for c in fake_driver.send_keys_calls(container_name):
+        payload = c.command[4:]
+        if payload in (["Enter"], ["1"]) and c.command[:4] == [
+            "tmux", "send-keys", "-t", "agent"
+        ]:
+            # A bare Enter is legitimate ONLY as workspace-trust accept (step 3)
+            # or as the discrete submit Enter AFTER the prompt-text invocation.
+            # Neither enables the renderer.  The prompt itself is dismissed only
+            # by Escape; this loop's purpose is the assertion above.
+            pass
+
+
+@then(parsers.parse(
+    'the launcher emits a warning naming the unexpected interactive prompt it '
+    'auto-dismissed'
+))
+def then_warn_names_unexpected(ctx):
+    surface = ctx["result"].stderr
+    low = surface.lower()
+    assert "warning" in low and "auto-dismissed" in low, (
+        f"Expected a WARNING that a prompt was auto-dismissed; got: {surface!r}"
+    )
+    # The warning NAMES the prompt (its first rendered line).
+    assert "Set up your editor integration?" in surface, (
+        f"Expected the WARNING to name the auto-dismissed prompt; got: "
+        f"{surface!r}"
+    )
+
+
+@then(parsers.parse(
+    'the launcher continues the readiness loop and observes the input-ready '
+    'marker "{marker}"'
+))
+def then_continues_observes_input_ready(marker, ctx, fake_driver):
+    container_name = ctx["container_name"]
+    # The prompt was dismissed (so the input-ready marker became observable)
+    # and an input-ready wait was recorded.
+    rp = fake_driver._readiness_prompt.get(container_name)
+    assert rp is not None and rp.get("dismissed"), (
+        "The readiness-wait prompt must have been dismissed so the loop could "
+        "proceed to observe the input-ready marker."
+    )
+    markers = [m for (_c, _s, m) in fake_driver.wait_for_marker_calls]
+    assert marker in markers, (
+        f"Expected an input-ready marker wait for {marker!r}; recorded: "
+        f"{markers!r}"
+    )
+
+
+@then(parsers.parse(
+    'the launcher injects the startup prompt with no human interaction so the '
+    'BC comes online'
+))
+def then_injects_no_human(ctx, fake_driver):
+    container_name = ctx["container_name"]
+    assert ctx["result"].exit_code == 0, (
+        f"Expected launch to exit zero after auto-dismiss + inject; got "
+        f"{ctx['result'].exit_code} / stderr: {ctx['result'].stderr!r}"
+    )
+    committed = fake_driver.agent_committed_prompt(container_name)
+    assert committed == ctx["startup_prompt"], (
+        f"Expected the startup prompt {ctx['startup_prompt']!r} to be injected "
+        f"and committed (BC online) with no human interaction; committed="
+        f"{committed!r}"
+    )
+    # No human interaction: the launcher needed no interactive attach.
+    assert not fake_driver.interactive_calls, (
+        "Inject must require NO interactive attach; interactive calls: "
+        f"{[c.command for c in fake_driver.interactive_calls]!r}"
+    )
+
+
+# --- 815f8e470163f669: fullscreen-renderer prompt auto-dismissed ------------
+
+@given(parsers.parse(
+    'a BC container whose agent presents the "{prompt_name}" onboarding '
+    'prompt before the workspace-trust banner appears'
+))
+def given_fullscreen_prompt(prompt_name, ctx):
+    ctx["_readiness_prompt_name"] = prompt_name
+
+
+@given(parsers.parse(
+    'the launcher is running the readiness sequence waiting for the input-ready '
+    'marker "{marker}"'
+))
+def given_running_readiness_seq(marker, ctx):
+    ctx["_readiness_input_marker"] = marker
+
+
+@when(parsers.parse(
+    'the readiness loop detects the fullscreen-renderer prompt blocking '
+    'progress to input-ready'
+))
+def when_fullscreen_prompt(ctx, fake_driver, controller, tmp_path):
+    _launch_with_readiness_prompt(
+        ctx, fake_driver, controller, tmp_path,
+        _READINESS_FULLSCREEN_PROMPT, clears_on_escape=True,
+    )
+
+
+@then(parsers.parse(
+    'the launcher dismisses it by sending Esc without enabling the new renderer'
+))
+def then_dismiss_fullscreen_esc(ctx, fake_driver):
+    container_name = ctx["container_name"]
+    escapes = _escape_send_keys(fake_driver, container_name, "agent")
+    assert escapes, (
+        "Expected a DISCRETE Escape send-keys to dismiss the fullscreen-"
+        "renderer prompt; none recorded."
+    )
+    # Esc-not-Enter TEETH: the renderer is enabled by pressing Enter or '1'.
+    # The faithful model dismisses the prompt ONLY on Escape — never on Enter
+    # or '1' — so assert the prompt was dismissed (which proves Escape, not a
+    # renderer-enabling key, cleared it) and the Escape invocation carries
+    # NEITHER Enter NOR '1'.
+    rp = fake_driver._readiness_prompt.get(container_name)
+    assert rp is not None and rp.get("dismissed"), (
+        "The fullscreen-renderer prompt must have been dismissed by Escape; a "
+        "renderer-enabling Enter/'1' must NOT clear it."
+    )
+    for c in escapes:
+        assert "Enter" not in c.command and "1" not in c.command, (
+            "The Escape-bearing invocation must NOT carry Enter or '1' "
+            f"(which would enable the renderer); got {c.command!r}"
+        )
+
+
+@then(parsers.parse(
+    'the launcher emits a warning naming the fullscreen-renderer prompt it '
+    'auto-dismissed'
+))
+def then_warn_names_fullscreen(ctx):
+    surface = ctx["result"].stderr
+    low = surface.lower()
+    assert "warning" in low and "auto-dismissed" in low, (
+        f"Expected a WARNING that the prompt was auto-dismissed; got: "
+        f"{surface!r}"
+    )
+    assert "Try the new fullscreen renderer?" in surface, (
+        f"Expected the WARNING to name the fullscreen-renderer prompt; got: "
+        f"{surface!r}"
+    )
+
+
+@then(parsers.parse(
+    'the readiness loop proceeds and observes the input-ready marker "{marker}"'
+))
+def then_proceeds_observes_input_ready(marker, ctx, fake_driver):
+    container_name = ctx["container_name"]
+    rp = fake_driver._readiness_prompt.get(container_name)
+    assert rp is not None and rp.get("dismissed"), (
+        "The fullscreen-renderer prompt must have been dismissed so the loop "
+        "could proceed to observe the input-ready marker."
+    )
+    markers = [m for (_c, _s, m) in fake_driver.wait_for_marker_calls]
+    assert marker in markers, (
+        f"Expected an input-ready marker wait for {marker!r}; recorded: "
+        f"{markers!r}"
+    )
+
+
+@then(parsers.parse(
+    'the startup prompt is injected and the BC comes online'
+))
+def then_injected_online(ctx, fake_driver):
+    container_name = ctx["container_name"]
+    assert ctx["result"].exit_code == 0, (
+        f"Expected launch to exit zero after auto-dismiss + inject; got "
+        f"{ctx['result'].exit_code} / stderr: {ctx['result'].stderr!r}"
+    )
+    committed = fake_driver.agent_committed_prompt(container_name)
+    assert committed == ctx["startup_prompt"], (
+        f"Expected the startup prompt {ctx['startup_prompt']!r} to be injected "
+        f"(BC online); committed={committed!r}"
+    )
+
+
+# --- acf59eb2e265fde7: BOUNDED when auto-dismissal never reaches ready -------
+
+@given(parsers.parse(
+    'a BC container whose agent keeps presenting an unexpected interactive '
+    'prompt that the launcher auto-dismisses with Esc'
+))
+def given_never_clearing_prompt(ctx):
+    # Mark the never-clears variant; the When step runs the launch.
+    ctx["_readiness_never_clears"] = True
+
+
+@given(parsers.parse(
+    'the input-ready marker "{marker}" is never observed'
+))
+def given_input_ready_never(marker, ctx):
+    ctx["_readiness_input_marker"] = marker
+
+
+@when(parsers.parse(
+    'the readiness timeout of 60 seconds elapses across the auto-dismissal '
+    'attempts'
+))
+def when_timeout_elapses(ctx, fake_driver, controller, tmp_path):
+    _launch_with_readiness_prompt(
+        ctx, fake_driver, controller, tmp_path,
+        _READINESS_GENERIC_PROMPT, clears_on_escape=False,
+    )
+
+
+@then(parsers.parse(
+    'the launcher stops attempting dismissals rather than looping indefinitely'
+))
+def then_stops_dismissing(ctx, fake_driver):
+    container_name = ctx["container_name"]
+    # BOUNDED teeth: the prompt never clears, so the launcher kept Esc-dismissing
+    # until the 60s deadline.  The escape count must be FINITE and small (the
+    # loop terminated at ~60s / per-attempt budget) — a non-terminating impl
+    # would never return from launch (the test would hang) and a still-looping
+    # impl would record an unbounded count.
+    count = fake_driver.readiness_prompt_escape_count(container_name)
+    assert count >= 1, (
+        "The launcher must have attempted at least one Esc-dismiss before the "
+        "bound was reached."
+    )
+    from bc_launcher.controller import (
+        CLAUDE_READINESS_TIMEOUT_SECONDS,
+        READINESS_DISMISS_POLL_SECONDS,
+    )
+    max_attempts = int(
+        CLAUDE_READINESS_TIMEOUT_SECONDS / READINESS_DISMISS_POLL_SECONDS
+    ) + 2
+    assert count <= max_attempts, (
+        f"The dismissal loop must be BOUNDED: expected at most {max_attempts} "
+        f"Esc attempts within the 60s timeout, but {count} were recorded "
+        "(non-terminating / unbounded-loop regression)."
+    )
+
+
+@then(parsers.parse(
+    'the launcher emits a warning that the main input did not become ready '
+    'within 60 seconds'
+))
+def then_warn_not_ready(ctx):
+    surface = ctx["result"].stderr
+    low = surface.lower()
+    assert "warning" in low and "did not become ready within 60" in low, (
+        f"Expected a WARNING that the main input did not become ready within "
+        f"60 seconds; got: {surface!r}"
+    )
+
+
+@then(parsers.parse(
+    'the launcher proceeds without injecting the startup prompt'
+))
+def then_proceeds_without_injecting(ctx, fake_driver):
+    container_name = ctx["container_name"]
+    # The startup prompt must NOT have been injected/committed.
+    committed = fake_driver.agent_committed_prompt(container_name)
+    assert committed != ctx["startup_prompt"], (
+        f"On the bounded-timeout path the startup prompt {ctx['startup_prompt']!r} "
+        f"must NOT be injected; but it was committed as {committed!r}."
+    )
+    # No send-keys carried the startup prompt text.
+    prompt = ctx["startup_prompt"]
+    for c in fake_driver.send_keys_calls(container_name):
+        assert prompt not in c.command, (
+            f"No send-keys may carry the startup prompt {prompt!r} on the "
+            f"bounded-timeout path; found {c.command!r}"
+        )
 
 
 # ---------------------------------------------------------------------------

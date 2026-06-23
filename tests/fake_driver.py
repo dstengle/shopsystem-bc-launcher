@@ -250,6 +250,27 @@ class FakeDockerDriver:
         # send-keys dismisses an escapable screen; a non-escapable screen is
         # never dismissed by Escape.
         self._option_screen: dict[str, dict] = {}
+
+        # --- Readiness-wait blocking interactive prompt model (lead-cw7m) ---
+        # container_name -> {"content": str, "clears_on_escape": bool,
+        #                    "dismissed": bool}.  Models a prompt presenting
+        # DURING the readiness wait (BEFORE the input-ready marker), e.g. the
+        # fullscreen-renderer onboarding prompt the new bc-base image renders
+        # before the trust banner.  While present-and-undismissed:
+        #   * wait_for_pane_marker(CLAUDE_INPUT_READY_MARKER) returns False
+        #     (the prompt blocks reaching input-ready);
+        #   * capture_pane returns the prompt's rendered content so the
+        #     controller can classify and name it.
+        # A discrete Escape send-keys DISMISSES the prompt; thereafter
+        # (clears_on_escape=True) the input-ready marker becomes observable.
+        # The never-clears variant (clears_on_escape=False) keeps presenting
+        # the prompt no matter how many Escapes are sent, so the input-ready
+        # marker is NEVER observed — exercising the bounded-timeout path.
+        self._readiness_prompt: dict[str, dict] = {}
+        # lead-cw7m — simulated monotonic clock backing self.monotonic(), used
+        # by the controller's bounded readiness-wait scan-dismiss loop so the
+        # never-clears bounded-timeout path terminates without real sleeping.
+        self._sim_clock: float = 0.0
         # lead-gs03 — per-container record of send-keys payloads ABSORBED by a
         # present-and-undismissed blocking option screen.  Each entry is the
         # send-keys payload (target tokens stripped) the screen consumed while
@@ -537,6 +558,66 @@ class FakeDockerDriver:
         # kind reached the screen — the absorbed invocation is RECORDED, not
         # silently dropped.
         self._keystrokes_while_screen_present.setdefault(container_name, [])
+
+    def simulate_readiness_wait_prompt(
+        self,
+        container_name: str,
+        content: str,
+        *,
+        clears_on_escape: bool = True,
+    ) -> None:
+        """Model a blocking interactive prompt presenting DURING the readiness
+        wait, BEFORE the input-ready marker (lead-cw7m / lead-c713).
+
+        This is the readiness-wait-phase analogue of ``simulate_option_screen``
+        (which models the ENGAGE phase, AFTER input-ready).  While the prompt
+        is present and not yet dismissed:
+
+          * ``wait_for_pane_marker(CLAUDE_INPUT_READY_MARKER)`` returns False —
+            the prompt blocks the agent from reaching the input-ready marker;
+          * ``capture_pane`` returns ``content`` so the controller can detect,
+            classify, and NAME the prompt.
+
+        A discrete ``Escape`` send-keys DISMISSES the prompt.  When
+        ``clears_on_escape`` is True (the default), once dismissed the
+        input-ready marker becomes observable on the next wait and the launch
+        proceeds to inject.  When ``clears_on_escape`` is False (the
+        never-clears variant), the prompt keeps re-presenting after every
+        Escape, so the input-ready marker is NEVER observed — exercising the
+        bounded-timeout path (the controller must STOP dismissing at 60s and
+        proceed WITHOUT injecting, rather than looping indefinitely).
+        """
+        self._readiness_prompt[container_name] = {
+            "content": content,
+            "clears_on_escape": clears_on_escape,
+            "dismissed": False,
+            "escape_count": 0,
+        }
+
+    def monotonic(self) -> float:
+        """Deterministic, strictly-advancing monotonic clock for tests
+        (lead-cw7m).
+
+        Each call advances the simulated clock by
+        ``READINESS_DISMISS_POLL_SECONDS`` so the controller's bounded
+        readiness-wait scan-dismiss loop budgets its TOTAL elapsed time
+        against simulated (not wall-clock) time: the never-clears
+        bounded-timeout path terminates after a FINITE number of iterations
+        (~60s / per-attempt budget) with NO real sleeping, while the happy
+        path (which breaks on the first input-ready observation) is unaffected.
+        """
+        from bc_launcher.controller import READINESS_DISMISS_POLL_SECONDS
+        self._sim_clock += READINESS_DISMISS_POLL_SECONDS
+        return self._sim_clock
+
+    def readiness_prompt_escape_count(self, container_name: str) -> int:
+        """How many discrete Escape send-keys the readiness-wait prompt has
+        absorbed (lead-cw7m).  Tests assert this is >= 1 (the prompt WAS
+        Esc-dismissed) and, for the never-clears bounded path, that it is a
+        FINITE small number (the loop terminated, did not spin indefinitely).
+        """
+        rp = self._readiness_prompt.get(container_name)
+        return rp["escape_count"] if rp else 0
 
     def set_mounts(self, container_name: str, mounts: list[ContainerMount]) -> None:
         self._mounts[container_name] = mounts
@@ -1042,6 +1123,15 @@ class FakeDockerDriver:
                 env=None,
             )
         )
+        # lead-cw7m — a blocking readiness-wait prompt (BEFORE input-ready)
+        # takes precedence: while present-and-undismissed, capture_pane returns
+        # its rendered content so the controller's readiness-wait scan-dismiss
+        # loop can detect, classify, and NAME it.  Once dismissed (Escape sent
+        # and clears_on_escape), this falls through to the engage-phase
+        # option-screen logic below, preserving lead-q3uy/gs03 behavior.
+        rp = self._readiness_prompt.get(container_name)
+        if rp is not None and not rp.get("dismissed"):
+            return rp["content"]
         screen = self._option_screen.get(container_name)
         if screen and not screen.get("dismissed"):
             # lead-gs03 — the controller detects the blocking screen at this
@@ -1082,6 +1172,14 @@ class FakeDockerDriver:
         from bc_launcher.controller import CLAUDE_INPUT_READY_MARKER
         if marker == CLAUDE_INPUT_READY_MARKER:
             self._last_input_ready_wait_op[container_name] = self._op_seq
+            # lead-cw7m — a blocking readiness-wait prompt prevents the agent
+            # from reaching the input-ready marker.  While the prompt is
+            # present-and-undismissed, the input-ready wait does NOT observe
+            # the marker (returns False); the controller's scan-dismiss loop
+            # must then capture the pane, Esc-dismiss the prompt, and re-wait.
+            rp = self._readiness_prompt.get(container_name)
+            if rp is not None and not rp.get("dismissed"):
+                return False
 
         if key in self._marker_timeouts:
             return False
@@ -1288,6 +1386,24 @@ class FakeDockerDriver:
             state = self._agent_state.setdefault(
                 container_name, {"buffer": None, "processing": None}
             )
+
+            # lead-cw7m — a present, not-yet-dismissed blocking readiness-wait
+            # prompt (BEFORE input-ready) intercepts keystrokes.  A discrete
+            # Escape DISMISSES it (clears_on_escape variant), after which the
+            # input-ready marker becomes observable.  The never-clears variant
+            # records the Escape but keeps re-presenting the prompt, so the
+            # input-ready marker is never observed and the controller must stop
+            # at the 60s bound.  NEVER does an Enter/'1' dismiss this prompt —
+            # only Escape — so a renderer-enabling keystroke can never clear it.
+            rp = self._readiness_prompt.get(container_name)
+            if rp is not None and not rp.get("dismissed"):
+                if payload == ["Escape"]:
+                    rp["escape_count"] += 1
+                    if rp.get("clears_on_escape"):
+                        rp["dismissed"] = True
+                # Whether cleared or not, the prompt consumed this keystream;
+                # nothing lands in the agent input buffer.
+                return subprocess.CompletedProcess(command, 0, "", "")
 
             # lead-q3uy — a present, not-yet-dismissed blocking option screen
             # intercepts keystrokes.  A discrete Escape send-keys DISMISSES an

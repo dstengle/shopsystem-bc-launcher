@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import re
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -352,6 +353,91 @@ CLAUDE_READINESS_TIMEOUT_SECONDS = 60.0
 OPTION_SCREEN_MARKER = "Select an option"
 ESCAPE_AFFORDANCE_MARKER = "esc to"
 ESCAPE_KEY_NAME = "Escape"
+
+# ---------------------------------------------------------------------------
+# Readiness-wait interactive-prompt auto-dismissal (lead-cw7m / lead-c713)
+# ---------------------------------------------------------------------------
+#
+# EXTENDS the lead-q3uy/gs03 Esc-not-Enter / warn / no-auto-confirm posture
+# from the ENGAGE phase (AFTER input-ready) to the READINESS-WAIT phase
+# (BEFORE input-ready).  The new bc-base Claude Code image (c50b3b) renders
+# an EARLIER interactive prompt — "Try the new fullscreen renderer?
+# (1. Yes / 2. Not now, Esc to cancel)" — BEFORE the "Accessing workspace:"
+# trust banner.  The narrow step-4 readiness handler (wait for
+# CLAUDE_INPUT_READY_MARKER) could not see past it: the input-ready marker
+# never appeared, the wait timed out at 60s, the startup prompt was never
+# injected, the watcher never armed, and the BC never came online.
+#
+# Disposition (lead-cw7m — launcher-runtime scan-and-solve; the PO chose
+# this over an image-config pre-seed because it is robust to image-config
+# drift):
+#   * During the readiness wait (while waiting for the input-ready marker),
+#     if the pane presents an interactive prompt that is NOT the
+#     already-handled workspace-trust prompt and is NOT yet at input-ready,
+#     dismiss it with a safe NON-COMMITTAL default by sending ONLY Esc
+#     (decline — NEVER Enter / '1', so the renderer is NOT enabled), emit a
+#     host-discoverable WARNING NAMING the auto-dismissed prompt, then
+#     CONTINUE the readiness loop toward input-ready.
+#   * The whole scan-dismiss loop stays BOUNDED by the existing 60s readiness
+#     timeout.  On timeout WITHOUT input-ready: STOP attempting dismissals
+#     (no infinite loop), warn that the main input did not become ready
+#     within 60 seconds, and proceed WITHOUT injecting the startup prompt.
+#
+# Detection keys on rendered-pane substrings, mirroring the CLAUDE_*_MARKER /
+# OPTION_SCREEN_MARKER idiom.  A readiness-wait prompt is recognized as a
+# blocking interactive prompt that advertises an Esc/cancel affordance and is
+# NOT the workspace-trust prompt and is NOT yet at input-ready.  The specific
+# fullscreen-renderer onboarding prompt is recognized by its own signature.
+READINESS_PROMPT_ESCAPE_AFFORDANCE_MARKERS = ("esc to", "esc to cancel")
+WORKSPACE_TRUST_PROMPT_MARKERS = ("trust this folder", "Quick safety check")
+FULLSCREEN_RENDERER_PROMPT_MARKER = "Try the new fullscreen renderer?"
+# How long a single input-ready wait poll is given before the controller
+# re-captures the pane to look for a blocking readiness-wait prompt.  The
+# per-attempt budget keeps the loop responsive while the TOTAL elapsed time
+# stays bounded by CLAUDE_READINESS_TIMEOUT_SECONDS.
+READINESS_DISMISS_POLL_SECONDS = 5.0
+
+
+def _readiness_wait_blocking_prompt(pane: str) -> str | None:
+    """Classify a readiness-wait pane capture (lead-cw7m / lead-c713).
+
+    Returns a short human-readable NAME of a blocking interactive prompt that
+    is presenting during the readiness wait and must be auto-dismissed with
+    Esc, or ``None`` when the pane carries no such prompt.
+
+    A prompt qualifies when ALL hold:
+      * the input-ready marker is NOT yet present (an input-ready pane is not a
+        blocking prompt — it is success);
+      * the pane is NOT the already-handled workspace-trust prompt (step 3 of
+        the readiness sequence accepts that one with Enter);
+      * the pane advertises an Esc/cancel affordance (so Esc is the screen's
+        own non-committal decline default — we never blind-press Enter / '1').
+
+    The specific fullscreen-renderer onboarding prompt (image c50b3b) is named
+    explicitly; any other Esc-dismissable readiness-wait prompt is named
+    generically from its first non-empty rendered line.
+    """
+    if not pane:
+        return None
+    if CLAUDE_INPUT_READY_MARKER in pane:
+        # Input-ready reached — not a blocking prompt.
+        return None
+    if any(m in pane for m in WORKSPACE_TRUST_PROMPT_MARKERS):
+        # The workspace-trust prompt is handled by step 3 (Enter); do NOT
+        # treat it as an unexpected prompt to Esc-dismiss.
+        return None
+    pane_lower = pane.lower()
+    if not any(m in pane_lower for m in READINESS_PROMPT_ESCAPE_AFFORDANCE_MARKERS):
+        # No Esc/cancel affordance advertised — not an Esc-dismissable prompt.
+        return None
+    if FULLSCREEN_RENDERER_PROMPT_MARKER in pane:
+        return FULLSCREEN_RENDERER_PROMPT_MARKER
+    # Generic readiness-wait prompt: name it by its first non-empty line.
+    for line in pane.splitlines():
+        stripped = line.strip()
+        if stripped:
+            return stripped
+    return "an unexpected interactive prompt"
 
 
 def _container_name(bc_name: str) -> str:
@@ -717,8 +803,16 @@ class BcContainerController:
         self,
         driver: DockerDriver,
         registry_driver: RegistryDriver | None = None,
+        monotonic=None,
     ) -> None:
         self._driver = driver
+        # Injectable monotonic-clock seam (lead-cw7m).  The bounded
+        # readiness-wait scan-dismiss loop budgets its TOTAL elapsed time
+        # against this clock so the dismissal loop terminates at the 60s
+        # readiness timeout rather than looping indefinitely.  Production
+        # passes nothing (time.monotonic); tests inject a deterministic clock
+        # to drive the bounded-timeout path without real wall-clock waits.
+        self._monotonic = monotonic if monotonic is not None else time.monotonic
         # Optional registry seam (scenario af2f03d3ac519cb5).  When present,
         # launch resolves the bc-base "latest" tag's current registry digest
         # BEFORE starting the container, and runs the container from that
@@ -1645,22 +1739,94 @@ class BcContainerController:
                 ["tmux", "send-keys", "-t", AGENT_TMUX_SESSION, "Enter"],
                 user=AGENT_CONTAINER_USER,
             )
-            # Step 4: wait for the POST-trust input-ready marker.
+            # Step 4: wait for the POST-trust input-ready marker, with
+            # bounded auto-dismissal of unexpected interactive prompts
+            # (lead-cw7m / lead-c713).
+            #
             # CLAUDE_INPUT_READY_MARKER is "bypass permissions on" — only
             # present once the trust prompt has cleared AND
             # --dangerously-skip-permissions is active, which is the exact
             # state in which the user prompt can be safely injected.
-            input_ready = self._driver.wait_for_pane_marker(
-                container,
-                AGENT_TMUX_SESSION,
-                CLAUDE_INPUT_READY_MARKER,
-                CLAUDE_READINESS_TIMEOUT_SECONDS,
+            #
+            # The new bc-base Claude Code image (c50b3b) can render an EARLIER
+            # interactive prompt (e.g. "Try the new fullscreen renderer?")
+            # that BLOCKS reaching input-ready.  A single narrow wait would
+            # time out at 60s and never inject.  Instead, run a BOUNDED
+            # scan-dismiss loop: each iteration waits for the input-ready
+            # marker for a short per-attempt budget; if it does not appear,
+            # capture the pane and, if it presents an Esc-dismissable prompt
+            # that is NOT the workspace-trust prompt, send ONLY Esc (decline —
+            # NEVER Enter / '1', so the renderer is NOT enabled), emit a
+            # host-discoverable WARNING NAMING the prompt, and continue.  The
+            # TOTAL elapsed time is bounded by CLAUDE_READINESS_TIMEOUT_SECONDS;
+            # on timeout WITHOUT input-ready the loop STOPS attempting
+            # dismissals (no infinite loop), warns, and proceeds WITHOUT
+            # injecting.
+            input_ready = False
+            deadline = (
+                self._monotonic() + CLAUDE_READINESS_TIMEOUT_SECONDS
             )
+            while True:
+                remaining = deadline - self._monotonic()
+                if remaining <= 0:
+                    break
+                per_attempt = min(
+                    READINESS_DISMISS_POLL_SECONDS, remaining
+                )
+                input_ready = self._driver.wait_for_pane_marker(
+                    container,
+                    AGENT_TMUX_SESSION,
+                    CLAUDE_INPUT_READY_MARKER,
+                    per_attempt,
+                )
+                if input_ready:
+                    break
+                # Input-ready not yet observed within this attempt.  Capture
+                # the pane and look for a blocking readiness-wait prompt to
+                # auto-dismiss with Esc.
+                pane = self._driver.capture_pane(
+                    container, AGENT_TMUX_SESSION
+                )
+                prompt_name = _readiness_wait_blocking_prompt(pane)
+                if prompt_name is None:
+                    # No Esc-dismissable prompt is blocking; nothing more to
+                    # do this iteration — keep polling until the deadline.
+                    if self._monotonic() >= deadline:
+                        break
+                    continue
+                # Send a DISCRETE send-keys carrying ONLY the Escape key
+                # payload — NOT Enter, and NOT '1'.  This declines the prompt
+                # with its own non-committal default (e.g. does NOT enable the
+                # fullscreen renderer) and lets the readiness loop proceed.
+                self._driver.exec_run(
+                    container,
+                    ["tmux", "send-keys", "-t", AGENT_TMUX_SESSION,
+                     ESCAPE_KEY_NAME],
+                    user=AGENT_CONTAINER_USER,
+                )
+                err_lines.append(
+                    "warning: an unexpected interactive prompt was "
+                    "auto-dismissed during the readiness wait (sent Escape "
+                    f"to the tmux session {AGENT_TMUX_SESSION!r}, NOT Enter, "
+                    "so no default was confirmed and the fullscreen renderer "
+                    f"was NOT enabled); the prompt was: {prompt_name!r} "
+                    "(lead-cw7m)\n"
+                )
+                out_lines.append(
+                    "Auto-dismissed an unexpected interactive prompt with "
+                    "Escape during the readiness wait (lead-cw7m): "
+                    f"{prompt_name!r}\n"
+                )
+                # Continue the loop: re-wait for the input-ready marker.
             if not input_ready:
+                # BOUNDED: the scan-dismiss loop terminated at the 60s
+                # deadline rather than looping indefinitely.  Stop attempting
+                # dismissals, warn that the main input did not become ready,
+                # and proceed WITHOUT injecting the startup prompt.
                 reason = (
                     f"readiness failure: Claude Code workspace-trust prompt "
                     f"did not clear / main input did not become ready within "
-                    f"{CLAUDE_READINESS_TIMEOUT_SECONDS:.0f}s "
+                    f"{CLAUDE_READINESS_TIMEOUT_SECONDS:.0f} seconds "
                     f"(marker {CLAUDE_INPUT_READY_MARKER!r} not seen; the "
                     f"readiness barrier never reported both supporting servers "
                     f"ready); startup prompt NOT injected"
