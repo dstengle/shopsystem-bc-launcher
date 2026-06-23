@@ -8180,7 +8180,12 @@ def then_one_workflow_all_deps(ctx):
     wf = ctx["poll_workflow"]
     assert wf is not None and not isinstance(wf, list)
     path, doc = wf
-    text = path.read_text()
+    # Inspect the EXECUTABLE workflow body only (comment-only lines stripped):
+    # the header comment descriptively enumerates all four dep->repo mappings,
+    # so asserting against the raw text would pass off the COMMENT even if a
+    # dep were dropped from the executable DEPS array. Per-dep coverage must be
+    # proven by the executable config, not the rationale prose.
+    text = _strip_yaml_comments(path.read_text())
     # The single workflow must reference EVERY baked dependency's canonical
     # repo, proving it handles all four rather than one-per-dep.
     missing = [
@@ -8247,7 +8252,12 @@ def when_workflow_looks_up_latest(dependency, ctx):
 @then(parsers.parse('the lookup reads the public "{canonical_repo}" releases '
                     'using the workflow\'s own "GITHUB_TOKEN"'))
 def then_lookup_uses_github_token_and_repo(canonical_repo, ctx):
-    text = ctx["poll_workflow_text"]
+    # Inspect the EXECUTABLE workflow body only (comment-only lines stripped):
+    # the header comment descriptively lists every canonical repo, so a raw-text
+    # assertion would be satisfied by the COMMENT even if the executable DEPS
+    # array stopped polling that dep. Per-dep coverage must be proven by the
+    # executable config, not the rationale prose.
+    text = _strip_yaml_comments(ctx["poll_workflow_text"])
     # The canonical repo must be referenced by the workflow (per-dep coverage).
     assert canonical_repo in text, (
         f"The centralized workflow does not reference the canonical repo "
