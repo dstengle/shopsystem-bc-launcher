@@ -248,6 +248,26 @@ class DockerDriver(Protocol):
         """
         ...
 
+    def write_launch_diagnostic(
+        self, host_path: str, content: str
+    ) -> None:
+        """Persist a launch-failure diagnostic to a host-visible file.
+
+        lead-63em.  When a launch fails to bring up a usable agent session
+        (any of the four documented causes — messaging-db, agent-vault,
+        readiness, agent-startup), the controller writes a PERSISTED
+        diagnostic file at the documented per-BC host-discoverable location
+        (``host_path``) on the SAME host-visible per-BC surface the mailbox is
+        read from.  The file is readable from the host WITHOUT attaching into
+        any tmux session and WITHOUT relying on the launch command's stderr or
+        the bc-container monitor tmux pane: it survives the launch process
+        exiting.  ``content`` carries the literal cause-marker token and a
+        human-readable reason.  The implementation creates any missing parent
+        directories so the per-BC surface exists even on the very first
+        failed launch.
+        """
+        ...
+
 
 # ---------------------------------------------------------------------------
 # Real implementation (shells out to docker CLI)
@@ -529,6 +549,25 @@ class RealDockerDriver:
         )
         result = self.exec_run(container, ["python3", "-c", connect_script])
         return result.returncode == 0
+
+    def write_launch_diagnostic(
+        self, host_path: str, content: str
+    ) -> None:
+        """Persist a launch-failure diagnostic to a host file (lead-63em).
+
+        Writes ``content`` to ``host_path`` on the launcher host's own
+        filesystem — the SAME host-visible per-BC surface the mailbox is read
+        from — creating any missing parent directories.  This is a plain host
+        write (NOT a ``docker exec`` into the container): the file must be
+        readable from the host even when no container / tmux session ever came
+        up, so it cannot live inside the container.  The launch process exits
+        after writing, so the file persists independently of the launch
+        command's stderr and of the bc-container monitor tmux pane.
+        """
+        from pathlib import Path as _Path
+        p = _Path(host_path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(content, encoding="utf-8")
 
     def capture_pane(
         self, container_name: str, tmux_session: str

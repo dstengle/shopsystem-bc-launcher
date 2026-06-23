@@ -177,6 +177,19 @@ class FakeDockerDriver:
         # exactly which markers the controller polled for and in what order.
         self.wait_for_marker_calls: list[tuple[str, str, str]] = []
 
+        # lead-63em: recorded launch-diagnostic file writes.  Each entry is
+        # (host_path, content).  The fake ALSO performs the real host write
+        # (creating parent dirs) so a test can read the persisted file back
+        # "from the host" without any tmux attach — exactly the property the
+        # scenarios pin.
+        self.launch_diagnostic_writes: list[tuple[str, str]] = []
+
+        # lead-63em: when True, EVERY agent-vault broker probe reports
+        # unreachable regardless of address.  Used by the agent-vault
+        # launch-failure scenario so the test need not re-derive the
+        # product-slug-qualified broker host the controller resolves.
+        self._all_brokers_unreachable: bool = False
+
         # --- lead-j351: slow brokered boot (delayed-marker) model ---
         # (container, session, marker) -> seconds-of-progressing-boot after
         # which the marker becomes observable.  Models a brokered boot that
@@ -555,6 +568,31 @@ class FakeDockerDriver:
             self._unreachable_brokers.discard(broker_address)
         else:
             self._unreachable_brokers.add(broker_address)
+
+    def set_all_brokers_unreachable(self, unreachable: bool = True) -> None:
+        """lead-63em: make EVERY agent-vault broker probe report unreachable.
+
+        Lets the agent-vault launch-failure scenario fail the agent-vault
+        readiness barrier without re-deriving the product-slug-qualified
+        broker host the controller resolves at launch.
+        """
+        self._all_brokers_unreachable = unreachable
+
+    def write_launch_diagnostic(self, host_path: str, content: str) -> None:
+        """Persist a launch-failure diagnostic to a real host file (lead-63em).
+
+        Records the (host_path, content) call AND performs the actual host
+        write — creating parent dirs — so a test can read the persisted file
+        back from the host filesystem with no container / tmux involved,
+        modelling the real host write.  Tests point
+        ``BCLAUNCHER_HOST_STATE_DIR`` at a tmp dir so the write lands under
+        the test sandbox.
+        """
+        from pathlib import Path as _Path
+        self.launch_diagnostic_writes.append((host_path, content))
+        p = _Path(host_path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(content, encoding="utf-8")
 
     # --- lead-cs7k: probe-execution-context model -------------------------
     # The readiness probes must run from INSIDE the launched container's
@@ -1090,6 +1128,8 @@ class FakeDockerDriver:
         for ``messaging_db_reachable``.
         """
         self._probe_exec_contexts.append(("agent_vault", container))
+        if self._all_brokers_unreachable:
+            return False
         return self._probe_reachable(
             broker_address, container, self._unreachable_brokers
         )

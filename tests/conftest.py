@@ -77,6 +77,20 @@ def _run_manifest_sync(manifest_path: Path, repos_dir: Path, git_driver):
 # Fixtures
 # ---------------------------------------------------------------------------
 
+@pytest.fixture(autouse=True)
+def _lead63em_host_state_dir(tmp_path, monkeypatch):
+    """Point BCLAUNCHER_HOST_STATE_DIR at a per-test tmp dir (lead-63em).
+
+    Every launch-failure path now persists a diagnostic file under the per-BC
+    host state surface (default ``/var/lib/bc-launcher``, which is unwritable
+    in CI).  Redirecting it to a per-test tmp dir for the WHOLE suite keeps
+    every launch-failure-exercising test (not just the new diagnostic
+    scenarios) writing into the sandbox, and prevents env leakage across
+    tests.  ``monkeypatch`` restores the prior value automatically at teardown.
+    """
+    monkeypatch.setenv("BCLAUNCHER_HOST_STATE_DIR", str(tmp_path / "host-state"))
+
+
 @pytest.fixture
 def fake_driver():
     """Return a fresh FakeDockerDriver."""
@@ -564,13 +578,49 @@ def run_launch_with_a_startup_prompt(bc_name, ctx, fake_driver, controller, tmp_
         # host environment does not export one.
         dsn = _READINESS_DSN
     ctx["shopmsg_dsn"] = dsn
-    # Both scenarios using this exact "and a startup prompt" phrasing pin the
-    # barrier-blocks-at-launch path: the readiness sequence has NOT yet
-    # passed, so the messaging DB is unreachable at launch time.  Mark it
-    # unreachable so the launch blocks before any prompt injection.  (The
-    # "once readiness completes successfully" Then step flips it back to
-    # reachable and re-launches.)
-    fake_driver.set_dsn_reachable(dsn, reachable=False)
+    # Fault selection (lead-63em).  When a prior Given step pinned a specific
+    # launch fault (ctx["launch_fault"]), configure the fake driver so the
+    # launch fails at exactly that point.  Otherwise default to the
+    # messaging-DB-unreachable path: the pre-lead-63em messaging-readiness
+    # scenarios using this exact "... and a startup prompt" phrasing pin the
+    # barrier-blocks-at-launch path (the readiness sequence has NOT yet
+    # passed), and the "once readiness completes successfully" Then step flips
+    # the DB back to reachable and re-launches — so the default must remain
+    # messaging-DB-unreachable to keep those scenarios green.
+    from bc_launcher.controller import (
+        AGENT_TMUX_SESSION,
+        CAUSE_MARKER_AGENT_STARTUP,
+        CAUSE_MARKER_AGENT_VAULT,
+        CAUSE_MARKER_MESSAGING_DB,
+        CAUSE_MARKER_READINESS,
+        CLAUDE_INPUT_READY_MARKER,
+        CLAUDE_READY_MARKER,
+    )
+    fault = ctx.get("launch_fault", CAUSE_MARKER_MESSAGING_DB)
+    container_name = f"bc-{bc_name}"
+    if fault == CAUSE_MARKER_MESSAGING_DB:
+        fake_driver.set_dsn_reachable(dsn, reachable=False)
+    elif fault == CAUSE_MARKER_AGENT_VAULT:
+        # Messaging DB reachable; agent-vault broker barrier fails.
+        fake_driver.set_dsn_reachable(dsn, reachable=True)
+        fake_driver.set_all_brokers_unreachable(True)
+    elif fault == CAUSE_MARKER_AGENT_STARTUP:
+        # Both readiness barriers pass; claude / its tmux session never
+        # starts, so the PRE-trust CLAUDE_READY_MARKER is never observed.
+        fake_driver.set_dsn_reachable(dsn, reachable=True)
+        fake_driver.simulate_marker_timeout(
+            container_name, AGENT_TMUX_SESSION, CLAUDE_READY_MARKER
+        )
+    elif fault == CAUSE_MARKER_READINESS:
+        # Both readiness barriers pass and claude starts, but the readiness
+        # barrier never reports both supporting servers ready — the POST-trust
+        # CLAUDE_INPUT_READY_MARKER (the input-ready barrier) is never observed.
+        fake_driver.set_dsn_reachable(dsn, reachable=True)
+        fake_driver.simulate_marker_timeout(
+            container_name, AGENT_TMUX_SESSION, CLAUDE_INPUT_READY_MARKER
+        )
+    else:  # pragma: no cover - defensive
+        raise AssertionError(f"unknown launch_fault {fault!r}")
     manifest_path = ctx.get("launch_manifest_path")
     if manifest_path is None and "launch_no_manifest" not in ctx:
         default_manifest = tmp_path / "bc-manifest.yaml"
@@ -8011,4 +8061,272 @@ def assert_warning_names_unescapable(ctx, fake_driver):
         "The un-escapable-screen warning must be host-discoverable WITHOUT "
         f"attaching; interactive calls recorded: "
         f"{[c.command for c in fake_driver.interactive_calls]!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# lead-63em — launch-failure persisted diagnostic file (per-BC host surface)
+# ---------------------------------------------------------------------------
+
+# Map each Scenario-Outline <fault> phrasing to its documented cause-marker.
+_LEAD_63EM_FAULT_TO_MARKER = {
+    "the messaging database at SHOPMSG_DSN is unreachable": "messaging-db",
+    "the agent-vault broker on the shopsystem network is unreachable": "agent-vault",
+    "the readiness barrier never reports both supporting servers ready": "readiness",
+    "claude or its tmux session never started inside the container": "agent-startup",
+}
+
+
+@given(parsers.parse(
+    "the launch will fail to bring up a usable session because {fault}"
+))
+def launch_will_fail_because(fault, ctx):
+    """Pin which of the four documented launch faults this row exercises.
+
+    Stores the resolved cause-marker in ctx["launch_fault"]; the
+    '... and a startup prompt' When step reads it and configures the fake
+    driver so the launch fails at exactly that barrier / step.  Also point
+    BCLAUNCHER_HOST_STATE_DIR at a per-test host dir so the persisted
+    diagnostic file lands under the test sandbox and can be read back from
+    the host.
+    """
+    marker = _LEAD_63EM_FAULT_TO_MARKER.get(fault.strip())
+    assert marker is not None, f"unmapped launch fault phrasing: {fault!r}"
+    ctx["launch_fault"] = marker
+    ctx["expected_cause_marker"] = marker
+    _lead63em_point_state_dir_at_sandbox(ctx)
+
+
+def _lead63em_point_state_dir_at_sandbox(ctx):
+    """Record the per-test host state surface dir from the autouse fixture.
+
+    The ``_lead63em_host_state_dir`` autouse fixture has already pointed
+    BCLAUNCHER_HOST_STATE_DIR at a per-test tmp dir; capture it in ctx so the
+    Then steps can assert the diagnostic file lands under that surface.
+    """
+    import os as _os
+    ctx["host_state_dir"] = _os.environ["BCLAUNCHER_HOST_STATE_DIR"]
+
+
+@then(parsers.parse(
+    'no usable tmux session named "{session}" is available to attach to in '
+    'container "{container_name}"'
+))
+def assert_no_usable_agent_session(session, container_name, ctx, fake_driver):
+    """A failed launch leaves NO usable agent session: the startup prompt was
+    never injected into the named tmux session (no usable agent to attach to).
+    """
+    send_keys = fake_driver.send_keys_calls(container_name)
+    prompt = ctx.get("startup_prompt", "please begin your session")
+    injected = [
+        c for c in send_keys
+        if "-t" in c.command
+        and c.command[c.command.index("-t") + 1] == session
+        and any(prompt in tok for tok in c.command)
+    ]
+    assert not injected, (
+        f"Expected NO startup prompt injected into tmux session {session!r} "
+        f"in {container_name!r} (no usable agent session), but found: "
+        f"{[c.command for c in injected]!r}"
+    )
+
+
+def _lead63em_read_diagnostic_from_host(ctx):
+    """Read the persisted diagnostic file from the HOST.
+
+    Reads the documented per-BC host path directly off the host filesystem —
+    NO docker exec, NO tmux attach, and WITHOUT touching the launch result's
+    stderr.  Returns the file's text.  Asserts the file exists.
+    """
+    from bc_launcher.controller import launch_diagnostic_path
+    bc_name = ctx["bc_name"]
+    path = launch_diagnostic_path(bc_name)
+    assert path.exists(), (
+        f"Expected a persisted launch-diagnostic file at the documented "
+        f"per-BC host location {path}, but it does not exist"
+    )
+    ctx["diagnostic_path"] = path
+    return path.read_text(encoding="utf-8")
+
+
+@then(parsers.parse(
+    "bc-container writes the diagnostic to a persisted file at a known, "
+    "documented host-discoverable location on the same host-visible per-BC "
+    "surface the mailbox is read from, stating why the session failed to "
+    "come up"
+))
+def assert_diagnostic_persisted(ctx, fake_driver):
+    text = _lead63em_read_diagnostic_from_host(ctx)
+    assert text.strip(), (
+        f"Expected the persisted diagnostic file to state why the session "
+        f"failed; got empty content"
+    )
+    assert "reason:" in text, (
+        f"Expected the diagnostic to state a reason; got: {text!r}"
+    )
+    # The file lives under the documented per-BC host surface root.
+    from bc_launcher.controller import launch_diagnostic_path
+    path = launch_diagnostic_path(ctx["bc_name"])
+    assert str(path).startswith(ctx["host_state_dir"]), (
+        f"Diagnostic path {path} is not under the per-BC host state surface "
+        f"{ctx['host_state_dir']}"
+    )
+
+
+@then(parsers.parse(
+    "that persisted diagnostic file is readable from the host without "
+    "attaching into any tmux session and without relying on the launch "
+    "command's stderr or the bc-container monitor tmux pane"
+))
+def assert_diagnostic_readable_independent(ctx, fake_driver):
+    # Read straight off the host filesystem — independent of stderr / pane.
+    path = ctx["diagnostic_path"]
+    text = path.read_text(encoding="utf-8")
+    assert text.strip(), "diagnostic file unexpectedly empty"
+    # No tmux attach was needed to read it (the launcher never attaches).
+    assert not fake_driver.interactive_calls, (
+        "Reading the diagnostic must NOT require a tmux attach; interactive "
+        f"calls recorded: {[c.command for c in fake_driver.interactive_calls]!r}"
+    )
+    # Independence from stderr: blank the launch result's stderr and confirm
+    # the file is STILL readable and still carries the cause.
+    result = ctx["result"]
+    result.stderr = ""
+    again = path.read_text(encoding="utf-8")
+    assert again.strip() and "cause:" in again, (
+        f"Diagnostic file must remain authoritative independent of stderr; "
+        f"got: {again!r}"
+    )
+
+
+@then(parsers.parse(
+    'the diagnostic names the failure cause by carrying the literal '
+    'cause-marker token "{cause_marker}" exactly, so the operator is pointed '
+    'at the right repair'
+))
+def assert_diagnostic_cause_marker(cause_marker, ctx):
+    path = ctx["diagnostic_path"]
+    text = path.read_text(encoding="utf-8")
+    # The literal cause-marker token must appear EXACTLY in the persisted file.
+    assert f"cause: {cause_marker}\n" in text or text.strip().startswith(
+        f"cause: {cause_marker}"
+    ), (
+        f"Expected the persisted diagnostic to carry the literal cause-marker "
+        f"token {cause_marker!r} exactly; got file content: {text!r}"
+    )
+    # Teeth: a generic diagnostic that does not carry THIS specific marker
+    # must not satisfy the assertion.  Confirm the recorded write content
+    # carried the marker (not merely a generic message).
+    expected = ctx.get("expected_cause_marker")
+    if expected is not None:
+        assert cause_marker == expected, (
+            f"Scenario row asserts marker {cause_marker!r} but the configured "
+            f"fault was {expected!r}"
+        )
+
+
+# --- Scenario 7084bbbf: discoverable even when no session ever came up ---
+
+@given(parsers.parse(
+    'a launch of BC name "{bc_name}" failed before any usable tmux session '
+    'named "{session}" came up'
+))
+def launch_failed_before_session(bc_name, session, ctx, fake_driver, controller,
+                                 tmp_path):
+    """Drive a real failed launch (messaging-DB unreachable) so the launcher
+    persists its diagnostic file, then forget the launch's stderr — modelling
+    an operator who arrives after the launch process has exited.
+    """
+    _lead63em_point_state_dir_at_sandbox(ctx)
+    repo_url = f"https://github.com/shopsystem/{bc_name}.git"
+    dsn = _READINESS_DSN
+    fake_driver.set_running(f"bc-{bc_name}", running=False)
+    fake_driver.set_dsn_reachable(dsn, reachable=False)
+    default_manifest = tmp_path / "bc-manifest.yaml"
+    if not default_manifest.exists():
+        import yaml as _yaml
+        default_manifest.write_text(_yaml.dump({
+            "product": "shopsystem product",
+            "bcs": [{"name": bc_name, "remote": repo_url, "role": "bc"}],
+        }))
+    credential_home = ctx.get("credential_home")
+    result = controller.launch(
+        bc_name=bc_name,
+        repo_url=repo_url,
+        shopmsg_dsn=dsn,
+        startup_prompt="please begin your session",
+        manifest_path=default_manifest,
+        credential_home=credential_home,
+    )
+    assert result.exit_code != 0, "expected the launch to fail"
+    ctx["bc_name"] = bc_name
+    ctx["container_name"] = f"bc-{bc_name}"
+    ctx["session"] = session
+    # The launch process has exited; its stderr is no longer available to the
+    # operator who comes looking later.  Drop it from the test's view.
+    ctx["result"] = result
+    ctx["stderr_no_longer_available"] = True
+    result.stderr = ""
+
+
+@when(parsers.parse(
+    "I look for the launch diagnostic from the host without attaching into "
+    "any tmux session"
+))
+def look_for_diagnostic_from_host(ctx):
+    text = _lead63em_read_diagnostic_from_host(ctx)
+    ctx["diagnostic_text"] = text
+
+
+@then(parsers.parse(
+    "bc-container exposes the diagnostic as a persisted file at a known, "
+    "documented host-discoverable location on the same host-visible per-BC "
+    "surface the mailbox is read from"
+))
+def assert_diagnostic_exposed_as_file(ctx):
+    from bc_launcher.controller import launch_diagnostic_path
+    path = launch_diagnostic_path(ctx["bc_name"])
+    assert path.exists(), (
+        f"Expected a persisted diagnostic file at {path}"
+    )
+    assert str(path).startswith(ctx["host_state_dir"]), (
+        f"Diagnostic path {path} not on the per-BC host surface "
+        f"{ctx['host_state_dir']}"
+    )
+    ctx["diagnostic_path"] = path
+
+
+@then(parsers.parse(
+    'that persisted diagnostic file is readable from the host even though no '
+    'tmux session named "{session}" ever came up and the launch command\'s '
+    'stderr is no longer available'
+))
+def assert_diagnostic_readable_no_session(session, ctx, fake_driver):
+    # No agent tmux session ever came up: no startup prompt was ever injected
+    # into the named session.
+    container_name = ctx["container_name"]
+    send_keys = fake_driver.send_keys_calls(container_name)
+    injected = [
+        c for c in send_keys
+        if "-t" in c.command
+        and c.command[c.command.index("-t") + 1] == session
+        and any("please begin your session" in tok for tok in c.command)
+    ]
+    assert not injected, (
+        f"No usable agent session should have come up; found prompt injection: "
+        f"{[c.command for c in injected]!r}"
+    )
+    # stderr is no longer available, yet the file is still readable.
+    assert ctx.get("stderr_no_longer_available"), (
+        "precondition: the launch stderr should be gone"
+    )
+    text = ctx["diagnostic_path"].read_text(encoding="utf-8")
+    assert text.strip(), "diagnostic file unexpectedly empty"
+
+
+@then(parsers.parse("the diagnostic states why the session failed to come up"))
+def assert_diagnostic_states_why(ctx):
+    text = ctx["diagnostic_path"].read_text(encoding="utf-8")
+    assert "reason:" in text and "cause:" in text, (
+        f"Expected the diagnostic to state cause + reason; got: {text!r}"
     )

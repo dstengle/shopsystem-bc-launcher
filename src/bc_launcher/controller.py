@@ -37,6 +37,68 @@ BC_IMAGE = "ghcr.io/dstengle/shopsystem-bc-base:latest"
 BC_IMAGE_ENV = "BC_IMAGE"
 SHOPMSG_DSN_ENV = "SHOPMSG_DSN"
 
+# ---------------------------------------------------------------------------
+# Launch-failure diagnostic file (lead-63em — re-issue of lead-2qta)
+# ---------------------------------------------------------------------------
+#
+# When a launch fails to bring up a USABLE agent session, the operator needs
+# to learn WHY from the HOST, without attaching into any tmux session and
+# without relying on the launch command's stderr (ephemeral) or the
+# bc-container monitor tmux pane (needs a live session that never came up).
+# The launcher therefore writes a PERSISTED diagnostic FILE on the same
+# host-visible per-BC surface the mailbox is read from.
+#
+# DOCUMENTED per-BC host-discoverable location (lead-63em RESOLUTION of the
+# lead-2qta surface-ambiguity clarify):
+#
+#   <BCLAUNCHER_HOST_STATE_DIR>/<container-name>/launch-diagnostic.txt
+#
+# where the per-BC state root is the launcher host directory the operator's
+# per-BC mailbox/state is read from.  It is resolved from the
+# ``BCLAUNCHER_HOST_STATE_DIR`` env var when set, else defaults to
+# ``/var/lib/bc-launcher`` (a stable, documented host path).  Each BC owns a
+# per-BC subdirectory named for its container (``bc-<bc_name>`` —
+# ``LAUNCH_DIAGNOSTIC_PER_BC_SUBDIR_FMT``), exactly the per-BC layout shape
+# the launcher already uses for the container identity surface, so the
+# diagnostic file lands on the SAME per-BC surface and is host-discoverable
+# at a single, documented, predictable path.  The launcher creates the
+# directory tree on demand, so the surface exists even on the very first
+# failed launch (when no container directory had been created yet).
+#
+# The file is a single human-readable line carrying the literal cause-marker
+# token (so an operator / tool can grep for the cause) followed by a
+# human-readable reason describing why the session failed to come up.
+BCLAUNCHER_HOST_STATE_DIR_ENV = "BCLAUNCHER_HOST_STATE_DIR"
+DEFAULT_HOST_STATE_DIR = "/var/lib/bc-launcher"
+LAUNCH_DIAGNOSTIC_FILENAME = "launch-diagnostic.txt"
+
+# The four documented launch-failure cause-marker tokens.  Each is the
+# literal token written into the diagnostic file's ``cause:`` field so the
+# operator is pointed at the right repair.
+CAUSE_MARKER_MESSAGING_DB = "messaging-db"
+CAUSE_MARKER_AGENT_VAULT = "agent-vault"
+CAUSE_MARKER_READINESS = "readiness"
+CAUSE_MARKER_AGENT_STARTUP = "agent-startup"
+
+
+def launch_diagnostic_path(bc_name: str) -> Path:
+    """Documented per-BC host-discoverable launch-diagnostic file path.
+
+    lead-63em.  Returns the absolute host path at which a failed launch's
+    persisted diagnostic file lives for ``bc_name``:
+
+        <state-root>/<container-name>/launch-diagnostic.txt
+
+    The state root is ``BCLAUNCHER_HOST_STATE_DIR`` when set, else
+    ``DEFAULT_HOST_STATE_DIR``.  The per-BC subdirectory is the container name
+    (``bc-<bc_name>``), matching the launcher's existing per-BC identity
+    shape.  This is the SAME host-visible per-BC surface the operator's
+    per-BC mailbox/state is read from — readable from the host with NO tmux
+    attach and independent of the launch command's stderr.
+    """
+    root = os.environ.get(BCLAUNCHER_HOST_STATE_DIR_ENV) or DEFAULT_HOST_STATE_DIR
+    return Path(root) / _container_name(bc_name) / LAUNCH_DIAGNOSTIC_FILENAME
+
 # SHOPMSG_SYSTEM_SLUG (lead-53y0): bc-launcher RESOLVES + INJECTS this slug
 # into the launched BC container's docker run env.  bc-launcher itself NEVER
 # reads/consumes SHOPMSG_SYSTEM_SLUG — the CONSUMER is the BC's own shop-msg
@@ -1371,6 +1433,7 @@ class BcContainerController:
         # behaviorally identical across launch and start-agent because they run
         # the same code.
         return self._start_agent_session(
+            bc_name,
             container,
             startup_prompt,
             env.get(SHOPMSG_DSN_ENV),
@@ -1383,8 +1446,31 @@ class BcContainerController:
     # agent-start sequence (shared by launch + start_agent, lead-k4k7)
     # ------------------------------------------------------------------
 
+    def _write_launch_diagnostic(
+        self, bc_name: str, cause_marker: str, reason: str
+    ) -> Path:
+        """Persist a launch-failure diagnostic FILE on the per-BC host surface.
+
+        lead-63em.  Writes a single human-readable line carrying the literal
+        ``cause_marker`` token plus ``reason`` to the documented per-BC
+        host-discoverable path (``launch_diagnostic_path``).  The file is
+        readable from the host WITHOUT attaching into any tmux session and
+        WITHOUT relying on the launch command's stderr or the bc-container
+        monitor tmux pane.  Returns the path written (so the caller can name
+        it in the launch result's stderr for convenience — the FILE, not the
+        stderr line, is the authoritative diagnostic surface).
+        """
+        path = launch_diagnostic_path(bc_name)
+        content = (
+            f"cause: {cause_marker}\n"
+            f"reason: {reason}\n"
+        )
+        self._driver.write_launch_diagnostic(str(path), content)
+        return path
+
     def _start_agent_session(
         self,
+        bc_name: str,
         container: str,
         startup_prompt: str | None,
         dsn: str | None,
@@ -1442,10 +1528,17 @@ class BcContainerController:
             if dsn and not self._driver.messaging_db_reachable(
                 dsn, container=container
             ):
-                err_lines.append(
+                reason = (
                     f"messaging readiness failure: messaging database at "
                     f"{SHOPMSG_DSN_ENV}={dsn} is not reachable; "
-                    f"startup prompt NOT injected\n"
+                    f"startup prompt NOT injected"
+                )
+                diag_path = self._write_launch_diagnostic(
+                    bc_name, CAUSE_MARKER_MESSAGING_DB, reason
+                )
+                err_lines.append(reason + "\n")
+                err_lines.append(
+                    f"launch diagnostic persisted to {diag_path}\n"
                 )
                 return CommandResult(
                     exit_code=1,
@@ -1473,10 +1566,17 @@ class BcContainerController:
             if not self._driver.agent_vault_reachable(
                 probe_broker_address, container=container
             ):
-                err_lines.append(
+                reason = (
                     f"agent-vault readiness failure: agent-vault broker at "
                     f"{probe_broker_address} is not reachable; "
-                    f"startup prompt NOT injected\n"
+                    f"startup prompt NOT injected"
+                )
+                diag_path = self._write_launch_diagnostic(
+                    bc_name, CAUSE_MARKER_AGENT_VAULT, reason
+                )
+                err_lines.append(reason + "\n")
+                err_lines.append(
+                    f"launch diagnostic persisted to {diag_path}\n"
                 )
                 return CommandResult(
                     exit_code=1,
@@ -1514,14 +1614,21 @@ class BcContainerController:
                 CLAUDE_READINESS_TIMEOUT_SECONDS,
             )
             if not ready:
+                reason = (
+                    f"agent-startup failure: Claude Code did not become ready "
+                    f"within {CLAUDE_READINESS_TIMEOUT_SECONDS:.0f}s "
+                    f"(marker {CLAUDE_READY_MARKER!r} not seen; claude or its "
+                    f"tmux session never started); startup prompt NOT injected"
+                )
+                diag_path = self._write_launch_diagnostic(
+                    bc_name, CAUSE_MARKER_AGENT_STARTUP, reason
+                )
+                err_lines.append("warning: " + reason + "\n")
                 err_lines.append(
-                    f"warning: Claude Code did not become ready within "
-                    f"{CLAUDE_READINESS_TIMEOUT_SECONDS:.0f}s "
-                    f"(marker {CLAUDE_READY_MARKER!r} not seen); "
-                    f"startup prompt NOT injected\n"
+                    f"launch diagnostic persisted to {diag_path}\n"
                 )
                 return CommandResult(
-                    exit_code=0,
+                    exit_code=1,
                     stdout="".join(out_lines),
                     stderr="".join(err_lines),
                 )
@@ -1550,15 +1657,23 @@ class BcContainerController:
                 CLAUDE_READINESS_TIMEOUT_SECONDS,
             )
             if not input_ready:
-                err_lines.append(
-                    f"warning: Claude Code workspace-trust prompt did not "
-                    f"clear / main input did not become ready within "
+                reason = (
+                    f"readiness failure: Claude Code workspace-trust prompt "
+                    f"did not clear / main input did not become ready within "
                     f"{CLAUDE_READINESS_TIMEOUT_SECONDS:.0f}s "
-                    f"(marker {CLAUDE_INPUT_READY_MARKER!r} not seen); "
-                    f"startup prompt NOT injected\n"
+                    f"(marker {CLAUDE_INPUT_READY_MARKER!r} not seen; the "
+                    f"readiness barrier never reported both supporting servers "
+                    f"ready); startup prompt NOT injected"
+                )
+                diag_path = self._write_launch_diagnostic(
+                    bc_name, CAUSE_MARKER_READINESS, reason
+                )
+                err_lines.append("warning: " + reason + "\n")
+                err_lines.append(
+                    f"launch diagnostic persisted to {diag_path}\n"
                 )
                 return CommandResult(
-                    exit_code=0,
+                    exit_code=1,
                     stdout="".join(out_lines),
                     stderr="".join(err_lines),
                 )
@@ -1733,6 +1848,7 @@ class BcContainerController:
             "(no re-clone)\n"
         )
         return self._start_agent_session(
+            bc_name,
             container,
             startup_prompt,
             dsn,
