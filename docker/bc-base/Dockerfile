@@ -1,8 +1,11 @@
 # shopsystem-bc-base — the base image every BC container runs from.
 #
 # Built and published as ghcr.io/dstengle/shopsystem-bc-base by the
-# .github/workflows/publish-bc-base.yml workflow (on "v*" tag push) and
-# rebuilt on repository_dispatch by .github/workflows/rebuild-bc-base.yml.
+# .github/workflows/publish-bc-base.yml workflow (on "v*" tag push), rebuilt on
+# a bare "rebuild-bc-base" repository_dispatch by
+# .github/workflows/rebuild-bc-base.yml, and dependency-bumped + rebuilt on a
+# recurring schedule by the centralized poll
+# .github/workflows/poll-bc-base-deps.yml (lead-czwo / ADR-022).
 #
 # The four dstengle framework utility CLIs (shop-msg via shopsystem-messaging,
 # scenarios, shop-templates, and the bc-launcher self-pin) are installed from
@@ -21,20 +24,24 @@ FROM mcr.microsoft.com/devcontainers/python:3.11
 USER root
 
 # The shop-templates VCS version is PARAMETERIZED through a build ARG rather
-# than frozen at a hard-coded vMAJOR.MINOR.PATCH literal (lead-pwa2,
-# scenario edd2c813688ab768). The rebuild-bc-base workflow, triggered by a
-# shopsystem-templates release repository_dispatch, passes the released tag in
-# as --build-arg SHOP_TEMPLATES_VERSION=<released tag from client_payload>, so
-# a republished "latest" carries the RELEASED shop-templates version instead of
-# the previously hard-pinned one. The default below pins the version for a
-# plain (non-dispatch) build; a release dispatch overrides it.
+# than frozen at a hard-coded vMAJOR.MINOR.PATCH literal. The centralized
+# scheduled poll (lead-czwo, .github/workflows/poll-bc-base-deps.yml) resolves
+# shop-templates' latest canonical release and, when newer than this default,
+# bumps THIS ARG default in place, commits the bumped Dockerfile, then rebuilds
+# and republishes "latest" so it carries the resolved version. The default
+# below records the currently-pinned version.
+#
+# (ADR-022 / lead-czwo: this replaces the retired shopsystem-templates-release
+# repository_dispatch fan-in, which previously threaded the released tag in via
+# --build-arg from a dispatch client_payload.)
 ARG SHOP_TEMPLATES_VERSION=v0.15.0
 
 # Framework utility CLIs, version-pinned in the
 # "<pkg> @ git+https://github.com/<owner>/<repo>.git@vMAJOR.MINOR.PATCH"
 # VCS-pin shape. The owner is dstengle for these four shopsystem packages.
 # shop-templates takes its version from the SHOP_TEMPLATES_VERSION build ARG
-# (default v0.14.0) so a templates-release rebuild can install the released tag.
+# (default above) which the centralized scheduled poll bumps in place to the
+# resolved latest release (lead-czwo).
 RUN pip install --no-cache-dir \
     "shopsystem-messaging @ git+https://github.com/dstengle/shopsystem-messaging.git@v0.4.0" \
     "scenarios @ git+https://github.com/dstengle/shopsystem-scenarios@v0.2.0" \

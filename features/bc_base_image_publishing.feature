@@ -38,20 +38,3 @@ Feature: bc-base image build and publish artifacts (lead-yy30 / lead-yk3o)
     When the "latest" tag is republished to point at the existing digest "D_good"
     Then the registry exposes the image tag "latest" at the repository path "dstengle/shopsystem-bc-base" pointing to "D_good"
     And no new image build is required because "D_good" is an already-published digest re-tagged in place
-
-  @scenario_hash:365be56194c892b9 @bc:shopsystem-bc-launcher
-  Scenario: a shopsystem-templates release dispatch starts a bc-base rebuild run
-    Given the shopsystem-templates release workflow emits a repository_dispatch whose event_type is the literal "shopsystem-templates-released"
-    And that repository_dispatch targets the shopsystem-bc-launcher repository and carries the released tag "vT_new" in its client_payload
-    And the shopsystem-bc-launcher rebuild-bc-base workflow subscribes to the repository_dispatch event_type literal "shopsystem-templates-released"
-    When that repository_dispatch with event_type "shopsystem-templates-released" is delivered to shopsystem-bc-launcher
-    Then because the emitted event_type literal equals the subscribed event_type literal, a bc-base rebuild workflow run is started in shopsystem-bc-launcher in response to that dispatch
-    And that rebuild workflow run receives the released tag "vT_new" from the dispatch client_payload
-
-  @scenario_hash:edd2c813688ab768 @bc:shopsystem-bc-launcher
-  Scenario: after a templates release propagates, bc-base:latest carries the released shop-templates version
-    Given the published "bc-base:latest" image carries an installed shop-templates at version "vT_old"
-    And the shopsystem-templates repository publishes a newer release for the tag "vT_new" distinct from "vT_old"
-    When the bc-base rebuild triggered by that release completes and republishes the "latest" tag
-    Then pulling "ghcr.io/dstengle/shopsystem-bc-base:latest" yields an image whose installed shop-templates reports version "vT_new"
-    And the installed shop-templates version is no longer the previously hard-pinned "vT_old"

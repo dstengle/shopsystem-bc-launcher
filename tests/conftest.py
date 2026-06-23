@@ -4706,10 +4706,10 @@ def _find_bc_base_dockerfile() -> Path | None:
     return None
 
 
-# Since lead-pwa2 (scenario edd2c813688ab768) the bc-base Dockerfile installs
-# shop-templates at a version taken from the SHOP_TEMPLATES_VERSION build ARG so
-# a templates-release rebuild can install the released tag.  A genuine
-# version-by-shape pin is therefore EITHER:
+# The bc-base Dockerfile installs shop-templates at a version taken from the
+# SHOP_TEMPLATES_VERSION build ARG (default vX.Y.Z); the centralized scheduled
+# poll (lead-czwo, poll-bc-base-deps.yml) bumps that ARG default to the resolved
+# latest release.  A genuine version-by-shape pin is therefore EITHER:
 #   (a) the frozen literal  ...shopsystem-templates(.git)?@vMAJOR.MINOR.PATCH, OR
 #   (b) the parameterized   ...shopsystem-templates(.git)?@${SHOP_TEMPLATES_VERSION}
 #       WITH an `ARG SHOP_TEMPLATES_VERSION=vMAJOR.MINOR.PATCH` default carrying
@@ -4847,9 +4847,9 @@ def then_dockerfile_pins_shop_templates(ctx):
     # The shop-templates package must be installed from a
     # github.com/dstengle/shopsystem-templates @ vMAJOR.MINOR.PATCH VCS pin in
     # the pip VCS-requirement spelling (package name shop-templates, repo
-    # shopsystem-templates).  Since lead-pwa2 (scenario edd2c813688ab768) the
-    # version is PARAMETERIZED through the SHOP_TEMPLATES_VERSION build ARG so a
-    # templates-release rebuild can install the released tag; the ARG carries a
+    # shopsystem-templates).  The version is PARAMETERIZED through the
+    # SHOP_TEMPLATES_VERSION build ARG (the centralized poll, lead-czwo, bumps
+    # the ARG default to the resolved latest release); the ARG carries a
     # vMAJOR.MINOR.PATCH default, preserving the version-by-shape pin.  Accept
     # either the frozen literal OR the parameterized-with-vX.Y.Z-default form.
     assert _shop_templates_pinned_by_version_shape(text), (
@@ -4875,11 +4875,11 @@ def then_shop_templates_alongside_other_clis(ctx):
     )
     packages = {m.group(1) for m in pin_re.finditer(text)}
     # shop-templates is one of the VCS-pinned utilities -- pinned to its
-    # dstengle/shopsystem-templates repo by vMAJOR.MINOR.PATCH shape.  Since
-    # lead-pwa2 (scenario edd2c813688ab768) its version is PARAMETERIZED through
-    # the SHOP_TEMPLATES_VERSION build ARG (default vX.Y.Z), so it appears in the
-    # @${SHOP_TEMPLATES_VERSION} form rather than as a frozen @vX.Y.Z literal;
-    # the helper recognizes both.
+    # dstengle/shopsystem-templates repo by vMAJOR.MINOR.PATCH shape.  Its
+    # version is PARAMETERIZED through the SHOP_TEMPLATES_VERSION build ARG
+    # (default vX.Y.Z; the centralized poll, lead-czwo, bumps that default), so
+    # it appears in the @${SHOP_TEMPLATES_VERSION} form rather than as a frozen
+    # @vX.Y.Z literal; the helper recognizes both.
     assert _shop_templates_pinned_by_version_shape(text), (
         "shop-templates is not installed in the "
         "<pkg> @ git+https://github.com/dstengle/<repo> @ vMAJOR.MINOR.PATCH "
@@ -4943,11 +4943,11 @@ def then_dockerfile_pins_four_dstengle_clis(ctx):
     text = dockerfile.read_text()
     missing = []
     for pkg, (owner, repo) in _BC_BASE_FRAMEWORK_CLI_PINS.items():
-        # shop-templates is PARAMETERIZED since lead-pwa2 (scenario
-        # edd2c813688ab768): its version comes from the SHOP_TEMPLATES_VERSION
-        # build ARG so a templates-release rebuild installs the released tag.
-        # The owner/repo binding and vX.Y.Z version shape are still asserted
-        # (the ARG default carries the shape) -- a wrong owner/repo still FAILS.
+        # shop-templates is PARAMETERIZED: its version comes from the
+        # SHOP_TEMPLATES_VERSION build ARG (the centralized poll, lead-czwo,
+        # bumps the ARG default to the resolved latest release). The owner/repo
+        # binding and vX.Y.Z version shape are still asserted (the ARG default
+        # carries the shape) -- a wrong owner/repo still FAILS.
         if pkg == "shop-templates":
             if not _shop_templates_pinned_by_version_shape(text):
                 missing.append(
@@ -6478,9 +6478,9 @@ def then_bootstrap_clis_on_path(ctx, a, b, c, d):
         "bc-base Dockerfile does not install shopsystem-messaging (provides the "
         "shop-msg CLI) from a dstengle VCS version pin."
     )
-    # shop-templates is installed from its dstengle VCS pin; since lead-pwa2
-    # (scenario edd2c813688ab768) its version is parameterized through the
-    # SHOP_TEMPLATES_VERSION build ARG (default vX.Y.Z) rather than a frozen
+    # shop-templates is installed from its dstengle VCS pin; its version is
+    # parameterized through the SHOP_TEMPLATES_VERSION build ARG (default
+    # vX.Y.Z; bumped by the centralized poll, lead-czwo) rather than a frozen
     # literal -- either way the shop-templates CLI resolves on PATH.
     assert _shop_templates_pinned_by_version_shape(dtext), (
         "bc-base Dockerfile does not install shop-templates from a dstengle VCS "
@@ -7000,289 +7000,6 @@ def then_brokered_https_trusts_ca(ctx):
         "CA; a brokered HTTPS request would fail cert verification"
     )
 
-
-# ---------------------------------------------------------------------------
-# Scenario 365be56194c892b9 (lead-aw1b, supersedes the vacuous c179b0c448ca851c
-# from lead-pwa2): a shopsystem-templates release dispatch starts a bc-base
-# rebuild run -- pinning the event_type LITERAL end-to-end.
-#
-# The PRODUCER (dstengle/shopsystem-templates .github/workflows/release.yml)
-# POSTs a repository_dispatch with event_type "shopsystem-templates-released".
-# The CONSUMER (this repo's rebuild-bc-base.yml) only starts a run if it
-# SUBSCRIBES to that exact literal in on.repository_dispatch.types. The prior
-# pin abstracted the literal away (it only checked that *some*
-# repository_dispatch trigger existed), so a renamed/mismatched subscription
-# still passed even though a real release dispatch fired NOTHING (silent
-# no-op). This pin is NON-VACUOUS: it asserts the subscribed types CONTAIN the
-# exact producer literal, so the scenario FAILS if the subscription is renamed
-# or mismatched -- distinguishing emitted-literal == subscribed-literal (fires)
-# from a mismatch (silent no-op).
-#
-# Live GitHub Actions / repository_dispatch delivery is OUT-OF-BAND (the
-# scenario-40 declarative-artifact precedent): the proxy is the committed
-# rebuild workflow YAML.
-# ---------------------------------------------------------------------------
-
-# The event_type literal the shopsystem-templates release workflow POSTs (the
-# producer's repository_dispatch event_type). The consumer must subscribe to
-# THIS exact string for a real release dispatch to start a rebuild run.
-_TEMPLATES_RELEASED_EVENT_TYPE = "shopsystem-templates-released"
-
-
-def _bc_base_rebuild_dispatch_workflow():
-    """Return (path, doc) for the committed workflow triggered by a
-    repository_dispatch that rebuilds the bc-base image, or None."""
-    for path, doc in _load_workflows().items():
-        if not isinstance(doc, dict):
-            continue
-        on = doc.get("on", doc.get(True))
-        if not (isinstance(on, dict) and "repository_dispatch" in on):
-            continue
-        text = path.read_text()
-        # The workflow must actually rebuild the bc-base image (a build step),
-        # otherwise a bare repository_dispatch trigger would falsely satisfy
-        # "a bc-base rebuild run is started".
-        if "shopsystem-bc-base" in text and (
-            "build-push-action" in text or "docker build" in text
-        ):
-            return (path, doc)
-    return None
-
-
-def _repository_dispatch_subscribed_types(doc) -> list[str]:
-    """The list of repository_dispatch event_type literals a workflow doc
-    subscribes to (its on.repository_dispatch.types), normalized to a list of
-    strings. Empty list if the trigger declares no explicit types filter."""
-    on = doc.get("on", doc.get(True))
-    if not (isinstance(on, dict) and "repository_dispatch" in on):
-        return []
-    rd = on["repository_dispatch"]
-    if not isinstance(rd, dict):
-        return []
-    types = rd.get("types", [])
-    if isinstance(types, str):
-        return [types]
-    if isinstance(types, list):
-        return [str(t) for t in types]
-    return []
-
-
-@given(parsers.parse('the shopsystem-templates release workflow emits a '
-                     'repository_dispatch whose event_type is the literal '
-                     '"{event_type}"'))
-def given_templates_emits_event_type(event_type, ctx):
-    # The producer-emitted event_type literal (shopsystem-templates-released).
-    ctx["emitted_event_type"] = event_type
-
-
-@given(parsers.parse('that repository_dispatch targets the '
-                     'shopsystem-bc-launcher repository and carries the '
-                     'released tag "{tag}" in its client_payload'))
-def given_dispatch_targets_bc_launcher(tag, ctx):
-    ctx["dispatch_payload_tag"] = tag
-
-
-@given(parsers.parse('the shopsystem-bc-launcher rebuild-bc-base workflow '
-                     'subscribes to the repository_dispatch event_type literal '
-                     '"{event_type}"'))
-def given_rebuild_subscribes_event_type(event_type, ctx):
-    # Resolve the committed rebuild workflow and read the literals it actually
-    # subscribes to. NON-VACUITY: assert the subscribed types CONTAIN the exact
-    # producer literal -- this FAILS if the subscription is renamed/mismatched.
-    wf = _bc_base_rebuild_dispatch_workflow()
-    assert wf is not None, (
-        "No committed workflow under .github/workflows is triggered by a "
-        "repository_dispatch AND rebuilds the shopsystem-bc-base image."
-    )
-    ctx["rebuild_dispatch_workflow"] = wf
-    subscribed = _repository_dispatch_subscribed_types(wf[1])
-    ctx["subscribed_event_types"] = subscribed
-    ctx["subscribed_event_type"] = event_type
-    assert event_type in subscribed, (
-        "The rebuild-bc-base workflow does NOT subscribe to the producer's "
-        f"event_type literal {event_type!r}. Its "
-        f"on.repository_dispatch.types = {subscribed!r}. Because the producer "
-        f"POSTs event_type {event_type!r} and it is not among the subscribed "
-        "literals, a real shopsystem-templates release dispatch would fire "
-        "NOTHING (silent no-op).\n"
-        f"Workflow: {wf[0].relative_to(_REPO_ROOT)}"
-    )
-
-
-@when(parsers.parse('that repository_dispatch with event_type "{event_type}" '
-                    'is delivered to shopsystem-bc-launcher'))
-def when_dispatch_delivered_to_bc_launcher(event_type, ctx):
-    # Live Actions delivery is OUT-OF-BAND; the proxy is the committed rebuild
-    # workflow declaring the repository_dispatch trigger.
-    ctx.setdefault("rebuild_dispatch_workflow",
-                   _bc_base_rebuild_dispatch_workflow())
-    ctx["delivered_event_type"] = event_type
-
-
-@then("because the emitted event_type literal equals the subscribed "
-      "event_type literal, a bc-base rebuild workflow run is started in "
-      "shopsystem-bc-launcher in response to that dispatch")
-def then_bc_base_rebuild_run_started(ctx):
-    wf = ctx.get("rebuild_dispatch_workflow")
-    assert wf is not None, (
-        "No committed workflow under .github/workflows is triggered by a "
-        "repository_dispatch AND rebuilds the shopsystem-bc-base image, so a "
-        "templates release dispatch could not start a bc-base rebuild run."
-    )
-    # The run is started ONLY because the emitted literal is among the
-    # subscribed literals. Re-assert the literal match here so this Then is
-    # non-vacuous on its own: a mismatch means the run is NOT started.
-    emitted = ctx.get("emitted_event_type", _TEMPLATES_RELEASED_EVENT_TYPE)
-    subscribed = _repository_dispatch_subscribed_types(wf[1])
-    assert emitted in subscribed, (
-        f"The emitted event_type literal {emitted!r} is NOT among the "
-        f"rebuild workflow's subscribed types {subscribed!r}, so the "
-        "emitted-literal != subscribed-literal and NO rebuild run starts "
-        "(silent no-op)."
-    )
-
-
-@then(parsers.parse('that rebuild workflow run receives the released tag '
-                    '"{tag}" from the dispatch client_payload'))
-def then_workflow_receives_released_tag(tag, ctx):
-    wf = ctx.get("rebuild_dispatch_workflow")
-    assert wf is not None, (
-        "No repository_dispatch-triggered bc-base rebuild workflow was found."
-    )
-    text = wf[0].read_text()
-    # The released tag must be consumed FROM the dispatch client_payload and
-    # threaded into the run -- a workflow that ignores client_payload and
-    # rebuilds at a frozen tag would NOT "receive the released tag".  Genuine
-    # consumption is a github.event.client_payload.<field> expression.
-    payload_re = re.compile(
-        r"\$\{\{\s*github\.event\.client_payload\.[A-Za-z0-9_]+\s*\}\}"
-    )
-    assert payload_re.search(text), (
-        "The repository_dispatch rebuild workflow does not read the released "
-        "tag from github.event.client_payload; it ignores the dispatch payload "
-        "and so does not receive the released tag.\n"
-        f"Workflow: {wf[0].relative_to(_REPO_ROOT)}"
-    )
-
-
-# ---------------------------------------------------------------------------
-# Scenario edd2c813688ab768 (lead-pwa2): after a templates release propagates,
-# the rebuilt bc-base:latest carries the RELEASED shop-templates version, no
-# longer the previously hard-pinned one.
-#
-# Live registry pull is OUT-OF-BAND; the proxy is the committed
-# Dockerfile + rebuild workflow.  For the rebuild to republish "latest"
-# carrying vT_new, the shop-templates version installed into the image must be
-# PARAMETERIZED from the dispatch payload (a Docker build-arg fed from
-# client_payload) rather than frozen at a hard-coded vMAJOR.MINOR.PATCH literal
-# in the Dockerfile.  We assert that parameterization by construction:
-#   (a) the rebuild workflow passes a build-arg sourced from
-#       github.event.client_payload, and
-#   (b) the Dockerfile installs shop-templates at a version taken from a build
-#       ARG (not a frozen literal), so the installed version is no longer the
-#       hard-pinned vT_old.
-# ---------------------------------------------------------------------------
-
-# The Dockerfile build ARG that carries the shop-templates version through the
-# rebuild.  Asserted (not just any ARG) so the parameterization is the
-# shop-templates one specifically.
-_SHOP_TEMPLATES_VERSION_ARG_RE = re.compile(
-    r"ARG\s+(SHOP_TEMPLATES_VERSION|SHOP_TEMPLATES_REF|TEMPLATES_VERSION)\b"
-)
-
-
-@given(parsers.parse('the published "bc-base:latest" image carries an '
-                     'installed shop-templates at version "{tag}"'))
-def given_latest_carries_shop_templates_version(tag, ctx):
-    ctx["shop_templates_old_version"] = tag
-
-
-@given(parsers.parse('the shopsystem-templates repository publishes a newer '
-                     'release for the tag "{tag}" distinct from "{old}"'))
-def given_templates_publishes_newer_release(tag, old, ctx):
-    assert tag != old, "scenario precondition: vT_new must differ from vT_old"
-    ctx["shop_templates_new_version"] = tag
-
-
-@when('the bc-base rebuild triggered by that release completes and '
-      'republishes the "latest" tag')
-def when_rebuild_completes_republishes_latest(ctx):
-    ctx["rebuild_dispatch_workflow"] = _bc_base_rebuild_dispatch_workflow()
-    ctx["bc_base_dockerfile"] = _find_bc_base_dockerfile()
-
-
-@then(parsers.parse('pulling "{image_ref}" yields an image whose installed '
-                    'shop-templates reports version "{tag}"'))
-def then_pulled_image_reports_shop_templates_version(image_ref, tag, ctx):
-    # For the pulled "latest" to report the RELEASED version, the rebuild must
-    # feed the released tag into the shop-templates install as a build-arg.
-    wf = ctx.get("rebuild_dispatch_workflow")
-    assert wf is not None, (
-        "No repository_dispatch-triggered bc-base rebuild workflow was found, "
-        "so a templates release cannot republish a latest carrying the new "
-        "shop-templates version."
-    )
-    wf_text = wf[0].read_text()
-    # The build step must pass a build-arg carrying the shop-templates version,
-    # sourced from the dispatch client_payload (the released tag).
-    assert "build-args" in wf_text or "--build-arg" in wf_text, (
-        "The rebuild workflow does not pass any docker build-arg, so it cannot "
-        "thread the released shop-templates version into the image build.\n"
-        f"Workflow: {wf[0].relative_to(_REPO_ROOT)}"
-    )
-    payload_re = re.compile(
-        r"\$\{\{\s*github\.event\.client_payload\.[A-Za-z0-9_]+\s*\}\}"
-    )
-    assert payload_re.search(wf_text), (
-        "The rebuild workflow's build-arg is not sourced from "
-        "github.event.client_payload, so the pulled image would not carry the "
-        f"released version {tag!r}."
-    )
-    dockerfile = ctx.get("bc_base_dockerfile")
-    assert dockerfile is not None, "bc-base Dockerfile not found."
-    df_text = dockerfile.read_text()
-    arg_match = _SHOP_TEMPLATES_VERSION_ARG_RE.search(df_text)
-    assert arg_match, (
-        "The bc-base Dockerfile declares no ARG for the shop-templates "
-        "version, so the rebuild's build-arg has nothing to bind and the "
-        "installed version cannot be the released one."
-    )
-    arg_name = arg_match.group(1)
-    # The shop-templates install must reference that ARG (so the installed
-    # version is the build-arg value), e.g. "...@${SHOP_TEMPLATES_VERSION}".
-    install_uses_arg = re.search(
-        r"shop-templates @ git\+https://github\.com/dstengle/"
-        r"shopsystem-templates(?:\.git)?@\$\{?" + re.escape(arg_name) + r"\}?",
-        df_text,
-    )
-    assert install_uses_arg, (
-        "The bc-base Dockerfile's shop-templates install does not interpolate "
-        f"the ${{{arg_name}}} build ARG, so the installed shop-templates "
-        f"version is not driven by the released tag {tag!r}."
-    )
-
-
-@then(parsers.parse('the installed shop-templates version is no longer the '
-                    'previously hard-pinned "{old}"'))
-def then_shop_templates_no_longer_hard_pinned(old, ctx):
-    dockerfile = ctx.get("bc_base_dockerfile")
-    assert dockerfile is not None, "bc-base Dockerfile not found."
-    df_text = dockerfile.read_text()
-    # The shop-templates install line must NOT freeze the version at a
-    # hard-coded vMAJOR.MINOR.PATCH literal; it must take the version from the
-    # build ARG.  A frozen literal (the old behavior) would pin vT_old forever
-    # regardless of the dispatched release.
-    frozen_literal = re.search(
-        r"shop-templates @ git\+https://github\.com/dstengle/"
-        r"shopsystem-templates(?:\.git)?@v\d+\.\d+\.\d+",
-        df_text,
-    )
-    assert frozen_literal is None, (
-        "The bc-base Dockerfile still installs shop-templates at a frozen "
-        "vMAJOR.MINOR.PATCH literal "
-        f"({frozen_literal.group(0) if frozen_literal else ''!r}); a rebuild "
-        "would re-pin that hard-coded version rather than the released one."
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -8329,4 +8046,694 @@ def assert_diagnostic_states_why(ctx):
     text = ctx["diagnostic_path"].read_text(encoding="utf-8")
     assert "reason:" in text and "cause:" in text, (
         f"Expected the diagnostic to state cause + reason; got: {text!r}"
+    )
+
+
+# ===========================================================================
+# lead-czwo — centralized scheduled bc-base dependency check-bump-rebuild.
+#
+# A SINGLE scheduled workflow polls every baked bc-base dependency for its
+# latest canonical release, bumps the docker/bc-base/Dockerfile pin when one is
+# newer, COMMITS the bumped Dockerfile, then rebuilds bc-base and republishes
+# :latest. This REPLACES the per-repo repository_dispatch fan-in (retired
+# scenarios 365be56194c892b9 + edd2c813688ab768; ADR-022).
+#
+# Per the scenario-40 declarative-artifact precedent, live Actions / live
+# registry state is OUT-OF-BAND; the committed poll workflow YAML + Dockerfile
+# are the proxy, inspected structurally.
+# ===========================================================================
+
+_BC_BASE_DOCKERFILE_REL = "docker/bc-base/Dockerfile"
+
+# The four baked dependencies and their canonical repositories
+# (4e6cbb147adc8c24). The poll must reference each canonical repo.
+_BAKED_DEP_CANONICAL_REPOS = {
+    "shop-templates": "dstengle/shopsystem-templates",
+    "shop-msg": "dstengle/shopsystem-messaging",
+    "scenarios": "dstengle/shopsystem-scenarios",
+    "beads": "steveyegge/beads",
+}
+
+
+def _workflow_on(doc) -> dict:
+    """The normalized `on:` mapping of a workflow doc (YAML parses bare `on`
+    as the boolean True key)."""
+    on = doc.get("on", doc.get(True))
+    return on if isinstance(on, dict) else {}
+
+
+def _centralized_poll_workflow():
+    """Return (path, doc) for the SINGLE committed workflow that runs the
+    bc-base check-bump-rebuild cycle on a recurring schedule, or None.
+
+    Identity (7fa7ce7983257613): triggered by a cron `schedule:` and rebuilds
+    the shopsystem-bc-base image (a build step). The bare-dispatch
+    rebuild-bc-base.yml (scenario 4e470f7584650a2d) is NOT schedule-triggered,
+    so it is excluded — the two coexist without colliding on this identity.
+    """
+    matches = []
+    for path, doc in _load_workflows().items():
+        if not isinstance(doc, dict):
+            continue
+        on = _workflow_on(doc)
+        if "schedule" not in on:
+            continue
+        text = path.read_text()
+        if "shopsystem-bc-base" not in text:
+            continue
+        if not ("build-push-action" in text or "docker build" in text):
+            continue
+        matches.append((path, doc))
+    if len(matches) == 1:
+        return matches[0]
+    if not matches:
+        return None
+    # More than one schedule-triggered bc-base rebuild workflow violates the
+    # "exactly one workflow runs the cycle" invariant; return the list so the
+    # Then can assert on the count.
+    return matches
+
+
+# --- Given/When shared setup ----------------------------------------------
+
+@given("the shopsystem-bc-launcher BC repository owns the bc-base Dockerfile "
+       "and its publish CI")
+def given_bc_launcher_owns_dockerfile_and_ci(ctx):
+    ctx["repo_root"] = _REPO_ROOT
+    ctx["bc_base_dockerfile"] = _find_bc_base_dockerfile()
+
+
+@when("the workflow that triggers the bc-base check-bump-rebuild cycle is "
+      "inspected")
+def when_cycle_workflow_inspected(ctx):
+    ctx["poll_workflow"] = _centralized_poll_workflow()
+    ctx["all_workflows"] = _load_workflows()
+
+
+@then("there is exactly one workflow in shopsystem-bc-launcher that runs that "
+      "cycle")
+def then_exactly_one_cycle_workflow(ctx):
+    # Count schedule-triggered bc-base-rebuild workflows directly so this is
+    # non-vacuous: zero fails, more than one fails.
+    count = 0
+    for path, doc in ctx["all_workflows"].items():
+        if not isinstance(doc, dict):
+            continue
+        on = _workflow_on(doc)
+        if "schedule" not in on:
+            continue
+        text = path.read_text()
+        if "shopsystem-bc-base" not in text:
+            continue
+        if "build-push-action" in text or "docker build" in text:
+            count += 1
+    assert count == 1, (
+        "Expected EXACTLY ONE schedule-triggered workflow that rebuilds "
+        f"shopsystem-bc-base (the check-bump-rebuild cycle); found {count}."
+    )
+
+
+@then('that workflow declares a cron "schedule:" trigger so the check runs on '
+      "a recurring schedule without an external event")
+def then_workflow_declares_cron_schedule(ctx):
+    wf = ctx["poll_workflow"]
+    assert wf is not None and not isinstance(wf, list), (
+        "No single centralized scheduled cycle workflow was resolved."
+    )
+    path, doc = wf
+    on = _workflow_on(doc)
+    schedule = on.get("schedule")
+    assert isinstance(schedule, list) and schedule, (
+        f"Workflow {path.name} declares no schedule: list."
+    )
+    crons = [e.get("cron") for e in schedule if isinstance(e, dict)]
+    assert any(c for c in crons), (
+        f"Workflow {path.name} schedule: declares no cron expression "
+        f"(got {schedule!r}); the cycle would not run on a recurring "
+        "schedule without an external event."
+    )
+
+
+@then("that one workflow handles all baked dependencies rather than one "
+      "workflow per dependency")
+def then_one_workflow_all_deps(ctx):
+    wf = ctx["poll_workflow"]
+    assert wf is not None and not isinstance(wf, list)
+    path, doc = wf
+    text = path.read_text()
+    # The single workflow must reference EVERY baked dependency's canonical
+    # repo, proving it handles all four rather than one-per-dep.
+    missing = [
+        repo for repo in _BAKED_DEP_CANONICAL_REPOS.values()
+        if repo not in text
+    ]
+    assert not missing, (
+        f"The centralized workflow {path.name} does not reference all baked "
+        f"dependency canonical repos; missing: {missing!r}."
+    )
+
+
+@then('no inbound cross-repo "repository_dispatch" event is required to start '
+      "the cycle")
+def then_no_repository_dispatch_required(ctx):
+    wf = ctx["poll_workflow"]
+    assert wf is not None and not isinstance(wf, list)
+    path, doc = wf
+    on = _workflow_on(doc)
+    assert "repository_dispatch" not in on, (
+        f"The centralized cycle workflow {path.name} declares a "
+        "repository_dispatch trigger; the cycle must start WITHOUT an inbound "
+        "cross-repo event (it is schedule/workflow_dispatch-triggered)."
+    )
+    # The cycle must in fact start from the schedule.
+    assert "schedule" in on, (
+        f"Workflow {path.name} has no schedule: trigger, so a recurring "
+        "no-event start is not possible."
+    )
+
+
+# --- Scenario Outline 4e6cbb147adc8c24: per-dep token + canonical repo -----
+
+@given("the centralized scheduled workflow in shopsystem-bc-launcher runs its "
+       "dependency check")
+def given_centralized_runs_dep_check(ctx):
+    wf = _centralized_poll_workflow()
+    assert wf is not None and not isinstance(wf, list), (
+        "No single centralized scheduled check-bump-rebuild workflow found."
+    )
+    ctx["poll_workflow"] = wf
+    ctx["poll_workflow_text"] = wf[0].read_text()
+
+
+@given(parsers.parse('the baked dependency "{dependency}" is resolved against '
+                     'its canonical repository "{canonical_repo}"'))
+def given_dep_resolved_against_repo(dependency, canonical_repo, ctx):
+    # The Examples table must match the canonical mapping (guards the table).
+    expected = _BAKED_DEP_CANONICAL_REPOS.get(dependency)
+    assert expected == canonical_repo, (
+        f"Dependency {dependency!r} canonical repo mismatch: example says "
+        f"{canonical_repo!r}, expected {expected!r}."
+    )
+    ctx["current_dep"] = dependency
+    ctx["current_canonical_repo"] = canonical_repo
+
+
+@when(parsers.parse('the workflow looks up the latest release tag for '
+                    '"{dependency}"'))
+def when_workflow_looks_up_latest(dependency, ctx):
+    ctx["lookup_dep"] = dependency
+
+
+@then(parsers.parse('the lookup reads the public "{canonical_repo}" releases '
+                    'using the workflow\'s own "GITHUB_TOKEN"'))
+def then_lookup_uses_github_token_and_repo(canonical_repo, ctx):
+    text = ctx["poll_workflow_text"]
+    # The canonical repo must be referenced by the workflow (per-dep coverage).
+    assert canonical_repo in text, (
+        f"The centralized workflow does not reference the canonical repo "
+        f"{canonical_repo!r}, so it cannot resolve that dependency's latest "
+        "release."
+    )
+    # The release lookup must use the workflow's OWN GITHUB_TOKEN. Accept the
+    # standard token expressions; the gh CLI reads GH_TOKEN/GITHUB_TOKEN.
+    uses_github_token = (
+        "secrets.GITHUB_TOKEN" in text
+        or "${{ github.token }}" in text
+        or "GITHUB_TOKEN" in text
+    )
+    assert uses_github_token, (
+        "The centralized workflow does not use its own GITHUB_TOKEN to read "
+        f"the {canonical_repo!r} releases."
+    )
+
+
+def _strip_yaml_comments(text: str) -> str:
+    """Return the workflow text with full-line "# ..." comments removed.
+
+    Rationale comments may legitimately NAME the credentials/paths the workflow
+    deliberately does NOT use; the forbidden-token scan must inspect the
+    EFFECTIVE YAML, not the explanatory prose. Only strips comment-only lines
+    (leading-whitespace then "#") to avoid mangling "#" inside quoted values.
+    """
+    out = []
+    for line in text.splitlines():
+        if line.lstrip().startswith("#"):
+            continue
+        out.append(line)
+    return "\n".join(out)
+
+
+@then('the lookup does not reference a "BC_LAUNCHER_DISPATCH_TOKEN" or any '
+      "other cross-repo dispatch credential")
+def then_no_dispatch_token(ctx):
+    # Inspect EFFECTIVE YAML (comment-only lines stripped): a real cross-repo
+    # dispatch credential reference would be in executable YAML, not in the
+    # rationale comments that name what the workflow deliberately avoids.
+    text = _strip_yaml_comments(ctx["poll_workflow_text"])
+    forbidden = [
+        "BC_LAUNCHER_DISPATCH_TOKEN",
+        "DISPATCH_TOKEN",
+        "PAT_DISPATCH",
+    ]
+    hits = [tok for tok in forbidden if tok in text]
+    assert not hits, (
+        "The centralized poll references a cross-repo dispatch credential it "
+        f"must not: {hits!r}. It must resolve latest releases with the "
+        "workflow's own GITHUB_TOKEN only."
+    )
+    # No cross-repo dispatch PATH either: the poll must not be wired to a
+    # repository_dispatch trigger (asserted via the parsed on: mapping, which
+    # ignores comments).
+    on = _workflow_on(ctx["poll_workflow"][1])
+    assert "repository_dispatch" not in on, (
+        "The centralized poll declares a repository_dispatch trigger; it must "
+        "start the cycle without any cross-repo dispatch."
+    )
+
+
+@then(parsers.parse('the resolved latest release tag for "{dependency}" is '
+                    'what the workflow compares against the current bc-base '
+                    'Dockerfile pin'))
+def then_compares_latest_against_pin(dependency, ctx):
+    text = ctx["poll_workflow_text"]
+    dockerfile_rel = _BC_BASE_DOCKERFILE_REL
+    # The workflow must read the current pin from the bc-base Dockerfile to
+    # compare against the resolved latest tag (the bump decision).
+    assert dockerfile_rel in text or "DOCKERFILE" in text, (
+        "The centralized workflow does not reference the bc-base Dockerfile, "
+        "so it cannot compare the resolved latest tag against the current pin."
+    )
+    # A genuine compare reads the latest release tag (gh release view / API).
+    resolves_latest = (
+        "gh release view" in text
+        or "releases/latest" in text
+        or "tagName" in text
+        or "tag_name" in text
+    )
+    assert resolves_latest, (
+        "The centralized workflow does not resolve a latest release tag to "
+        "compare against the Dockerfile pin."
+    )
+
+
+# --- Scenario 5b6a931a493971a6: bump-then-build-then-republish -------------
+
+@given(parsers.parse('the bc-base Dockerfile in shopsystem-bc-launcher pins a '
+                     'baked dependency at "{old_pin}"'))
+def given_dockerfile_pins_dep_at(old_pin, ctx):
+    ctx["old_pin"] = old_pin
+    ctx["poll_workflow"] = _centralized_poll_workflow()
+    assert ctx["poll_workflow"] is not None and not isinstance(
+        ctx["poll_workflow"], list
+    )
+    ctx["poll_workflow_text"] = ctx["poll_workflow"][0].read_text()
+
+
+@given(parsers.parse("the centralized scheduled workflow resolves that "
+                     'dependency\'s latest release tag as "{new_pin}"'))
+def given_resolves_latest_as(new_pin, ctx):
+    ctx["new_pin"] = new_pin
+
+
+@when("the workflow runs its check-bump-rebuild cycle for that dependency")
+def when_runs_cycle_for_dep(ctx):
+    ctx.setdefault("poll_workflow", _centralized_poll_workflow())
+    ctx.setdefault("poll_workflow_text", ctx["poll_workflow"][0].read_text())
+
+
+def _step_order(text, *needles):
+    """Return the index of the FIRST occurrence of each needle (or -1)."""
+    return [text.find(n) for n in needles]
+
+
+@then(parsers.parse('the workflow first mutates "{dockerfile}" so the '
+                    'dependency pin reads "{new_pin}" rather than "{old_pin}"'))
+def then_mutates_dockerfile_pin(dockerfile, new_pin, old_pin, ctx):
+    text = ctx["poll_workflow_text"]
+    assert dockerfile in text or "DOCKERFILE" in text, (
+        f"The workflow does not reference {dockerfile} to mutate the pin."
+    )
+    # A genuine in-place bump edits the Dockerfile (sed -i / equivalent write).
+    mutates = "sed -i" in text or ">> \"${DOCKERFILE}\"" in text or "sed -i -E" in text
+    assert mutates, (
+        "The workflow does not mutate the Dockerfile pin in place (no "
+        "`sed -i` or equivalent), so a stale pin would not be bumped."
+    )
+
+
+@then("only after the pin is bumped does the workflow run the bc-base image "
+      "build")
+def then_bump_before_build(ctx):
+    text = ctx["poll_workflow_text"]
+    bump_idx = text.find("sed -i")
+    build_idx = text.find("build-push-action")
+    if build_idx == -1:
+        build_idx = text.find("docker build")
+    assert bump_idx != -1, "No Dockerfile pin bump (sed -i) found."
+    assert build_idx != -1, "No bc-base image build step found."
+    assert bump_idx < build_idx, (
+        "The bc-base image build is declared BEFORE the Dockerfile pin bump; "
+        "the bump must come first so the build picks up the new pin."
+    )
+
+
+@then(parsers.parse('the workflow republishes "{image_ref}" at the new digest '
+                    'built from the bumped Dockerfile'))
+def then_republishes_latest_new_digest(image_ref, ctx):
+    text = ctx["poll_workflow_text"]
+    assert image_ref in text, (
+        f"The workflow does not republish {image_ref}."
+    )
+    assert "build-push-action" in text or "docker build" in text, (
+        "The workflow has no build step, so it cannot republish a new digest."
+    )
+    # Build before push of the bumped pin: the bump (sed) precedes the build.
+    bump_idx = text.find("sed -i")
+    build_idx = text.find("build-push-action")
+    assert bump_idx != -1 and build_idx != -1 and bump_idx < build_idx, (
+        "The republished digest is not built from the bumped Dockerfile "
+        "(bump does not precede build)."
+    )
+
+
+@then(parsers.parse('a bare rebuild that left the Dockerfile pin at "{old_pin}"'
+                    ' would not satisfy this behavior'))
+def then_bare_rebuild_insufficient(old_pin, ctx):
+    text = ctx["poll_workflow_text"]
+    # Teeth: the workflow must actually mutate the pin (otherwise a bare
+    # rebuild leaving the pin stale would falsely satisfy the scenario).
+    assert "sed -i" in text, (
+        "The workflow performs no pin mutation; a bare rebuild leaving the "
+        "pin stale would (wrongly) satisfy the bump behavior."
+    )
+
+
+# --- Scenario cf8625dbac93cfdc: no-op when every dep equals its pin --------
+
+@given(parsers.parse('the bc-base Dockerfile in shopsystem-bc-launcher pins '
+                     'every baked dependency at its current "{pin}"'))
+def given_dockerfile_pins_every_dep(pin, ctx):
+    ctx["poll_workflow"] = _centralized_poll_workflow()
+    assert ctx["poll_workflow"] is not None and not isinstance(
+        ctx["poll_workflow"], list
+    )
+    ctx["poll_workflow_text"] = ctx["poll_workflow"][0].read_text()
+
+
+@given("for every baked dependency the resolved latest release tag equals the "
+       "tag already pinned in the Dockerfile")
+def given_all_deps_equal(ctx):
+    ctx["all_deps_equal"] = True
+
+
+@when("the centralized scheduled workflow runs its check-bump-rebuild cycle")
+def when_centralized_runs_cycle(ctx):
+    ctx.setdefault("poll_workflow", _centralized_poll_workflow())
+    ctx.setdefault("poll_workflow_text", ctx["poll_workflow"][0].read_text())
+
+
+@then(parsers.parse('the workflow leaves "{dockerfile}" unchanged with no pin '
+                    'bumped'))
+def then_leaves_dockerfile_unchanged(dockerfile, ctx):
+    text = ctx["poll_workflow_text"]
+    # The no-op path is gated: the commit + build + push steps must be
+    # conditional on a "changed" signal, so an all-equal run mutates nothing.
+    assert "changed" in text, (
+        "The workflow declares no 'changed' gate; it cannot distinguish a "
+        "no-op (all deps equal) run from a bump run, so it would commit / "
+        "rebuild unconditionally."
+    )
+
+
+@then("the workflow does not run a bc-base image build")
+def then_no_build_on_noop(ctx):
+    wf = ctx["poll_workflow"]
+    doc = wf[1]
+    # The build step must be conditional (if:) on the changed-gate so a no-op
+    # run skips it.
+    build_step = _find_step(doc, lambda s: "build-push-action" in str(
+        s.get("uses", "")) or "docker build" in str(s.get("run", "")))
+    assert build_step is not None, "No bc-base build step found."
+    cond = str(build_step.get("if", ""))
+    assert "changed" in cond, (
+        "The bc-base build step is not gated on the changed-signal "
+        f"(if: {cond!r}); a no-op all-equal run would still build."
+    )
+
+
+@then(parsers.parse('the workflow does not republish "{image_ref}" with a new '
+                    'digest'))
+def then_no_republish_on_noop(image_ref, ctx):
+    wf = ctx["poll_workflow"]
+    doc = wf[1]
+    push_step = _find_step(
+        doc,
+        lambda s: image_ref in str(s.get("with", {}).get("tags", ""))
+        or image_ref in str(s.get("run", "")),
+    )
+    assert push_step is not None, (
+        f"No step republishing {image_ref} found."
+    )
+    cond = str(push_step.get("if", ""))
+    assert "changed" in cond, (
+        f"The republish step for {image_ref} is not gated on the "
+        f"changed-signal (if: {cond!r}); a no-op run would republish."
+    )
+
+
+def _find_step(doc, pred):
+    jobs = doc.get("jobs", {})
+    for job in jobs.values():
+        for step in job.get("steps", []) or []:
+            if pred(step):
+                return step
+    return None
+
+
+# --- Scenario 59c0f539187eabbb: workflow_dispatch manual start -------------
+
+@given(parsers.parse('the centralized bc-base rebuild workflow in '
+                     'shopsystem-bc-launcher declares a "{trigger}" trigger'))
+def given_declares_trigger(trigger, ctx):
+    wf = _centralized_poll_workflow()
+    assert wf is not None and not isinstance(wf, list), (
+        "No single centralized bc-base rebuild workflow found."
+    )
+    ctx["poll_workflow"] = wf
+    ctx["poll_workflow_text"] = wf[0].read_text()
+    on = _workflow_on(wf[1])
+    assert trigger in on, (
+        f"The centralized workflow {wf[0].name} does not declare a "
+        f"{trigger!r} trigger (on: {list(on.keys())!r})."
+    )
+
+
+@given('a baked dependency\'s latest release tag is newer than the tag pinned '
+       'in "docker/bc-base/Dockerfile"')
+def given_a_dep_is_newer(ctx):
+    ctx["a_dep_newer"] = True
+
+
+@when(parsers.parse('an operator starts the workflow via "workflow_dispatch" '
+                    'from the Actions UI or "gh workflow run"'))
+def when_operator_starts_via_dispatch(ctx):
+    ctx.setdefault("poll_workflow", _centralized_poll_workflow())
+    ctx.setdefault("poll_workflow_text", ctx["poll_workflow"][0].read_text())
+
+
+@then("the manually started run resolves each baked dependency's latest "
+      "release tag the same way the scheduled run does")
+def then_manual_same_as_scheduled(ctx):
+    wf = ctx["poll_workflow"]
+    on = _workflow_on(wf[1])
+    # The SAME workflow declares BOTH schedule and workflow_dispatch, so the
+    # manual run executes the identical job/steps as the scheduled run.
+    assert "schedule" in on and "workflow_dispatch" in on, (
+        "The centralized workflow does not declare BOTH schedule and "
+        f"workflow_dispatch (on: {list(on.keys())!r}); a manual run would not "
+        "run the same path as the scheduled run."
+    )
+
+
+@then(parsers.parse('the run bumps the stale Dockerfile pin then rebuilds and '
+                    'republishes "{image_ref}"'))
+def then_manual_bumps_and_republishes(image_ref, ctx):
+    text = ctx["poll_workflow_text"]
+    assert "sed -i" in text, "The workflow does not bump the Dockerfile pin."
+    bump_idx = text.find("sed -i")
+    build_idx = text.find("build-push-action")
+    assert build_idx != -1 and bump_idx < build_idx, (
+        "The build does not follow the pin bump."
+    )
+    assert image_ref in text, f"The workflow does not republish {image_ref}."
+
+
+@then('starting the workflow this way requires no source-code change and no '
+      'raw "gh api .../dispatches" call')
+def then_manual_no_source_change_no_raw_dispatch(ctx):
+    wf = ctx["poll_workflow"]
+    on = _workflow_on(wf[1])
+    # workflow_dispatch is sufficient to start it (Actions UI / gh workflow
+    # run); a repository_dispatch (raw `gh api .../dispatches`) is NOT required.
+    assert "workflow_dispatch" in on, (
+        "The workflow lacks a workflow_dispatch trigger, so an operator could "
+        "not start it without a source change or a raw dispatch call."
+    )
+    assert "repository_dispatch" not in on, (
+        "The workflow declares a repository_dispatch trigger; starting it must "
+        "not require a raw `gh api .../dispatches` call."
+    )
+
+
+# --- Scenario 2b69c3b682f7871d: commit the bumped Dockerfile ---------------
+
+@given(parsers.parse('the centralized scheduled workflow bumps a baked '
+                     'dependency pin in "{dockerfile}" from "{old_pin}" to '
+                     '"{new_pin}"'))
+def given_workflow_bumps_pin(dockerfile, old_pin, new_pin, ctx):
+    ctx["poll_workflow"] = _centralized_poll_workflow()
+    assert ctx["poll_workflow"] is not None and not isinstance(
+        ctx["poll_workflow"], list
+    )
+    ctx["poll_workflow_text"] = ctx["poll_workflow"][0].read_text()
+    ctx["new_pin"] = new_pin
+
+
+@when(parsers.parse('the workflow rebuilds bc-base and republishes "{image_ref}"'
+                    ' from that bumped Dockerfile'))
+def when_rebuilds_from_bumped(image_ref, ctx):
+    ctx.setdefault("poll_workflow", _centralized_poll_workflow())
+    ctx.setdefault("poll_workflow_text", ctx["poll_workflow"][0].read_text())
+
+
+@then(parsers.parse('the bumped "{dockerfile}" is committed back to the '
+                    'shopsystem-bc-launcher repository'))
+def then_bumped_dockerfile_committed(dockerfile, ctx):
+    text = ctx["poll_workflow_text"]
+    # A genuine commit-back step runs `git commit` (and pushes) the bumped
+    # Dockerfile.
+    assert "git commit" in text, (
+        "The workflow does not `git commit` the bumped Dockerfile back to the "
+        "repository; the bump would be working-tree-only."
+    )
+    assert "git add" in text and dockerfile in text, (
+        f"The workflow does not `git add` {dockerfile} before committing."
+    )
+    assert "git push" in text, (
+        "The workflow does not `git push` the commit, so the bumped pin would "
+        "not land on the repository."
+    )
+
+
+@then(parsers.parse('the committed Dockerfile records the dependency pinned at '
+                    '"{new_pin}" that the republished bc-base:latest was built '
+                    'from'))
+def then_committed_records_new_pin(new_pin, ctx):
+    text = ctx["poll_workflow_text"]
+    # The commit (git add + git commit) must happen BEFORE the build, so the
+    # republished image is built from the committed pin (not a transient edit).
+    commit_idx = text.find("git commit")
+    build_idx = text.find("build-push-action")
+    if build_idx == -1:
+        build_idx = text.find("docker build")
+    assert commit_idx != -1 and build_idx != -1, (
+        "Missing commit or build step."
+    )
+    assert commit_idx < build_idx, (
+        "The bc-base build runs BEFORE the bumped Dockerfile is committed, so "
+        "the republished image would be built from an uncommitted pin."
+    )
+
+
+@then("the build was not produced from an uncommitted working-tree-only pin "
+      "edit")
+def then_not_working_tree_only(ctx):
+    text = ctx["poll_workflow_text"]
+    commit_idx = text.find("git commit")
+    build_idx = text.find("build-push-action")
+    if build_idx == -1:
+        build_idx = text.find("docker build")
+    assert commit_idx != -1, (
+        "The workflow never commits the bumped pin; the build would be from a "
+        "working-tree-only edit."
+    )
+    assert commit_idx < build_idx, (
+        "The build precedes the commit; the republished image would be built "
+        "from an uncommitted working-tree-only pin edit."
+    )
+
+
+# --- Scenario 69904daef7a8d13e: latest carries the new version -------------
+
+@given(parsers.parse('the published "bc-base:latest" image carries an '
+                     'installed baked dependency at version "{old}"'))
+def given_latest_carries_dep_version(old, ctx):
+    ctx["dep_old_version"] = old
+    ctx["poll_workflow"] = _centralized_poll_workflow()
+    assert ctx["poll_workflow"] is not None and not isinstance(
+        ctx["poll_workflow"], list
+    )
+    ctx["poll_workflow_text"] = ctx["poll_workflow"][0].read_text()
+    ctx["bc_base_dockerfile"] = _find_bc_base_dockerfile()
+
+
+@given(parsers.parse("the dependency's canonical repository publishes a newer "
+                     'release tag "{new}" distinct from "{old}"'))
+def given_canonical_publishes_newer(new, old, ctx):
+    assert new != old, "scenario precondition: vDep_new must differ from vDep_old"
+    ctx["dep_new_version"] = new
+
+
+@given(parsers.parse('the centralized scheduled bc-launcher workflow resolves '
+                     '"{new}" as that dependency\'s latest release'))
+def given_workflow_resolves_new(new, ctx):
+    ctx["dep_new_version"] = new
+
+
+@when(parsers.parse('the workflow bumps the Dockerfile pin to "{new}", '
+                    'rebuilds bc-base, and republishes the "latest" tag'))
+def when_bumps_rebuilds_republishes(new, ctx):
+    ctx.setdefault("poll_workflow", _centralized_poll_workflow())
+    ctx.setdefault("poll_workflow_text", ctx["poll_workflow"][0].read_text())
+
+
+@then(parsers.parse('pulling "{image_ref}" yields an image whose installed '
+                    'dependency reports version "{new}"'))
+def then_pulled_reports_new_version(image_ref, new, ctx):
+    text = ctx["poll_workflow_text"]
+    # The propagation chain that makes :latest carry the new version: the
+    # workflow bumps the pin in the Dockerfile (sed -i), commits it, then
+    # rebuilds and republishes :latest from the committed bumped Dockerfile.
+    assert "sed -i" in text, (
+        "The workflow does not bump the Dockerfile pin, so :latest would not "
+        f"carry {new!r}."
+    )
+    assert "git commit" in text, (
+        "The workflow does not commit the bumped pin, so the rebuild would not "
+        f"be from the bumped Dockerfile carrying {new!r}."
+    )
+    assert image_ref in text, (
+        f"The workflow does not republish {image_ref}."
+    )
+    bump_idx = text.find("sed -i")
+    build_idx = text.find("build-push-action")
+    assert build_idx != -1 and bump_idx < build_idx, (
+        "The rebuild does not follow the pin bump, so the republished :latest "
+        f"would not carry {new!r}."
+    )
+    # The build must consume THE bc-base Dockerfile (the bumped one).
+    assert _BC_BASE_DOCKERFILE_REL in text, (
+        "The workflow does not build from the bc-base Dockerfile."
+    )
+
+
+@then(parsers.parse('the installed dependency version is no longer the '
+                    'previously hard-pinned "{old}"'))
+def then_no_longer_old_version(old, ctx):
+    text = ctx["poll_workflow_text"]
+    # The pin is rewritten in place to the resolved latest, so a republished
+    # rebuild cannot carry the old hard-pinned version.
+    assert "sed -i" in text, (
+        "The workflow does not rewrite the Dockerfile pin; a rebuild would "
+        f"re-pin the old hard-coded version {old!r}."
     )

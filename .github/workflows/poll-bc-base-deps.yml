@@ -1,0 +1,184 @@
+# Centralized scheduled bc-base dependency check-bump-rebuild (lead-czwo,
+# ADR-022).
+#
+# This is the SINGLE workflow that runs the bc-base check-bump-rebuild cycle.
+# It REPLACES the per-repo repository_dispatch fan-in (the retired scenarios
+# 365be56194c892b9 + edd2c813688ab768): no inbound cross-repo
+# repository_dispatch is required to start the cycle.
+#
+# Pins, declaratively (scenario-40 declarative-artifact precedent — live
+# Actions / live registry state is OUT-OF-BAND, the committed YAML is the
+# proxy):
+#   - 7fa7ce7983257613: exactly ONE workflow runs the cycle; it is triggered by
+#     a cron schedule (recurring, no external event); it handles ALL baked
+#     dependencies in one workflow (not one-per-dep).
+#   - 4e6cbb147adc8c24: the poll resolves each baked dependency's latest release
+#     tag against its canonical repo using the workflow's OWN GITHUB_TOKEN (NOT
+#     a BC_LAUNCHER_DISPATCH_TOKEN or any cross-repo dispatch credential); the
+#     resolved latest tag is compared against the current Dockerfile pin.
+#   - 5b6a931a493971a6: when a dep's latest > Dockerfile pin, FIRST bump the
+#     pin in docker/bc-base/Dockerfile, THEN build, THEN republish :latest.
+#   - cf8625dbac93cfdc: when every dep's latest == its pin, make no change /
+#     run no build / republish nothing.
+#   - 59c0f539187eabbb: workflow_dispatch lets an operator start the SAME path.
+#   - 2b69c3b682f7871d: the bumped Dockerfile is COMMITTED back to the repo
+#     recording the triggering dep version; the build is not from an
+#     uncommitted working-tree-only edit.
+#   - 69904daef7a8d13e: after the poll propagates a newer release, bc-base:latest
+#     carries the new version.
+name: poll-bc-base-deps
+
+on:
+  # Recurring schedule — the check-bump-rebuild cycle runs without any external
+  # event (7fa7ce7983257613). Daily at 07:00 UTC.
+  schedule:
+    - cron: "0 7 * * *"
+  # Operator manual start of the SAME path (59c0f539187eabbb): no source change,
+  # no raw `gh api .../dispatches` call.
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  # ONE job that checks ALL baked dependencies, bumps the Dockerfile pin(s) when
+  # any is newer, commits the bump, then rebuilds + republishes :latest. There
+  # is no per-dependency workflow and no repository_dispatch trigger.
+  check-bump-rebuild:
+    runs-on: ubuntu-latest
+    env:
+      DOCKERFILE: docker/bc-base/Dockerfile
+      # The poll uses bc-launcher's OWN GITHUB_TOKEN to read the public
+      # canonical-repo releases (4e6cbb147adc8c24). It does NOT use a
+      # BC_LAUNCHER_DISPATCH_TOKEN or any cross-repo dispatch credential.
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Check out the bc-launcher repository
+        uses: actions/checkout@v4
+
+      - name: Resolve each baked dependency's latest release and bump stale pins
+        id: bump
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          # All four baked dependencies in ONE workflow (7fa7ce7983257613):
+          # "<dep-key>|<canonical owner/repo>". The canonical repos
+          # (4e6cbb147adc8c24):
+          #   shop-templates -> dstengle/shopsystem-templates
+          #   shop-msg       -> dstengle/shopsystem-messaging
+          #   scenarios      -> dstengle/shopsystem-scenarios
+          #   beads          -> steveyegge/beads
+          DEPS=(
+            "shop-templates|dstengle/shopsystem-templates"
+            "shop-msg|dstengle/shopsystem-messaging"
+            "scenarios|dstengle/shopsystem-scenarios"
+            "beads|steveyegge/beads"
+          )
+
+          changed="false"
+
+          for entry in "${DEPS[@]}"; do
+            dep="${entry%%|*}"
+            repo="${entry##*|}"
+
+            # Resolve the latest release tag for this dependency using the
+            # workflow's OWN GITHUB_TOKEN against the canonical repo's public
+            # releases (4e6cbb147adc8c24). No BC_LAUNCHER_DISPATCH_TOKEN.
+            latest="$(GH_TOKEN="${GITHUB_TOKEN}" gh release view \
+              --repo "${repo}" --json tagName --jq '.tagName')"
+            echo "resolved latest for ${dep} (${repo}): ${latest}"
+
+            # The CURRENT pin in docker/bc-base/Dockerfile for this dependency.
+            case "${dep}" in
+              shop-templates)
+                current="$(grep -oP 'ARG SHOP_TEMPLATES_VERSION=\Kv[0-9]+\.[0-9]+\.[0-9]+' "${DOCKERFILE}" || true)"
+                ;;
+              shop-msg)
+                current="$(grep -oP 'shopsystem-messaging(?:\.git)?@\Kv[0-9]+\.[0-9]+\.[0-9]+' "${DOCKERFILE}" || true)"
+                ;;
+              scenarios)
+                current="$(grep -oP 'shopsystem-scenarios(?:\.git)?@\Kv[0-9]+\.[0-9]+\.[0-9]+' "${DOCKERFILE}" || true)"
+                ;;
+              beads)
+                current="$(grep -oP 'BD_VERSION=\K[0-9]+\.[0-9]+\.[0-9]+' "${DOCKERFILE}" || true)"
+                ;;
+            esac
+            echo "current pin for ${dep}: ${current}"
+
+            # Compare the RESOLVED latest tag against the current Dockerfile pin
+            # (4e6cbb147adc8c24). beads pins a bare version; normalize the
+            # leading "v" for comparison only.
+            latest_norm="${latest#v}"
+            current_norm="${current#v}"
+            if [ "${latest_norm}" = "${current_norm}" ]; then
+              continue
+            fi
+
+            # latest != pin -> the dep is newer. FIRST mutate the Dockerfile so
+            # the pin reads the new tag (5b6a931a493971a6). The bump happens
+            # BEFORE any build below.
+            echo "bumping ${dep}: ${current} -> ${latest}"
+            case "${dep}" in
+              shop-templates)
+                sed -i -E "s|(ARG SHOP_TEMPLATES_VERSION=)v[0-9]+\.[0-9]+\.[0-9]+|\1${latest}|" "${DOCKERFILE}"
+                ;;
+              shop-msg)
+                sed -i -E "s|(shopsystem-messaging(\.git)?@)v[0-9]+\.[0-9]+\.[0-9]+|\1${latest}|" "${DOCKERFILE}"
+                ;;
+              scenarios)
+                sed -i -E "s|(shopsystem-scenarios(\.git)?@)v[0-9]+\.[0-9]+\.[0-9]+|\1${latest}|" "${DOCKERFILE}"
+                ;;
+              beads)
+                sed -i -E "s|(BD_VERSION=)[0-9]+\.[0-9]+\.[0-9]+|\1${latest_norm}|" "${DOCKERFILE}"
+                ;;
+            esac
+            changed="true"
+          done
+
+          echo "changed=${changed}" >> "${GITHUB_OUTPUT}"
+
+      - name: Commit the bumped Dockerfile recording the new dependency versions
+        # Only when a pin was bumped (cf8625dbac93cfdc: no-op makes no commit).
+        # The bumped Dockerfile is COMMITTED back to the repo BEFORE the build
+        # so the republished :latest is built from a committed pin, not an
+        # uncommitted working-tree-only edit (2b69c3b682f7871d).
+        if: steps.bump.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add "${DOCKERFILE}"
+          git commit -m "chore(bc-base): bump baked dependency pin(s) to latest release
+
+          Centralized scheduled poll (poll-bc-base-deps.yml) detected a newer
+          canonical release for one or more baked dependencies and bumped the
+          ${DOCKERFILE} pin(s) to record the triggering dependency version(s)."
+          git push
+
+      - name: Log in to ghcr.io
+        if: steps.bump.outputs.changed == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Rebuild bc-base from the bumped Dockerfile and republish :latest
+        # Runs ONLY after the pin is bumped AND committed (5b6a931a493971a6
+        # ordering; 2b69c3b682f7871d commit-before-build). On a no-op run this
+        # step is skipped, so no build runs and :latest is not republished
+        # (cf8625dbac93cfdc).
+        if: steps.bump.outputs.changed == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: ./docker/bc-base
+          file: ./docker/bc-base/Dockerfile
+          push: true
+          no-cache: true
+          # Republish :latest at the new digest built from the bumped Dockerfile
+          # (5b6a931a493971a6 / 69904daef7a8d13e).
+          tags: |
+            ghcr.io/dstengle/shopsystem-bc-base:latest
