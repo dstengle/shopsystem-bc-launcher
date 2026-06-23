@@ -10,21 +10,24 @@ Feature: centralized scheduled bc-base dependency check-bump-rebuild (lead-czwo)
   pin the committed workflow + Dockerfile YAML/text as DECLARATIVE ARTIFACTS via
   structural inspection.
 
-  @scenario_hash:7fa7ce7983257613 @bc:shopsystem-bc-launcher
+  @scenario_hash:930a6a6579e2a859 @bc:shopsystem-bc-launcher
   Scenario: the bc-base rebuild trigger is one scheduled workflow owned by shopsystem-bc-launcher
     Given the shopsystem-bc-launcher BC repository owns the bc-base Dockerfile and its publish CI
     When the workflow that triggers the bc-base check-bump-rebuild cycle is inspected
     Then there is exactly one workflow in shopsystem-bc-launcher that runs that cycle
     And that workflow declares a cron "schedule:" trigger so the check runs on a recurring schedule without an external event
-    And that one workflow handles all baked dependencies rather than one workflow per dependency
+    And the workflow's executable body, with YAML comment lines excluded, handles all baked dependencies rather than one workflow per dependency
+    And a dependency enumerated only in a descriptive YAML comment, absent from the executable body, does not satisfy "handles all baked dependencies"
     And no inbound cross-repo "repository_dispatch" event is required to start the cycle
 
-  @scenario_hash:4e6cbb147adc8c24 @bc:shopsystem-bc-launcher
+  @scenario_hash:0f386f31857fbeb1 @bc:shopsystem-bc-launcher
   Scenario Outline: the poll resolves each baked dependency's latest release tag using bc-launcher's own GITHUB_TOKEN
     Given the centralized scheduled workflow in shopsystem-bc-launcher runs its dependency check
     And the baked dependency "<dependency>" is resolved against its canonical repository "<canonical_repo>"
     When the workflow looks up the latest release tag for "<dependency>"
-    Then the lookup reads the public "<canonical_repo>" releases using the workflow's own "GITHUB_TOKEN"
+    Then the workflow's executable body, with YAML comment lines excluded, enumerates "<dependency>" mapped to its canonical repository "<canonical_repo>"
+    And a "<dependency>" to "<canonical_repo>" mapping present only in a descriptive YAML comment, absent from the executable body, does not satisfy this lookup
+    And the lookup reads the public "<canonical_repo>" releases using the workflow's own "GITHUB_TOKEN"
     And the lookup does not reference a "BC_LAUNCHER_DISPATCH_TOKEN" or any other cross-repo dispatch credential
     And the resolved latest release tag for "<dependency>" is what the workflow compares against the current bc-base Dockerfile pin
 

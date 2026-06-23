@@ -8066,7 +8066,7 @@ def assert_diagnostic_states_why(ctx):
 _BC_BASE_DOCKERFILE_REL = "docker/bc-base/Dockerfile"
 
 # The four baked dependencies and their canonical repositories
-# (4e6cbb147adc8c24). The poll must reference each canonical repo.
+# (0f386f31857fbeb1). The poll must reference each canonical repo.
 _BAKED_DEP_CANONICAL_REPOS = {
     "shop-templates": "dstengle/shopsystem-templates",
     "shop-msg": "dstengle/shopsystem-messaging",
@@ -8086,7 +8086,7 @@ def _centralized_poll_workflow():
     """Return (path, doc) for the SINGLE committed workflow that runs the
     bc-base check-bump-rebuild cycle on a recurring schedule, or None.
 
-    Identity (7fa7ce7983257613): triggered by a cron `schedule:` and rebuilds
+    Identity (930a6a6579e2a859): triggered by a cron `schedule:` and rebuilds
     the shopsystem-bc-base image (a build step). The bare-dispatch
     rebuild-bc-base.yml (scenario 4e470f7584650a2d) is NOT schedule-triggered,
     so it is excluded — the two coexist without colliding on this identity.
@@ -8174,8 +8174,8 @@ def then_workflow_declares_cron_schedule(ctx):
     )
 
 
-@then("that one workflow handles all baked dependencies rather than one "
-      "workflow per dependency")
+@then("the workflow's executable body, with YAML comment lines excluded, "
+      "handles all baked dependencies rather than one workflow per dependency")
 def then_one_workflow_all_deps(ctx):
     wf = ctx["poll_workflow"]
     assert wf is not None and not isinstance(wf, list)
@@ -8198,6 +8198,46 @@ def then_one_workflow_all_deps(ctx):
     )
 
 
+@then('a dependency enumerated only in a descriptive YAML comment, absent from '
+      'the executable body, does not satisfy "handles all baked dependencies"')
+def then_comment_only_dep_does_not_satisfy(ctx):
+    # TEETH: prove the comment-stripping is load-bearing, not decorative. A dep
+    # whose canonical repo appears ONLY in a comment line (not in the executable
+    # body) must NOT count toward "handles all baked dependencies". We assert by
+    # construction: inject a synthetic canonical repo into a comment line of the
+    # workflow text, strip comments, and confirm the synthetic repo is absent
+    # from the stripped body. If _strip_yaml_comments did NOT remove the
+    # comment, this would fail — so the assertion has genuine teeth.
+    wf = ctx["poll_workflow"]
+    assert wf is not None and not isinstance(wf, list)
+    path, doc = wf
+    raw = path.read_text()
+    sentinel = "acme/comment-only-phantom-dep"
+    assert sentinel not in raw, (
+        "Test sentinel unexpectedly already present in the workflow text."
+    )
+    # Place the sentinel mapping in a comment line ONLY (never the exec body).
+    injected = raw + f"\n# phantom mapping: phantom -> {sentinel}\n"
+    stripped = _strip_yaml_comments(injected)
+    assert sentinel not in stripped, (
+        "A dependency mapping present only in a descriptive YAML comment "
+        "survived comment-stripping; comment-only enumeration would falsely "
+        "satisfy 'handles all baked dependencies'. The coverage check must "
+        "inspect the comment-stripped executable body."
+    )
+    # And the real coverage must still hold against the stripped EXECUTABLE body.
+    exec_body = _strip_yaml_comments(raw)
+    missing = [
+        repo for repo in _BAKED_DEP_CANONICAL_REPOS.values()
+        if repo not in exec_body
+    ]
+    assert not missing, (
+        f"The centralized workflow {path.name} executable body (comments "
+        f"stripped) does not handle all baked dependencies; missing: "
+        f"{missing!r}."
+    )
+
+
 @then('no inbound cross-repo "repository_dispatch" event is required to start '
       "the cycle")
 def then_no_repository_dispatch_required(ctx):
@@ -8217,7 +8257,7 @@ def then_no_repository_dispatch_required(ctx):
     )
 
 
-# --- Scenario Outline 4e6cbb147adc8c24: per-dep token + canonical repo -----
+# --- Scenario Outline 0f386f31857fbeb1: per-dep token + canonical repo -----
 
 @given("the centralized scheduled workflow in shopsystem-bc-launcher runs its "
        "dependency check")
@@ -8247,6 +8287,65 @@ def given_dep_resolved_against_repo(dependency, canonical_repo, ctx):
                     '"{dependency}"'))
 def when_workflow_looks_up_latest(dependency, ctx):
     ctx["lookup_dep"] = dependency
+
+
+@then(parsers.parse('the workflow\'s executable body, with YAML comment lines '
+                    'excluded, enumerates "{dependency}" mapped to its '
+                    'canonical repository "{canonical_repo}"'))
+def then_exec_body_enumerates_dep_to_repo(dependency, canonical_repo, ctx):
+    # Inspect the EXECUTABLE workflow body only (comment-only lines stripped):
+    # the dep->repo mapping must be present in the executable DEPS config, not
+    # merely in the descriptive header comment. The DEPS array entries take the
+    # form "<dep>|<owner/repo>"; require BOTH the canonical repo AND the
+    # dep-key to be present in the stripped body so a dropped executable entry
+    # (whose comment survives) cannot pass.
+    text = _strip_yaml_comments(ctx["poll_workflow_text"])
+    assert canonical_repo in text, (
+        f"The centralized workflow executable body (comments stripped) does "
+        f"not enumerate the canonical repo {canonical_repo!r} for dependency "
+        f"{dependency!r}; a comment-only mapping does not count."
+    )
+    # The executable DEPS array pairs the dep-key with its canonical repo on
+    # one line ("<dep>|<owner/repo>"). Require that exact executable pairing so
+    # a stray repo reference elsewhere cannot substitute for the DEPS entry.
+    pairing = f"{dependency}|{canonical_repo}"
+    assert pairing in text, (
+        f"The centralized workflow executable body (comments stripped) does "
+        f"not enumerate the executable mapping {pairing!r}; the dep->repo "
+        "pairing must live in the executable DEPS config, not a comment."
+    )
+
+
+@then(parsers.parse('a "{dependency}" to "{canonical_repo}" mapping present '
+                    'only in a descriptive YAML comment, absent from the '
+                    'executable body, does not satisfy this lookup'))
+def then_comment_only_mapping_does_not_satisfy(dependency, canonical_repo, ctx):
+    # TEETH: prove the comment-stripping is load-bearing for the per-dep lookup.
+    # Construct a workflow text in which THIS dep->repo mapping appears only in
+    # a comment line, strip comments, and confirm the executable-body pairing is
+    # absent from the stripped text. If _strip_yaml_comments did NOT remove the
+    # comment, the pairing would survive and this would fail — genuine teeth.
+    raw = ctx["poll_workflow_text"]
+    pairing = f"{dependency}|{canonical_repo}"
+    # Remove the real executable pairing, then re-introduce it ONLY in a comment.
+    without_exec = raw.replace(pairing, f"{dependency}|REDACTED-FOR-TEST")
+    assert pairing not in without_exec, (
+        "Failed to redact the executable dep->repo pairing for the teeth check."
+    )
+    comment_only = without_exec + f"\n# descriptive: {pairing}\n"
+    stripped = _strip_yaml_comments(comment_only)
+    assert pairing not in stripped, (
+        f"The {dependency!r}->{canonical_repo!r} mapping present only in a "
+        "descriptive YAML comment survived comment-stripping; a comment-only "
+        "mapping would falsely satisfy the per-dep lookup. The lookup must be "
+        "proven against the comment-stripped executable body."
+    )
+    # And the REAL executable pairing must still be present in the actual body.
+    real_stripped = _strip_yaml_comments(raw)
+    assert pairing in real_stripped, (
+        f"The executable mapping {pairing!r} is absent from the workflow's "
+        "comment-stripped executable body; the per-dep lookup is not satisfied."
+    )
 
 
 @then(parsers.parse('the lookup reads the public "{canonical_repo}" releases '

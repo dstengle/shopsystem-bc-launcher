@@ -9,10 +9,10 @@
 # Pins, declaratively (scenario-40 declarative-artifact precedent — live
 # Actions / live registry state is OUT-OF-BAND, the committed YAML is the
 # proxy):
-#   - 7fa7ce7983257613: exactly ONE workflow runs the cycle; it is triggered by
+#   - 930a6a6579e2a859: exactly ONE workflow runs the cycle; it is triggered by
 #     a cron schedule (recurring, no external event); it handles ALL baked
 #     dependencies in one workflow (not one-per-dep).
-#   - 4e6cbb147adc8c24: the poll resolves each baked dependency's latest release
+#   - 0f386f31857fbeb1: the poll resolves each baked dependency's latest release
 #     tag against its canonical repo using the workflow's OWN GITHUB_TOKEN (NOT
 #     a BC_LAUNCHER_DISPATCH_TOKEN or any cross-repo dispatch credential); the
 #     resolved latest tag is compared against the current Dockerfile pin.
@@ -30,7 +30,7 @@ name: poll-bc-base-deps
 
 on:
   # Recurring schedule — the check-bump-rebuild cycle runs without any external
-  # event (7fa7ce7983257613). Daily at 07:00 UTC.
+  # event (930a6a6579e2a859). Daily at 07:00 UTC.
   schedule:
     - cron: "0 7 * * *"
   # Operator manual start of the SAME path (59c0f539187eabbb): no source change,
@@ -50,7 +50,7 @@ jobs:
     env:
       DOCKERFILE: docker/bc-base/Dockerfile
       # The poll uses bc-launcher's OWN GITHUB_TOKEN to read the public
-      # canonical-repo releases (4e6cbb147adc8c24). It does NOT use a
+      # canonical-repo releases (0f386f31857fbeb1). It does NOT use a
       # BC_LAUNCHER_DISPATCH_TOKEN or any cross-repo dispatch credential.
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
@@ -64,9 +64,9 @@ jobs:
         run: |
           set -euo pipefail
 
-          # All four baked dependencies in ONE workflow (7fa7ce7983257613):
+          # All four baked dependencies in ONE workflow (930a6a6579e2a859):
           # "<dep-key>|<canonical owner/repo>". The canonical repos
-          # (4e6cbb147adc8c24):
+          # (0f386f31857fbeb1):
           #   shop-templates -> dstengle/shopsystem-templates
           #   shop-msg       -> dstengle/shopsystem-messaging
           #   scenarios      -> dstengle/shopsystem-scenarios
@@ -86,7 +86,7 @@ jobs:
 
             # Resolve the latest release tag for this dependency using the
             # workflow's OWN GITHUB_TOKEN against the canonical repo's public
-            # releases (4e6cbb147adc8c24). No BC_LAUNCHER_DISPATCH_TOKEN.
+            # releases (0f386f31857fbeb1). No BC_LAUNCHER_DISPATCH_TOKEN.
             latest="$(GH_TOKEN="${GITHUB_TOKEN}" gh release view \
               --repo "${repo}" --json tagName --jq '.tagName')"
             echo "resolved latest for ${dep} (${repo}): ${latest}"
@@ -109,7 +109,7 @@ jobs:
             echo "current pin for ${dep}: ${current}"
 
             # Compare the RESOLVED latest tag against the current Dockerfile pin
-            # (4e6cbb147adc8c24). beads pins a bare version; normalize the
+            # (0f386f31857fbeb1). beads pins a bare version; normalize the
             # leading "v" for comparison only.
             latest_norm="${latest#v}"
             current_norm="${current#v}"
