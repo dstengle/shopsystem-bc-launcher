@@ -7616,7 +7616,7 @@ def assert_docker_inspect_socket_absent(ctx, fake_driver):
 # ===========================================================================
 # Engage blocking-option-screen Escape-handling step definitions (lead-q3uy)
 #
-# Scenarios f68d8199fef70fa7 / f17f0fc747e44e47 / 91d4c1486c7b7d48.  After the
+# Scenarios f68d8199fef70fa7 / f17f0fc747e44e47 / 9d38d505fc8b5432.  After the
 # input-ready marker but before the startup prompt is submitted, the agent
 # runtime can present a blocking interactive option screen.  The launcher
 # recognizes it (capture_pane), and:
@@ -7683,7 +7683,7 @@ def given_unescapable_option_screen(ctx, fake_driver):
 def run_launch_engage_path(bc_name, prompt, ctx, fake_driver, controller, tmp_path):
     """Run launch through the engage path WITHOUT asserting a zero exit.
 
-    Scenario 91d4c1486c7b7d48 (no escape affordance) exercises the engage path
+    Scenario 9d38d505fc8b5432 (no escape affordance) exercises the engage path
     but does not submit the prompt; this When drives launch and records the
     result without an exit-code assertion (the launch still exits zero — it
     warns rather than failing — but this step stays exit-code-agnostic so the
@@ -7920,6 +7920,52 @@ def assert_no_enter_unescapable(ctx, fake_driver):
     assert not escapes, (
         f"No Escape should be sent to a screen with no escape affordance; got "
         f"{[c.command for c in escapes]!r}"
+    )
+
+
+@then(parsers.parse(
+    'between detecting the un-escapable option screen and returning from launch '
+    'the launcher issues ZERO tmux send-keys invocations carrying the Enter key '
+    '— and no keystroke of any kind — targeting the tmux session named '
+    '"{session}" in container "{container_name}" while the un-escapable screen '
+    'is present, as recorded by the container driver\'s send-keys recorder'
+))
+def assert_zero_keystrokes_to_unescapable(session, container_name, ctx, fake_driver):
+    # lead-gs03 TEETH — the prior buffer-only assertion was vacuous: an
+    # un-escapable screen absorbs any keystroke, so a phantom Enter against it
+    # left the agent input buffer untouched and passed undetected.  Inspect the
+    # container driver's send-keys RECORDER directly, scoped to the window the
+    # scenario names: "between detecting the un-escapable option screen and
+    # returning from launch ... while the un-escapable screen is present".
+    #
+    # keystrokes_absorbed_by_screen records every send-keys payload the present
+    # screen consumed AFTER the controller detected it (its Step 4b
+    # capture_pane).  The pre-detection engage keys (claude-launch Enter,
+    # workspace-trust Enter) are legitimate and OUTSIDE this window, so they are
+    # correctly not recorded here.  The launcher must have issued ZERO
+    # Enter-bearing absorbed keystrokes AND zero absorbed keystrokes of ANY kind.
+    screen = fake_driver._option_screen.get(container_name)
+    assert screen is not None and not screen.get("dismissed"), (
+        "Precondition: the un-escapable screen must be present and undismissed "
+        "for this assertion to be non-vacuous."
+    )
+    assert screen.get("detected"), (
+        "Precondition: the engage path must have DETECTED the un-escapable "
+        "screen (capture_pane at Step 4b) for the post-detection recorder "
+        "window to be meaningful."
+    )
+
+    absorbed = fake_driver.keystrokes_absorbed_by_screen(container_name)
+    enter_bearing = [payload for payload in absorbed if "Enter" in payload]
+    assert not enter_bearing, (
+        f"The launcher must issue ZERO Enter-bearing send-keys against session "
+        f"{session!r} between detecting the un-escapable screen and returning "
+        f"from launch; the send-keys recorder shows: {enter_bearing!r}"
+    )
+    assert not absorbed, (
+        f"The launcher must issue NO keystroke of any kind against session "
+        f"{session!r} while the un-escapable screen is present; the send-keys "
+        f"recorder shows: {absorbed!r}"
     )
 
 

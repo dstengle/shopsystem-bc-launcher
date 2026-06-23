@@ -237,6 +237,12 @@ class FakeDockerDriver:
         # send-keys dismisses an escapable screen; a non-escapable screen is
         # never dismissed by Escape.
         self._option_screen: dict[str, dict] = {}
+        # lead-gs03 — per-container record of send-keys payloads ABSORBED by a
+        # present-and-undismissed blocking option screen.  Each entry is the
+        # send-keys payload (target tokens stripped) the screen consumed while
+        # it was present.  The tightened un-escapable scenario asserts this list
+        # carries ZERO Enter-bearing invocations and ZERO keystrokes of any kind.
+        self._keystrokes_while_screen_present: dict[str, list[list[str]]] = {}
 
         # --- Messaging readiness / beads / health simulation ---
         # Messaging reachability is modelled as reachable-by-default so that
@@ -507,6 +513,17 @@ class FakeDockerDriver:
             "escapable": escapable,
             "dismissed": False,
         }
+        # lead-gs03 — the send-keys RECORDER for keystrokes the screen absorbs.
+        # While a blocking option screen is present-and-undismissed the screen
+        # intercepts any keystream so it never lands in the agent input buffer.
+        # The PRIOR model swallowed those keystrokes' EFFECT silently, which let
+        # a phantom Enter against an un-escapable screen pass undetected (the
+        # step only inspected the input buffer, not the keys that were sent).
+        # Record every send-keys payload absorbed while the screen is present so
+        # the tightened scenario can assert ZERO Enter / ZERO keystrokes of any
+        # kind reached the screen — the absorbed invocation is RECORDED, not
+        # silently dropped.
+        self._keystrokes_while_screen_present.setdefault(container_name, [])
 
     def set_mounts(self, container_name: str, mounts: list[ContainerMount]) -> None:
         self._mounts[container_name] = mounts
@@ -989,6 +1006,13 @@ class FakeDockerDriver:
         )
         screen = self._option_screen.get(container_name)
         if screen and not screen.get("dismissed"):
+            # lead-gs03 — the controller detects the blocking screen at this
+            # capture_pane (engage Step 4b), AFTER the legitimate pre-prompt
+            # engage keystrokes (claude-launch Enter, workspace-trust Enter).
+            # Mark the screen DETECTED so the absorbed-keystroke recorder scopes
+            # to keystrokes issued "between detecting the un-escapable option
+            # screen and returning from launch" — not the earlier engage keys.
+            screen["detected"] = True
             return screen["content"]
         return self._tmux_pane.get(container_name, "")
 
@@ -1233,6 +1257,22 @@ class FakeDockerDriver:
             # dismissed by Escape.
             screen = self._option_screen.get(container_name)
             if screen and not screen.get("dismissed"):
+                # lead-gs03 — RECORD every keystream the present screen absorbs
+                # BEFORE acting on it, so a phantom Enter (or any keystroke)
+                # against the screen is visible to the send-keys recorder rather
+                # than silently swallowed.  Scope the record to keystrokes
+                # issued AFTER the controller detected the screen (its Step 4b
+                # capture_pane set screen["detected"]); pre-detection engage keys
+                # (claude-launch Enter, workspace-trust Enter) are legitimate and
+                # are NOT "between detecting the un-escapable screen and
+                # returning from launch".  The Escape that DISMISSES an escapable
+                # screen is recorded here (it arrives post-detection); the
+                # un-escapable scenario asserts no such absorbed keystroke is an
+                # Enter / any key.
+                if screen.get("detected"):
+                    self._keystrokes_while_screen_present.setdefault(
+                        container_name, []
+                    ).append(list(payload))
                 if payload == ["Escape"] and screen.get("escapable"):
                     screen["dismissed"] = True
                 # Whether dismissed or not, the screen consumed this keystream;
@@ -1650,6 +1690,18 @@ class FakeDockerDriver:
             c for c in self.exec_calls
             if c.container == container_name and c.command[:2] == ["tmux", "send-keys"]
         ]
+
+    def keystrokes_absorbed_by_screen(self, container_name: str) -> list[list[str]]:
+        """Return send-keys payloads absorbed while the option screen was present.
+
+        lead-gs03 — each entry is a send-keys payload (the "-t <session>" target
+        tokens stripped) that the present-and-undismissed blocking option screen
+        consumed.  The tightened un-escapable scenario asserts this list carries
+        ZERO Enter-bearing invocations and ZERO keystrokes of any kind, proving
+        the launcher issued nothing against the un-escapable screen — closing
+        the phantom-Enter gap the prior buffer-only assertion missed.
+        """
+        return list(self._keystrokes_while_screen_present.get(container_name, []))
 
     def clone_exec_call(self, container_name: str) -> ExecCall | None:
         """Return the recorded launch-time `git clone` exec call (bclaunch-5fji).
