@@ -207,5 +207,31 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
 
 WORKDIR /workspace
 
+# Default to the vscode user so the running user's HOME is /home/vscode and the
+# baked synthetic logged-in Claude state (/home/vscode/.claude/.credentials.json
+# + /home/vscode/.claude.json, written vscode-owned above) RESOLVES for the
+# running user — claude boots straight to the agent instead of hitting the
+# first-run onboarding / login-method picker that a root HOME (/root) mismatch
+# produced (lead-t3dy / lead-fwrx, scenario a4caf0477a74e4bc). The published
+# bc-base Config.User is therefore vscode and `docker run --rm <image> whoami`
+# reports vscode.
+#
+# This must come AFTER every privileged build step above (apt installs, the
+# COPY+chmod of the entrypoint/healthcheck/bootstrap scripts onto root-owned
+# /usr/local/bin). It does NOT break container start as the default vscode user:
+#   * The CA-materialization ENTRYPOINT (agent-vault-ca.sh) writes ONLY under
+#     /home/vscode/.config/agent-vault — the vscode user's own HOME subtree, so
+#     no root-owned trust store is touched and no update-ca-certificates is run
+#     (trust is via the five per-process CA env vars, not the system store). To
+#     guarantee the entrypoint's `mkdir -p /home/vscode/.config/agent-vault`
+#     succeeds as vscode, pre-create /home/vscode/.config vscode-owned here.
+#   * The HEALTHCHECK (bc-healthcheck.sh) only runs unprivileged python3 TCP
+#     probes, which need no root.
+#   * No root-owned runtime write path remains: the only paths the runtime
+#     writes (the baked ~/.claude state and the CA dir) are vscode-owned.
+RUN mkdir -p /home/vscode/.config \
+    && chown -R vscode:vscode /home/vscode/.config
+USER vscode
+
 ENTRYPOINT ["/usr/local/bin/agent-vault-ca.sh"]
 CMD ["sleep", "infinity"]

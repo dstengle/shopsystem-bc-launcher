@@ -44,5 +44,18 @@ RUN install -m 0755 -d /etc/apt/keyrings \
     && rm -rf /var/lib/apt/lists/* \
     && docker --version
 
+# Reset the default user back to vscode after the root-only docker-CLI install
+# (lead-t3dy / lead-fwrx, scenario a4caf0477a74e4bc). bc-base now ends as
+# USER vscode so its baked synthetic ~/.claude state resolves for the running
+# user; this image switched to USER root ONLY to install docker-ce-cli onto the
+# root-owned system paths and MUST restore the vscode default, otherwise the
+# published bc-lead Config.User stays root, HOME mismatches /home/vscode, and the
+# agent hits first-run onboarding instead of the baked credential/trust state.
+# The published bc-lead Config.User is therefore vscode and
+# `docker run --rm <image> whoami` reports vscode. The CA-materialization
+# entrypoint, HEALTHCHECK and runtime write paths all keep working as vscode
+# exactly as they do for bc-base (inherited unchanged).
+USER vscode
+
 # Inherit the bc-base WORKDIR, ENTRYPOINT (agent-vault-ca.sh), CMD, HEALTHCHECK
 # and ENV unchanged — this image is bc-base plus the docker client, nothing more.

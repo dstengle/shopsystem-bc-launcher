@@ -10064,3 +10064,202 @@ def then_no_longer_old_version(old, ctx):
         "The workflow does not rewrite the Dockerfile pin; a rebuild would "
         f"re-pin the old hard-coded version {old!r}."
     )
+
+
+# --- Scenario a4caf0477a74e4bc (lead-fwrx / lead-t3dy): bc-base AND bc-lead -----
+# default to USER vscode so the baked ~/.claude state resolves for the running
+# user (no first-run onboarding from a HOME mismatch).
+#
+# docker is NOT available in this environment, so the published-image
+# `docker inspect` Config.User and `docker run --rm <image> whoami` cannot run
+# live. The scenario is bound to the buildable-artifact source of truth: the
+# COMMITTED bc-base + bc-lead Dockerfiles must resolve to a final/effective
+# USER vscode (== published Config.User, == whoami), the synthetic ~/.claude
+# state must be baked vscode-owned under /home/vscode, and the
+# entrypoint/healthcheck/runtime-write paths must be chowned/permissioned for
+# vscode so container start succeeds as uid 1000.
+
+def _find_bc_lead_dockerfile() -> Path | None:
+    """Return the tracked Dockerfile that builds shopsystem-bc-lead, or None.
+
+    bc-lead is the thin launcher image that DERIVES ``FROM`` a
+    shopsystem-bc-base image and adds the docker CLI. We identify it as a tracked
+    Dockerfile whose text both references shopsystem-bc-lead AND carries a
+    ``FROM ...shopsystem-bc-base`` line (it consumes the base rather than
+    building it). Iterate in sorted order for deterministic discovery.
+    """
+    for path in sorted(_REPO_ROOT.rglob("Dockerfile*")):
+        if ".git" in path.parts:
+            continue
+        if not path.is_file():
+            continue
+        text = path.read_text()
+        if "shopsystem-bc-lead" not in text:
+            continue
+        if not re.search(r"(?im)^\s*FROM\s+\S*shopsystem-bc-base", text):
+            continue
+        return path
+    return None
+
+
+def _effective_final_user(dockerfile_text: str) -> str | None:
+    """Return the value of the LAST ``USER`` instruction in a Dockerfile, or
+    None if the Dockerfile contains no USER instruction.
+
+    Docker applies the most recent USER directive to the runtime container, so
+    the final USER instruction is the effective default user (== Config.User ==
+    `whoami` for a run with no --user override). A Dockerfile ending USER root
+    therefore makes Config.User=root (the lead-t3dy bug); one ending USER vscode
+    makes Config.User=vscode (the fix).
+    """
+    last = None
+    for m in re.finditer(r"(?im)^\s*USER\s+(\S+)", dockerfile_text):
+        last = m.group(1).strip()
+    return last
+
+
+@given(parsers.parse('the published image "{image}"'))
+def given_published_image(ctx, image):
+    images = ctx.setdefault("default_user_images", {})
+    if "bc-base" in image:
+        images["bc-base"] = _find_bc_base_dockerfile()
+    elif "bc-lead" in image:
+        images["bc-lead"] = _find_bc_lead_dockerfile()
+    else:  # pragma: no cover - scenario only names bc-base / bc-lead
+        raise AssertionError(f"Unrecognized published image in scenario: {image!r}")
+
+
+@when(parsers.parse(
+    'each image is inspected via "docker inspect" and run via '
+    '"docker run --rm <image> whoami"'))
+def when_inspect_and_whoami(ctx):
+    # docker is unavailable here; resolve the buildable-artifact source of truth
+    # (the final/effective USER of each committed Dockerfile) instead, which is
+    # exactly what the published image's Config.User and whoami would report.
+    images = ctx["default_user_images"]
+    resolved = {}
+    for name, dockerfile in images.items():
+        assert dockerfile is not None, (
+            f"No tracked Dockerfile found that builds shopsystem-{name}."
+        )
+        resolved[name] = {
+            "dockerfile": dockerfile,
+            "text": dockerfile.read_text(),
+        }
+        resolved[name]["final_user"] = _effective_final_user(resolved[name]["text"])
+    ctx["default_user_resolved"] = resolved
+
+
+@then(parsers.parse(
+    'the "Config.User" reported by "docker inspect" is "{expected}" for each '
+    'image'))
+def then_config_user_is(ctx, expected):
+    resolved = ctx["default_user_resolved"]
+    assert set(resolved) == {"bc-base", "bc-lead"}, (
+        f"Scenario must cover both bc-base and bc-lead; got {set(resolved)}."
+    )
+    for name, info in resolved.items():
+        final_user = info["final_user"]
+        assert final_user == expected, (
+            f"shopsystem-{name} Dockerfile ({info['dockerfile']}) resolves to a "
+            f"final/effective USER {final_user!r}, not {expected!r}. The "
+            f"published image's Config.User equals the last USER instruction, so "
+            f"a Dockerfile ending USER root would publish Config.User=root and "
+            f"the agent would hit first-run onboarding from a HOME mismatch "
+            f"(lead-t3dy)."
+        )
+
+
+@then(parsers.parse(
+    '"docker run --rm <image> whoami" reports "{expected}" for each image'))
+def then_whoami_reports(ctx, expected):
+    # whoami of a run with no --user override is the image's default user, i.e.
+    # the same final/effective USER instruction Config.User reflects.
+    resolved = ctx["default_user_resolved"]
+    for name, info in resolved.items():
+        assert info["final_user"] == expected, (
+            f"shopsystem-{name} would run `whoami` as {info['final_user']!r}, "
+            f"not {expected!r} (the final USER instruction is the default run "
+            f"user)."
+        )
+
+
+@then(parsers.parse(
+    'the running vscode user\'s HOME is "{home}" so the baked '
+    '"{cred_path}" and "{config_path}" onboarding and credential state resolve '
+    'for the running user'))
+def then_home_and_baked_state_resolve(ctx, home, cred_path, config_path):
+    assert home == "/home/vscode", (
+        f"Scenario HOME {home!r} is not the vscode user's home /home/vscode."
+    )
+    # The baked synthetic state lives in bc-base; bc-lead inherits it unchanged.
+    base = ctx["default_user_resolved"]["bc-base"]
+    text = base["text"]
+    # (1) The credentials + config are baked at the vscode HOME paths the scenario
+    #     names so they resolve when HOME=/home/vscode.
+    assert cred_path == "/home/vscode/.claude/.credentials.json", (
+        f"Scenario credential path {cred_path!r} is not the baked vscode path."
+    )
+    assert config_path == "/home/vscode/.claude.json", (
+        f"Scenario config path {config_path!r} is not the baked vscode path."
+    )
+    assert "/home/vscode/.claude/.credentials.json" in text, (
+        "bc-base Dockerfile does not bake the credentials file at "
+        "/home/vscode/.claude/.credentials.json, so it would not resolve for the "
+        "running vscode user."
+    )
+    assert "/home/vscode/.claude.json" in text, (
+        "bc-base Dockerfile does not bake /home/vscode/.claude.json."
+    )
+    # (2) The baked state must be vscode-OWNED so the running vscode user can read
+    #     it (a root-owned bake under /home/vscode would be the mechanics gap).
+    assert re.search(
+        r"chown\s+-R\s+vscode:vscode\s+/home/vscode/\.claude\b", text), (
+        "bc-base Dockerfile does not chown the baked ~/.claude state to "
+        "vscode:vscode; the running vscode user could not read it."
+    )
+
+
+@then(parsers.parse(
+    'claude started as the default user does not enter first-run onboarding or '
+    'the login-method picker due to a HOME mismatch'))
+def then_no_onboarding_from_home_mismatch(ctx):
+    resolved = ctx["default_user_resolved"]
+    # The HOME mismatch is exactly the lead-t3dy bug: default user root has
+    # HOME=/root while the baked state lives under /home/vscode. The fix is that
+    # BOTH images default to vscode (HOME=/home/vscode), so the baked state
+    # resolves and no first-run onboarding fires.
+    for name, info in resolved.items():
+        assert info["final_user"] == "vscode", (
+            f"shopsystem-{name} does not default to vscode; with HOME=/root the "
+            f"baked /home/vscode/.claude state would not resolve and claude would "
+            f"enter first-run onboarding / the login-method picker (lead-t3dy)."
+        )
+    # The entrypoint + healthcheck + runtime writes must still work as vscode.
+    base = ctx["default_user_resolved"]["bc-base"]
+    btext = base["text"]
+    # The CA-materialization entrypoint writes under /home/vscode/.config; the
+    # bc-base build must pre-create that dir vscode-owned so the entrypoint's
+    # `mkdir -p` succeeds as uid 1000 (a root-only /home/vscode/.config would be
+    # the runtime-write ownership gap).
+    assert re.search(
+        r"chown\s+-R\s+vscode:vscode\s+/home/vscode/\.config\b", btext), (
+        "bc-base Dockerfile does not chown /home/vscode/.config to vscode:vscode "
+        "before switching to USER vscode; the CA-materialization entrypoint's "
+        "write under /home/vscode/.config/agent-vault would fail for the running "
+        "vscode user, breaking container start."
+    )
+    # The CA-materialization entrypoint itself must only write under the vscode
+    # HOME subtree (no root-only system trust store / update-ca-certificates),
+    # otherwise it could not run as vscode.
+    ca_script = _REPO_ROOT / "docker" / "bc-base" / "agent-vault-ca.sh"
+    assert ca_script.is_file(), "agent-vault-ca.sh entrypoint not found."
+    ca_text = ca_script.read_text()
+    assert "update-ca-certificates" not in ca_text, (
+        "The CA-materialization entrypoint calls update-ca-certificates (root "
+        "only); it could not run as the default vscode user."
+    )
+    assert "/home/vscode/.config/agent-vault" in ca_text, (
+        "The CA-materialization entrypoint does not write under the vscode HOME "
+        "subtree, so its writes might require root."
+    )
