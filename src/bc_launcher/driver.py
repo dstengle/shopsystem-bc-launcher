@@ -14,6 +14,23 @@ from typing import Protocol
 
 
 # ---------------------------------------------------------------------------
+# Errors
+# ---------------------------------------------------------------------------
+
+class DockerSocketUnreachableError(Exception):
+    """Raised when the Docker socket / daemon cannot be reached.
+
+    lead-pixf (010e776c).  A docker CLI call that fails because the daemon
+    socket is unreachable (e.g. ``Cannot connect to the Docker daemon at
+    unix:///var/run/docker.sock``) is an INFRASTRUCTURE failure, not an
+    empty result.  ``list_bc_containers`` raises this instead of returning
+    an empty list so the controller can exit non-zero with a diagnostic
+    naming the socket, rather than masking the outage as "No BC containers
+    found".
+    """
+
+
+# ---------------------------------------------------------------------------
 # Data types
 # ---------------------------------------------------------------------------
 
@@ -136,6 +153,23 @@ class DockerDriver(Protocol):
 
     def get_mounts(self, container_name: str) -> list[ContainerMount]:
         """Return the mount list for a running container."""
+        ...
+
+    def agent_online(self, container_name: str) -> bool:
+        """Return True when the container's "agent" tmux session holds a LIVE
+        claude process whose ``shop-msg watch`` inbox watcher is armed.
+
+        lead-pixf (f2ddd6c7 / aeebb281).  Agent PRESENCE — distinct from the
+        tmux session merely existing.  The session can be "active" (present)
+        while the agent is offline (e.g. left at a bash prompt, or claude
+        exited).  An agent is ONLINE only when all three hold inside the
+        container: the "agent" tmux session exists, a live ``claude`` process
+        is running, and that agent has armed its ``shop-msg watch`` inbox
+        watcher (the surface through which dispatched work reaches the BC).
+        Used by ``status`` (to report presence) and by ``start-agent`` (to
+        no-op when an agent is already live instead of starting a second one
+        / hanging on the readiness probe).
+        """
         ...
 
     def last_command(self) -> list[str]:
@@ -273,6 +307,23 @@ class DockerDriver(Protocol):
 # Real implementation (shells out to docker CLI)
 # ---------------------------------------------------------------------------
 
+def _is_docker_socket_unreachable(stderr: str) -> bool:
+    """Classify a docker CLI stderr as a daemon-socket-unreachable failure.
+
+    lead-pixf (010e776c).  The docker CLI emits a recognizable message when
+    it cannot reach the daemon socket — e.g. "Cannot connect to the Docker
+    daemon at unix:///var/run/docker.sock. Is the docker daemon running?".
+    Matching on that signature lets ``list_bc_containers`` distinguish an
+    infrastructure outage (raise) from an ordinary empty result (return []).
+    """
+    text = (stderr or "").lower()
+    return (
+        "cannot connect to the docker daemon" in text
+        or "is the docker daemon running" in text
+        or ("docker" in text and "daemon" in text and "socket" in text)
+    )
+
+
 def _parse_host_port(
     addr: str, default_port: int | None = None
 ) -> tuple[str | None, int | None]:
@@ -382,6 +433,16 @@ class RealDockerDriver:
              "--format", "{{.Names}}\t{{.Status}}"],
             capture_output=True, text=True, check=False,
         )
+        # lead-pixf (010e776c): a non-zero docker exit caused by an
+        # unreachable daemon socket is an INFRA failure, NOT an empty list.
+        # `docker ps` prints "Cannot connect to the Docker daemon at <sock>"
+        # to stderr in that case.  Raise so the controller can exit non-zero
+        # naming the socket instead of masking the outage as "No BC
+        # containers found".
+        if result.returncode != 0 and _is_docker_socket_unreachable(
+            result.stderr
+        ):
+            raise DockerSocketUnreachableError(result.stderr.strip())
         infos: list[ContainerInfo] = []
         for line in result.stdout.splitlines():
             if not line.strip():
@@ -410,6 +471,34 @@ class RealDockerDriver:
                     destination=parts[2].strip(),
                 ))
         return mounts
+
+    def agent_online(self, container_name: str) -> bool:
+        # lead-pixf (f2ddd6c7 / aeebb281).  Agent presence requires ALL of:
+        #   1. the vscode-owned "agent" tmux session exists, AND
+        #   2. a live `claude` process is running inside the container, AND
+        #   3. that agent has armed its `shop-msg watch` inbox watcher
+        #      (a live `shop-msg watch` process).
+        # tmux client calls against the vscode-owned session must run as
+        # vscode (tmux refuses cross-user attach); the process probes run in
+        # the container's own pid namespace.
+        has_session = subprocess.run(
+            ["docker", "exec", "-u", "vscode", container_name,
+             "tmux", "has-session", "-t", "agent"],
+            capture_output=True, text=True, check=False,
+        )
+        if has_session.returncode != 0:
+            return False
+        claude_live = subprocess.run(
+            ["docker", "exec", container_name, "pgrep", "-f", "claude"],
+            capture_output=True, text=True, check=False,
+        )
+        if claude_live.returncode != 0:
+            return False
+        watch_armed = subprocess.run(
+            ["docker", "exec", container_name, "pgrep", "-f", "shop-msg watch"],
+            capture_output=True, text=True, check=False,
+        )
+        return watch_armed.returncode == 0
 
     def last_command(self) -> list[str]:
         return self._last_command

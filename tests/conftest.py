@@ -210,6 +210,40 @@ def tmux_session_with_content(session, pane_text, ctx, fake_driver):
         fake_driver.set_tmux_pane_content(container_name, pane_text)
 
 
+# --- lead-pixf: agent-presence / infra-failure Givens ---------------------
+
+@given(parsers.parse(
+    'a tmux session named "{session}" exists inside the container with a '
+    'live claude agent process whose "{watch}" is armed'
+))
+def tmux_session_live_agent_watch_armed(session, watch, ctx, fake_driver):
+    """lead-pixf f2ddd6c7: model a LIVE agent — the "agent" tmux session
+    holds a live claude whose shop-msg watch inbox watcher is armed."""
+    for container_name in list(fake_driver._running):
+        fake_driver.add_tmux_session(container_name, session)
+        fake_driver.set_agent_online(container_name, online=True)
+
+
+@given(parsers.parse(
+    'a tmux session named "{session}" exists inside the container with a '
+    'live claude agent process already at the input-ready marker "{marker}"'
+))
+def tmux_session_live_agent_at_input_ready(session, marker, ctx, fake_driver):
+    """lead-pixf aeebb281: model an ALREADY-live agent sitting at the
+    input-ready marker, so start-agent must detect it and no-op."""
+    for container_name in list(fake_driver._running):
+        fake_driver.add_tmux_session(container_name, session)
+        fake_driver.set_tmux_pane_content(container_name, marker)
+        fake_driver.set_agent_online(container_name, online=True)
+
+
+@given("the docker socket is unreachable so container inspection is denied")
+def docker_socket_unreachable(ctx, fake_driver):
+    """lead-pixf 010e776c: model an unreachable Docker daemon socket so
+    list_bc_containers raises instead of returning an empty list."""
+    fake_driver.set_docker_socket_unreachable(True)
+
+
 @given(parsers.parse('a BC named "{bc_name}" with a valid repo URL is configured'))
 def bc_with_repo_url(bc_name, ctx):
     ctx["bc_name"] = bc_name
@@ -769,6 +803,29 @@ def run_list(ctx, fake_driver, controller):
     ctx["result"] = result
 
 
+@when(parsers.parse('I run bc-container start-agent with BC name "{bc_name}"'))
+def run_start_agent(bc_name, ctx, fake_driver, controller):
+    # lead-pixf aeebb281: record the container's input-ready marker waits
+    # BEFORE the call so the Then step can prove the no-op short-circuit did
+    # NOT enter the readiness-marker probe loop.
+    #
+    # Mirror the CLI's start-agent path: omitting --startup-prompt injects
+    # the DEFAULT session-start imperative.  Passing the resolved default
+    # (rather than None) is what gives the no-op teeth their force — with a
+    # non-empty startup_prompt, the WITHOUT-no-op (pre-fix) path WOULD run
+    # the readiness-marker probe and start a claude, so the assertions that
+    # neither happens actually catch a regression.
+    from bc_launcher.cli import DEFAULT_STARTUP_PROMPT_TEMPLATE
+    container = f"bc-{bc_name}"
+    ctx["waits_before"] = list(fake_driver.wait_for_marker_calls)
+    ctx["claude_launches_before"] = fake_driver.claude_launch_count(container)
+    startup_prompt = DEFAULT_STARTUP_PROMPT_TEMPLATE.format(bc_name=bc_name)
+    result = controller.start_agent(bc_name, startup_prompt=startup_prompt)
+    ctx["result"] = result
+    ctx["bc_name"] = bc_name
+    ctx["container_name"] = container
+
+
 @when("bc-container --help is executed in that environment")
 def run_help(ctx):
     bc_container_path = ctx.get("bc_container_path", str(Path(sys.executable).parent / "bc-container"))
@@ -977,6 +1034,110 @@ def assert_list_entry(bc_name, state, ctx):
     lines_with_bc = [l for l in result.stdout.splitlines() if bc_name in l]
     assert any(state in l for l in lines_with_bc), \
         f"Expected state {state!r} on line containing {bc_name!r}, got: {lines_with_bc!r}"
+
+
+# --- lead-pixf: agent-presence / infra-failure Thens ----------------------
+
+@then(parsers.parse('stdout reports the agent presence as "{presence}"'))
+def assert_agent_presence(presence, ctx):
+    """lead-pixf f2ddd6c7.  RED if status reports the agent offline / omits
+    "online" for a live agent."""
+    result = ctx["result"]
+    assert f"agent_presence: {presence}" in result.stdout, (
+        f"Expected agent presence {presence!r} (line "
+        f"'agent_presence: {presence}') in stdout, got: {result.stdout!r}"
+    )
+
+
+@then("stderr reports that the docker socket could not be reached")
+def assert_stderr_docker_socket_unreachable(ctx):
+    """lead-pixf 010e776c.  RED if list masks the socket failure."""
+    result = ctx["result"]
+    stderr = result.stderr if hasattr(result, "stderr") else ""
+    lowered = stderr.lower()
+    assert "docker socket could not be reached" in lowered or (
+        "docker" in lowered and "could not be reached" in lowered
+    ), (
+        f"Expected stderr to report the docker socket could not be reached, "
+        f"got: {stderr!r}"
+    )
+
+
+@then(parsers.parse('stdout does not report "{text}"'))
+def assert_stdout_does_not_report(text, ctx):
+    """lead-pixf 010e776c.  RED if list masks an infra failure as an empty
+    inventory by printing "No BC containers found"."""
+    result = ctx["result"]
+    stdout = result.stdout if hasattr(result, "stdout") else ""
+    assert text not in stdout, (
+        f"Expected {text!r} to be ABSENT from stdout (an unreachable socket "
+        f"must not be masked as an empty list), got: {stdout!r}"
+    )
+
+
+@then(parsers.parse(
+    'stdout reports that "{container}" already has a live agent and is online'
+))
+def assert_start_agent_already_live(container, ctx):
+    """lead-pixf aeebb281.  RED if start-agent does not report the
+    already-live / online no-op."""
+    result = ctx["result"]
+    stdout = result.stdout
+    assert container in stdout, (
+        f"Expected container {container!r} named in stdout, got: {stdout!r}"
+    )
+    lowered = stdout.lower()
+    assert "already has a live agent" in lowered and "online" in lowered, (
+        f"Expected start-agent to report {container!r} already has a live "
+        f"agent and is online, got: {stdout!r}"
+    )
+
+
+@then(
+    "the command does not wait on the readiness-marker probe until the "
+    "readiness timeout"
+)
+def assert_start_agent_no_readiness_probe(ctx, fake_driver):
+    """lead-pixf aeebb281.  RED if start-agent enters the agent-start
+    sequence and waits on the readiness-marker probe (which, against an
+    already-live agent past input-ready, would never re-observe the trust
+    banner and would hang to the readiness timeout).  The no-op short-circuit
+    must run NO new wait_for_pane_marker probe for this container."""
+    from bc_launcher.controller import (
+        CLAUDE_INPUT_READY_MARKER,
+        CLAUDE_READY_MARKER,
+    )
+    container = ctx["container_name"]
+    waits_before = ctx.get("waits_before", [])
+    new_waits = fake_driver.wait_for_marker_calls[len(waits_before):]
+    readiness_waits = [
+        (c, s, m)
+        for (c, s, m) in new_waits
+        if c == container
+        and m in (CLAUDE_INPUT_READY_MARKER, CLAUDE_READY_MARKER)
+    ]
+    assert not readiness_waits, (
+        "start-agent must NOT wait on the readiness-marker probe when the "
+        f"agent is already live; observed readiness waits: {readiness_waits!r}"
+    )
+
+
+@then(parsers.parse(
+    'no second claude agent process is started in the tmux session named '
+    '"{session}"'
+))
+def assert_no_second_claude(session, ctx, fake_driver):
+    """lead-pixf aeebb281.  RED if start-agent starts a second claude
+    (`agent-vault run -- claude ...`) in the agent session instead of
+    no-opping against the already-live agent."""
+    container = ctx["container_name"]
+    launches_before = ctx.get("claude_launches_before", 0)
+    launches_after = fake_driver.claude_launch_count(container)
+    assert launches_after == launches_before, (
+        "start-agent must NOT start a second claude agent against an "
+        f"already-live agent; claude-launch keystrokes went from "
+        f"{launches_before} to {launches_after} for {container!r}"
+    )
 
 
 # ---------------------------------------------------------------------------

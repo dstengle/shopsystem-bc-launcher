@@ -13,7 +13,12 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from bc_launcher.driver import ContainerMount, DockerDriver, RegistryDriver
+from bc_launcher.driver import (
+    ContainerMount,
+    DockerDriver,
+    DockerSocketUnreachableError,
+    RegistryDriver,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -2042,6 +2047,28 @@ class BcContainerController:
                 ),
             )
 
+        # lead-pixf (aeebb281): detect an ALREADY-live agent and NO-OP.
+        #
+        # start-agent's purpose is to RECOVER a container stranded with no
+        # agent.  When the "agent" tmux session ALREADY holds a live claude
+        # at the input-ready marker, there is nothing to recover: re-running
+        # the agent-start sequence would (a) start a SECOND
+        # `agent-vault run -- claude` in the same session and (b) block on
+        # the readiness-marker probe until it times out, since a session
+        # already past input-ready never re-presents the trust banner.  So
+        # short-circuit BEFORE the agent-start sequence: report the agent is
+        # already live and online, exit zero, and DO NOT touch the session
+        # (no readiness probe, no second claude).
+        if self._agent_online(container):
+            return CommandResult(
+                exit_code=0,
+                stdout=(
+                    f"{container} already has a live agent and is online; "
+                    "start-agent is a no-op (no readiness probe run, no "
+                    "second claude agent started)\n"
+                ),
+            )
+
         out_lines: list[str] = []
         err_lines: list[str] = []
 
@@ -2197,6 +2224,19 @@ class BcContainerController:
         )
         tmux_state = "active" if tmux_result.returncode == 0 else "inactive"
 
+        # Agent presence (lead-pixf / f2ddd6c7).  The tmux "agent" session
+        # being merely present ("active") does NOT by itself mean an agent
+        # is actually doing work: an empty session left at a bash prompt is
+        # "active" but offline.  An agent is ONLINE only when the "agent"
+        # tmux session holds a LIVE claude process whose `shop-msg watch`
+        # inbox watcher is armed — that is the state in which the BC is
+        # actually reachable for dispatched work.  Anything short of that
+        # (no session, a session with no live claude, or a claude whose
+        # watcher is not armed) is reported as "offline".
+        agent_presence = (
+            "online" if self._agent_online(container) else "offline"
+        )
+
         return CommandResult(
             exit_code=0,
             stdout=(
@@ -2204,8 +2244,28 @@ class BcContainerController:
                 f"container: {container}\n"
                 f"container_state: running\n"
                 f"tmux_session: {tmux_state}\n"
+                f"agent_presence: {agent_presence}\n"
             ),
         )
+
+    # ------------------------------------------------------------------
+    # agent presence (lead-pixf) — shared by status + start-agent
+    # ------------------------------------------------------------------
+
+    def _agent_online(self, container: str) -> bool:
+        """Return True when the container's "agent" tmux session holds a LIVE
+        claude process whose ``shop-msg watch`` inbox watcher is armed.
+
+        lead-pixf.  This is the agent-presence determinant for the ``status``
+        report (f2ddd6c7) and the no-op short-circuit for ``start-agent``
+        (aeebb281).  It is delegated to the driver so the real driver can
+        probe the live in-container process table / watcher state while the
+        fake can model a live-agent container directly.  When the driver does
+        not expose the probe (older driver), presence resolves to False so the
+        command degrades to "offline" rather than crashing.
+        """
+        probe = getattr(self._driver, "agent_online", None)
+        return bool(probe(container)) if callable(probe) else False
 
     # ------------------------------------------------------------------
     # readiness sequence (messaging-DB barrier, idempotent)
@@ -2306,8 +2366,27 @@ class BcContainerController:
     # ------------------------------------------------------------------
 
     def list_containers(self) -> CommandResult:
-        """List all known BC containers with their states."""
-        infos = self._driver.list_bc_containers()
+        """List all known BC containers with their states.
+
+        lead-pixf (010e776c): when the Docker socket is unreachable, the
+        driver raises ``DockerSocketUnreachableError`` rather than returning
+        an empty list.  We surface that as a NON-ZERO exit with a stderr
+        line naming the docker-socket unreachability and emit NOTHING on
+        stdout — in particular NOT "No BC containers found", which would
+        mask an infrastructure outage as a (false) empty inventory.
+        """
+        try:
+            infos = self._driver.list_bc_containers()
+        except DockerSocketUnreachableError as exc:
+            detail = str(exc).strip()
+            stderr = (
+                "bc-container list: the Docker socket could not be reached "
+                "(the Docker daemon is unreachable); cannot enumerate BC "
+                "containers"
+            )
+            if detail:
+                stderr += f": {detail}"
+            return CommandResult(exit_code=1, stdout="", stderr=stderr + "\n")
         if not infos:
             return CommandResult(exit_code=0, stdout="No BC containers found.\n")
 

@@ -324,6 +324,25 @@ class FakeDockerDriver:
         # carries ZERO Enter-bearing invocations and ZERO keystrokes of any kind.
         self._keystrokes_while_screen_present: dict[str, list[list[str]]] = {}
 
+        # --- lead-pixf: agent-presence model (f2ddd6c7 / aeebb281) ----------
+        # Per-container flag set by ``set_agent_online`` to model a container
+        # whose "agent" tmux session ALREADY holds a live claude process whose
+        # ``shop-msg watch`` inbox watcher is armed.  ``agent_online`` reports
+        # this for ``status`` (presence reporting) and ``start-agent`` (no-op
+        # short-circuit).  Absent / False means offline (no live agent), which
+        # is the default for every pre-existing scenario.
+        self._agent_online_containers: set[str] = set()
+        # Per-container count of `agent-vault run -- claude ...` launch
+        # send-keys observed.  The start-agent no-op scenario (aeebb281)
+        # asserts this stays ZERO for an already-live agent — i.e. NO second
+        # claude process is started in the "agent" session.
+        self._claude_launch_count: dict[str, int] = {}
+        # lead-pixf: when present, list_bc_containers raises
+        # DockerSocketUnreachableError (010e776c) instead of returning a list,
+        # modelling an unreachable Docker daemon socket.  Carries the stderr
+        # signature the real docker CLI emits.
+        self._docker_socket_unreachable: str | None = None
+
         # --- Messaging readiness / beads / health simulation ---
         # Messaging reachability is modelled as reachable-by-default so that
         # existing launch scenarios (which configure a host SHOPMSG_DSN but
@@ -561,6 +580,40 @@ class FakeDockerDriver:
 
     def add_tmux_session(self, container_name: str, session_name: str) -> None:
         self._tmux_sessions.setdefault(container_name, set()).add(session_name)
+
+    def set_agent_online(self, container_name: str, online: bool = True) -> None:
+        """lead-pixf: model a container whose "agent" tmux session holds a
+        LIVE claude process whose ``shop-msg watch`` watcher is armed.
+
+        Used by f2ddd6c7 (status reports presence "online") and aeebb281
+        (start-agent no-ops against an already-live agent).  Setting this
+        ALSO ensures the "agent" tmux session exists, since a live agent
+        implies the session is present.
+        """
+        if online:
+            self._agent_online_containers.add(container_name)
+            self.add_tmux_session(container_name, "agent")
+        else:
+            self._agent_online_containers.discard(container_name)
+
+    def set_docker_socket_unreachable(
+        self,
+        unreachable: bool = True,
+        stderr: str = (
+            "Cannot connect to the Docker daemon at "
+            "unix:///var/run/docker.sock. Is the docker daemon running?"
+        ),
+    ) -> None:
+        """lead-pixf (010e776c): make ``list_bc_containers`` raise
+        ``DockerSocketUnreachableError`` (modelling an unreachable Docker
+        daemon socket) instead of returning a container list."""
+        self._docker_socket_unreachable = stderr if unreachable else None
+
+    def claude_launch_count(self, container_name: str) -> int:
+        """lead-pixf (aeebb281): how many `agent-vault run -- claude ...`
+        launch send-keys were issued against this container — i.e. how many
+        claude agent processes the launcher tried to start in its session."""
+        return self._claude_launch_count.get(container_name, 0)
 
     def set_tmux_pane_content(self, container_name: str, content: str) -> None:
         self._tmux_pane[container_name] = content
@@ -1461,6 +1514,14 @@ class FakeDockerDriver:
                 self._prompt_sendkeys_op.setdefault(
                     (container_name, tok), self._op_seq
                 )
+                # lead-pixf (aeebb281): count `agent-vault run -- claude ...`
+                # launch keystrokes so the start-agent no-op scenario can
+                # assert NO second claude was started against an already-live
+                # agent.
+                if "agent-vault run -- claude" in tok:
+                    self._claude_launch_count[container_name] = (
+                        self._claude_launch_count.get(container_name, 0) + 1
+                    )
         prefix = ["docker", "exec"]
         if user is not None:
             prefix += ["-u", user]
@@ -1961,10 +2022,27 @@ class FakeDockerDriver:
         self._all_containers[container_name] = False
 
     def list_bc_containers(self) -> list[ContainerInfo]:
+        # lead-pixf (010e776c): an unreachable Docker socket is an infra
+        # failure, surfaced as an exception — NOT an empty list.
+        if self._docker_socket_unreachable is not None:
+            from bc_launcher.driver import DockerSocketUnreachableError
+            raise DockerSocketUnreachableError(self._docker_socket_unreachable)
         return [
             ContainerInfo(name=name, running=running)
             for name, running in self._all_containers.items()
         ]
+
+    def agent_online(self, container_name: str) -> bool:
+        """lead-pixf (f2ddd6c7 / aeebb281): report agent presence.
+
+        Online only when the container has been modelled (via
+        ``set_agent_online``) as holding a live claude with an armed
+        ``shop-msg watch`` AND its "agent" tmux session exists — mirroring
+        the three-part determinant the real driver probes.
+        """
+        if container_name not in self._agent_online_containers:
+            return False
+        return "agent" in self._tmux_sessions.get(container_name, set())
 
     def get_mounts(self, container_name: str) -> list[ContainerMount]:
         return self._mounts.get(container_name, [])
