@@ -9243,6 +9243,316 @@ def then_pulled_reports_new_version(image_ref, new, ctx):
 
 
 # ===========================================================================
+# bc-base SELF-PIN polled-dependency step definitions (lead-dqje / lead-5yql)
+#
+# Scenarios 493bbbb7dcb61d7e (bump-then-rebuild when stale) and
+# e28886c34b0d4c65 (no-op when equal). The poll treats the
+# shopsystem-bc-launcher self-pin (the bc-base Dockerfile's VCS pin on
+# bc-launcher's OWN code) as a 5th polled dependency. These bindings are
+# ADDITIVE to the four-dep family in test_bc_base_centralized_dep_poll.py and
+# REUSE _strip_yaml_comments for the comment-exclusion teeth (5vyb precedent).
+#
+# The self-pin's canonical repo. The poll must map shopsystem-bc-launcher to
+# this repo in its EXECUTABLE DEPS array (not merely a comment).
+# ===========================================================================
+
+_SELF_PIN_DEP_KEY = "shopsystem-bc-launcher"
+_SELF_PIN_CANONICAL_REPO = "dstengle/shopsystem-bc-launcher"
+
+
+@given(parsers.parse(
+    'the bc-base Dockerfile in shopsystem-bc-launcher pins shopsystem-bc-launcher '
+    'itself at "{self_pin}" in a "{vcs_prefix}" VCS pin'))
+def given_dockerfile_self_pins_bc_launcher(self_pin, vcs_prefix, ctx):
+    ctx["self_pin"] = self_pin
+    ctx["self_pin_vcs_prefix"] = vcs_prefix
+    ctx["poll_workflow"] = _centralized_poll_workflow()
+    assert ctx["poll_workflow"] is not None and not isinstance(
+        ctx["poll_workflow"], list
+    ), "No single centralized scheduled check-bump-rebuild workflow found."
+    ctx["poll_workflow_text"] = ctx["poll_workflow"][0].read_text()
+    # The bc-base Dockerfile must actually carry a bc-launcher self-pin in the
+    # asserted VCS-pin format, distinct from the framework-CLI pins.
+    dockerfile = _find_bc_base_dockerfile()
+    assert dockerfile is not None, "No bc-base Dockerfile found."
+    ctx["bc_base_dockerfile"] = dockerfile
+    dtext = dockerfile.read_text()
+    assert vcs_prefix in dtext, (
+        f"The bc-base Dockerfile does not carry the {vcs_prefix!r} VCS pin for "
+        "the bc-launcher self-pin."
+    )
+    assert re.search(
+        r"shopsystem-bc-launcher(?:\.git)?@v[0-9]+\.[0-9]+\.[0-9]+", dtext
+    ), (
+        "The bc-base Dockerfile does not carry a shopsystem-bc-launcher self-pin "
+        "in the VCS-pin format the poll's bump logic targets."
+    )
+
+
+@given(parsers.parse(
+    "the centralized scheduled workflow resolves shopsystem-bc-launcher's own "
+    'latest release tag against its canonical repository "{canonical_repo}" '
+    'using the workflow\'s own "{token}"'))
+def given_self_pin_resolves_against_canonical(canonical_repo, token, ctx):
+    assert canonical_repo == _SELF_PIN_CANONICAL_REPO, (
+        f"self-pin canonical repo mismatch: scenario says {canonical_repo!r}, "
+        f"expected {_SELF_PIN_CANONICAL_REPO!r}."
+    )
+    ctx["self_pin_canonical_repo"] = canonical_repo
+    ctx["self_pin_token"] = token
+
+
+@given(parsers.parse(
+    "the centralized scheduled workflow resolves shopsystem-bc-launcher's own "
+    'latest release tag against "{canonical_repo}" as "{latest}"'))
+def given_self_pin_resolves_as(canonical_repo, latest, ctx):
+    assert canonical_repo == _SELF_PIN_CANONICAL_REPO, (
+        f"self-pin canonical repo mismatch: scenario says {canonical_repo!r}, "
+        f"expected {_SELF_PIN_CANONICAL_REPO!r}."
+    )
+    ctx["self_pin_canonical_repo"] = canonical_repo
+    ctx["self_pin_latest"] = latest
+
+
+@given(parsers.parse(
+    'the resolved latest release tag for shopsystem-bc-launcher is "{latest}", '
+    'newer than the self-pin "{self_pin}"'))
+def given_self_pin_latest_newer(latest, self_pin, ctx):
+    ctx["self_pin_latest"] = latest
+    ctx["self_pin"] = self_pin
+
+
+@given("the resolved latest release tag for shopsystem-bc-launcher equals the "
+       "self-pin already in the Dockerfile")
+def given_self_pin_equals_latest(ctx):
+    ctx["self_pin_equal"] = True
+
+
+@when("the workflow runs its check-bump-rebuild cycle")
+def when_runs_cycle_plain(ctx):
+    ctx.setdefault("poll_workflow", _centralized_poll_workflow())
+    ctx.setdefault("poll_workflow_text", ctx["poll_workflow"][0].read_text())
+
+
+@when("the workflow runs its check-bump-rebuild cycle and no other baked "
+      "dependency is stale")
+def when_runs_cycle_no_other_stale(ctx):
+    ctx.setdefault("poll_workflow", _centralized_poll_workflow())
+    ctx.setdefault("poll_workflow_text", ctx["poll_workflow"][0].read_text())
+
+
+@then(parsers.parse(
+    "the workflow's executable body, with YAML comment lines excluded, "
+    "enumerates shopsystem-bc-launcher mapped to canonical repository "
+    '"{canonical_repo}" alongside the existing baked dependencies'))
+def then_exec_body_enumerates_self_pin(canonical_repo, ctx):
+    # Inspect the comment-stripped EXECUTABLE body only (5vyb teeth): the
+    # self-pin's dep->repo pairing must live in the executable DEPS array, not
+    # merely the descriptive header comment.
+    text = _strip_yaml_comments(ctx["poll_workflow_text"])
+    pairing = f"{_SELF_PIN_DEP_KEY}|{canonical_repo}"
+    assert pairing in text, (
+        "The centralized workflow executable body (comments stripped) does not "
+        f"enumerate the self-pin DEPS mapping {pairing!r}; the self-pin must be "
+        "a polled dependency in the executable DEPS config, not a comment."
+    )
+    # "alongside the existing baked dependencies": the four-dep family must
+    # STILL be enumerated (additive, not replacing).
+    missing = [
+        repo for repo in _BAKED_DEP_CANONICAL_REPOS.values()
+        if repo not in text
+    ]
+    assert not missing, (
+        "Adding the self-pin must not drop the existing baked dependencies; "
+        f"missing from the executable body: {missing!r}."
+    )
+
+
+@then("a shopsystem-bc-launcher self-pin enumerated only in a descriptive YAML "
+      "comment, absent from the executable body, does not satisfy this lookup")
+def then_self_pin_comment_only_does_not_satisfy(ctx):
+    # TEETH (5vyb precedent): prove comment-stripping is load-bearing for the
+    # self-pin enumeration. Redact the real executable pairing, re-introduce it
+    # ONLY in a comment, strip comments, and confirm the pairing is absent.
+    raw = ctx["poll_workflow_text"]
+    pairing = f"{_SELF_PIN_DEP_KEY}|{_SELF_PIN_CANONICAL_REPO}"
+    without_exec = raw.replace(pairing, f"{_SELF_PIN_DEP_KEY}|REDACTED-FOR-TEST")
+    assert pairing not in without_exec, (
+        "Failed to redact the executable self-pin pairing for the teeth check; "
+        "the executable DEPS array must carry the self-pin pairing exactly once "
+        "in a form this teeth check can redact."
+    )
+    comment_only = without_exec + f"\n# descriptive: {pairing}\n"
+    stripped = _strip_yaml_comments(comment_only)
+    assert pairing not in stripped, (
+        "A self-pin pairing present only in a descriptive YAML comment survived "
+        "comment-stripping; a comment-only enumeration would falsely satisfy the "
+        "self-pin lookup. The lookup must inspect the comment-stripped body."
+    )
+    # And the REAL executable pairing must still be present.
+    real_stripped = _strip_yaml_comments(raw)
+    assert pairing in real_stripped, (
+        f"The self-pin executable mapping {pairing!r} is absent from the "
+        "workflow's comment-stripped executable body."
+    )
+
+
+@then(parsers.parse(
+    'the workflow first mutates "{dockerfile}" so the shopsystem-bc-launcher '
+    'self-pin reads "{new_pin}" rather than "{old_pin}"'))
+def then_mutates_self_pin(dockerfile, new_pin, old_pin, ctx):
+    text = ctx["poll_workflow_text"]
+    assert dockerfile in text or "DOCKERFILE" in text, (
+        f"The workflow does not reference {dockerfile} to mutate the self-pin."
+    )
+    # The bump must target the bc-launcher VCS-pin format specifically (NOT the
+    # framework-CLI pins): a sed that rewrites the shopsystem-bc-launcher VCS pin.
+    stripped = _strip_yaml_comments(text)
+    assert re.search(
+        r"sed -i[^\n]*shopsystem-bc-launcher", stripped
+    ), (
+        "The workflow has no in-place mutation (sed -i) targeting the "
+        "shopsystem-bc-launcher self-pin; a stale self-pin would not be bumped, "
+        "or the bump would not target the self-pin's VCS-pin line specifically."
+    )
+
+
+@then("only after the self-pin is bumped does the workflow run the bc-base "
+      "image build")
+def then_self_pin_bump_before_build(ctx):
+    text = ctx["poll_workflow_text"]
+    stripped = _strip_yaml_comments(text)
+    m = re.search(r"sed -i[^\n]*shopsystem-bc-launcher", stripped)
+    assert m is not None, (
+        "No self-pin bump (sed -i targeting shopsystem-bc-launcher) found."
+    )
+    bump_idx = stripped.find(m.group(0))
+    build_idx = stripped.find("build-push-action")
+    if build_idx == -1:
+        build_idx = stripped.find("docker build")
+    assert build_idx != -1, "No bc-base image build step found."
+    assert bump_idx < build_idx, (
+        "The bc-base image build is declared BEFORE the self-pin bump; the "
+        "self-pin bump must come first so the build picks up the new self-pin."
+    )
+
+
+@then(parsers.parse(
+    'the workflow commits the bumped "{dockerfile}" recording the '
+    'shopsystem-bc-launcher version "{new_pin}" before the build'))
+def then_commits_self_pin_before_build(dockerfile, new_pin, ctx):
+    text = ctx["poll_workflow_text"]
+    assert "git commit" in text, (
+        "The workflow does not `git commit` the bumped Dockerfile; the self-pin "
+        "bump would be working-tree-only."
+    )
+    assert "git add" in text and (dockerfile in text or "DOCKERFILE" in text), (
+        f"The workflow does not `git add` {dockerfile} before committing."
+    )
+    assert "git push" in text, (
+        "The workflow does not `git push` the commit, so the bumped self-pin "
+        "would not land on the repository."
+    )
+    # Commit BEFORE build: the republished image is built from the committed
+    # self-pin, not a transient edit (commit-before-build discipline).
+    commit_idx = text.find("git commit")
+    build_idx = text.find("build-push-action")
+    if build_idx == -1:
+        build_idx = text.find("docker build")
+    assert commit_idx != -1 and build_idx != -1, "Missing commit or build step."
+    assert commit_idx < build_idx, (
+        "The bc-base build runs BEFORE the bumped Dockerfile is committed, so "
+        "the republished image would be built from an uncommitted self-pin."
+    )
+
+
+@then("this self-pin handling composes with the existing baked-dependency "
+      "checks rather than replacing them")
+def then_self_pin_composes_with_existing(ctx):
+    # The four-dep family must remain in the executable DEPS array alongside the
+    # new self-pin entry (additive, not replacing). All five canonical repos
+    # present in the comment-stripped executable body.
+    text = _strip_yaml_comments(ctx["poll_workflow_text"])
+    expected = list(_BAKED_DEP_CANONICAL_REPOS.values()) + [
+        _SELF_PIN_CANONICAL_REPO
+    ]
+    missing = [repo for repo in expected if repo not in text]
+    assert not missing, (
+        "The self-pin handling does not compose with the existing baked-dep "
+        f"checks; missing canonical repos from the executable body: {missing!r}."
+    )
+    # The existing four-dep per-dep pairings must remain too.
+    for dep, repo in _BAKED_DEP_CANONICAL_REPOS.items():
+        assert f"{dep}|{repo}" in text, (
+            f"The existing baked-dependency pairing {dep}|{repo} was dropped "
+            "when adding the self-pin; the change must be additive."
+        )
+
+
+# --- Scenario e28886c34b0d4c65: self-pin no-op when equal -------------------
+
+@then(parsers.parse(
+    'the workflow leaves the shopsystem-bc-launcher self-pin in "{dockerfile}" '
+    'unchanged at "{self_pin}"'))
+def then_leaves_self_pin_unchanged(dockerfile, self_pin, ctx):
+    # The no-op path is gated: the per-dep loop `continue`s when latest == pin,
+    # and the commit/build/push steps are conditional on the changed-gate, so an
+    # all-equal run (self-pin included) mutates nothing.
+    text = ctx["poll_workflow_text"]
+    assert "changed" in text, (
+        "The workflow declares no 'changed' gate; it cannot distinguish a "
+        "self-pin no-op (equal) run from a bump run."
+    )
+    stripped = _strip_yaml_comments(text)
+    # The compare-then-skip must apply to the self-pin too: it is a regular DEPS
+    # loop entry, so the shared `if equal: continue` covers it. Confirm the
+    # self-pin is a DEPS entry subject to that loop (not a special always-bump
+    # path).
+    assert f"{_SELF_PIN_DEP_KEY}|{_SELF_PIN_CANONICAL_REPO}" in stripped, (
+        "The self-pin is not a DEPS-array entry, so the shared equal->continue "
+        "no-op path would not cover it."
+    )
+    assert "continue" in stripped, (
+        "The per-dep loop has no equal->skip (continue) branch, so an equal "
+        "self-pin would still be bumped."
+    )
+
+
+@then("the workflow does not run a bc-base image build on account of the "
+      "self-pin")
+def then_no_build_on_self_pin_noop(ctx):
+    wf = ctx["poll_workflow"]
+    doc = wf[1]
+    build_step = _find_step(doc, lambda s: "build-push-action" in str(
+        s.get("uses", "")) or "docker build" in str(s.get("run", "")))
+    assert build_step is not None, "No bc-base build step found."
+    cond = str(build_step.get("if", ""))
+    assert "changed" in cond, (
+        "The bc-base build step is not gated on the changed-signal "
+        f"(if: {cond!r}); a self-pin no-op (equal) run would still build."
+    )
+
+
+@then(parsers.parse(
+    'the workflow does not republish "{image_ref}" with a new digest on '
+    'account of the self-pin'))
+def then_no_republish_on_self_pin_noop(image_ref, ctx):
+    wf = ctx["poll_workflow"]
+    doc = wf[1]
+    push_step = _find_step(
+        doc,
+        lambda s: image_ref in str(s.get("with", {}).get("tags", ""))
+        or image_ref in str(s.get("run", "")),
+    )
+    assert push_step is not None, f"No step republishing {image_ref} found."
+    cond = str(push_step.get("if", ""))
+    assert "changed" in cond, (
+        f"The republish step for {image_ref} is not gated on the changed-signal "
+        f"(if: {cond!r}); a self-pin no-op run would republish."
+    )
+
+
+# ===========================================================================
 # Readiness-wait SELF-ADVANCE step definitions (lead-gw9v / lead-c713)
 #
 # Scenarios e30b15363815abed / f3784811e04a224d / 9fa36102d756a8fb.  During the

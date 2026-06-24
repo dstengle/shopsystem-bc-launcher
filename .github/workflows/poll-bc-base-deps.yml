@@ -64,18 +64,28 @@ jobs:
         run: |
           set -euo pipefail
 
-          # All four baked dependencies in ONE workflow (930a6a6579e2a859):
+          # All baked dependencies in ONE workflow (930a6a6579e2a859):
           # "<dep-key>|<canonical owner/repo>". The canonical repos
           # (0f386f31857fbeb1):
-          #   shop-templates -> dstengle/shopsystem-templates
-          #   shop-msg       -> dstengle/shopsystem-messaging
-          #   scenarios      -> dstengle/shopsystem-scenarios
-          #   beads          -> steveyegge/beads
+          #   shop-templates       -> dstengle/shopsystem-templates
+          #   shop-msg             -> dstengle/shopsystem-messaging
+          #   scenarios            -> dstengle/shopsystem-scenarios
+          #   beads                -> steveyegge/beads
+          #   shopsystem-bc-launcher -> dstengle/shopsystem-bc-launcher
+          # The shopsystem-bc-launcher entry is the bc-base SELF-PIN
+          # (493bbbb7dcb61d7e/e28886c34b0d4c65): the bc-base Dockerfile pins
+          # bc-launcher's OWN code via a VCS pin; the poll resolves
+          # bc-launcher's own latest release from its canonical repo with the
+          # workflow's OWN GITHUB_TOKEN (NOT a BC_LAUNCHER_DISPATCH_TOKEN or any
+          # cross-repo dispatch credential) and bumps the self-pin like the
+          # other baked deps. This entry MUST live in the executable DEPS array
+          # below, not merely in this comment, to be polled.
           DEPS=(
             "shop-templates|dstengle/shopsystem-templates"
             "shop-msg|dstengle/shopsystem-messaging"
             "scenarios|dstengle/shopsystem-scenarios"
             "beads|steveyegge/beads"
+            "shopsystem-bc-launcher|dstengle/shopsystem-bc-launcher"
           )
 
           changed="false"
@@ -105,6 +115,13 @@ jobs:
               beads)
                 current="$(grep -oP 'BD_VERSION=\K[0-9]+\.[0-9]+\.[0-9]+' "${DOCKERFILE}" || true)"
                 ;;
+              shopsystem-bc-launcher)
+                # The bc-base SELF-PIN: bc-launcher pins its OWN code via a VCS
+                # pin distinct from the framework-CLI pins
+                # (493bbbb7dcb61d7e):
+                #   shopsystem-bc-launcher @ git+https://github.com/dstengle/shopsystem-bc-launcher.git@vX.Y.Z
+                current="$(grep -oP 'shopsystem-bc-launcher(?:\.git)?@\Kv[0-9]+\.[0-9]+\.[0-9]+' "${DOCKERFILE}" || true)"
+                ;;
             esac
             echo "current pin for ${dep}: ${current}"
 
@@ -133,6 +150,12 @@ jobs:
                 ;;
               beads)
                 sed -i -E "s|(BD_VERSION=)[0-9]+\.[0-9]+\.[0-9]+|\1${latest_norm}|" "${DOCKERFILE}"
+                ;;
+              shopsystem-bc-launcher)
+                # Bump the bc-base SELF-PIN VCS line in place
+                # (493bbbb7dcb61d7e); target the bc-launcher VCS-pin format
+                # specifically so the framework-CLI pins are untouched.
+                sed -i -E "s|(shopsystem-bc-launcher(\.git)?@)v[0-9]+\.[0-9]+\.[0-9]+|\1${latest}|" "${DOCKERFILE}"
                 ;;
             esac
             changed="true"
