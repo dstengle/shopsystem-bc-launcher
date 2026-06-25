@@ -1101,10 +1101,23 @@ class BcContainerController:
         # launched shop drive docker itself).  By default the flag is absent
         # and NO docker-socket mount is added, so an ordinary BC container
         # carries no access to the host docker daemon.
+        # lead-wdvx (Bug 1): the bind-mount alone grants NO usable access — the
+        # container's non-root default user is not in the host socket's owning
+        # group, so every docker call inside the container is rejected
+        # permission-denied.  Resolve the HOST socket's actual gid (it varies
+        # by host) and add it to the container's supplementary groups via
+        # ``--group-add`` so the mounted socket is actually usable.  This is
+        # gated on the SAME opt-in flag as the mount, so a launch WITHOUT the
+        # flag grants no docker-socket group (guard against over-grant).
+        docker_socket_group_add: list[str] = []
         if mount_docker_socket:
             mounts.append(
                 ("bind", DOCKER_SOCKET_PATH, DOCKER_SOCKET_PATH, False)
             )
+            resolver = getattr(self._driver, "host_socket_gid", None)
+            gid = resolver(DOCKER_SOCKET_PATH) if callable(resolver) else None
+            if gid is not None:
+                docker_socket_group_add.append(str(gid))
 
         # SHOPMSG_DSN may be a postgres DSN (no socket mount needed) or a
         # unix socket path.  If the DSN value looks like a socket file, add a
@@ -1160,6 +1173,7 @@ class BcContainerController:
             mounts=mounts,
             network=resolved_network,
             detach=True,
+            group_add=docker_socket_group_add or None,
         )
 
         out_lines: list[str] = [f"Started container {container}\n"]
@@ -2201,9 +2215,31 @@ class BcContainerController:
     # ------------------------------------------------------------------
 
     def status(self, bc_name: str) -> CommandResult:
-        """Report running state of the BC container and its tmux session."""
+        """Report running state of the BC container and its tmux session.
+
+        lead-wdvx (Bug 2): ``status`` is docker-dependent — its first act
+        probes docker for the container's running state.  When that probe
+        fails because the docker socket is unreachable (daemon down, OR a
+        CONFIG fault: socket mounted-but-permission-denied, or not mounted),
+        the driver raises ``DockerSocketUnreachableError``.  We surface that
+        as a NON-ZERO exit with a stderr line NAMING the cause, distinct from
+        the legitimate "container_state: stopped" an absent container reports
+        at exit 0 — so a docker config fault is never masked as a (false)
+        absent/stopped result.
+        """
         container = _container_name(bc_name)
-        is_running = self._driver.is_running(container)
+        try:
+            is_running = self._driver.is_running(container)
+        except DockerSocketUnreachableError as exc:
+            detail = str(exc).strip()
+            stderr = (
+                "bc-container status: the Docker socket could not be reached "
+                "(the Docker daemon is unreachable); cannot determine "
+                "container state"
+            )
+            if detail:
+                stderr += f": {detail}"
+            return CommandResult(exit_code=1, stdout="", stderr=stderr + "\n")
 
         if not is_running:
             return CommandResult(

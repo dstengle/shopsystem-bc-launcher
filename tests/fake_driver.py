@@ -342,6 +342,15 @@ class FakeDockerDriver:
         # modelling an unreachable Docker daemon socket.  Carries the stderr
         # signature the real docker CLI emits.
         self._docker_socket_unreachable: str | None = None
+        # lead-wdvx (Bug 1): the host docker socket's owning gid, as
+        # `host_socket_gid` would resolve by stat-ing the host socket.  The
+        # scenarios model gid 984.  None means the host socket cannot be
+        # stat-ed (so the launcher adds no --group-add).
+        self._host_socket_gid: int | None = None
+        # lead-wdvx (Bug 1): per-container supplementary groups recorded from
+        # `docker run --group-add <gid>` — i.e. what docker inspect's
+        # HostConfig.GroupAdd would show for the launched container.
+        self._container_group_add: dict[str, list[str]] = {}
 
         # --- Messaging readiness / beads / health simulation ---
         # Messaging reachability is modelled as reachable-by-default so that
@@ -608,6 +617,81 @@ class FakeDockerDriver:
         ``DockerSocketUnreachableError`` (modelling an unreachable Docker
         daemon socket) instead of returning a container list."""
         self._docker_socket_unreachable = stderr if unreachable else None
+
+    # lead-wdvx (Bug 2): canned docker CLI stderr signatures the real docker
+    # CLI emits for the two CONFIG faults the bugfix must classify as
+    # docker-unreachable (distinct from daemon-down).
+    # NOTE (lead-wdvx teeth): these are deliberately the TERSE real docker CLI
+    # forms that the daemon-DOWN-only classifier genuinely MISSES — the
+    # permission-denied line carries no "daemon" token and the not-mounted line
+    # is a bare "no such file or directory" against the socket path with no
+    # "cannot connect to the docker daemon" phrasing.  A faithful classifier
+    # must match these on the permission-denied / no-such-file signatures the
+    # bugfix adds; the old daemon-down-only matcher does NOT, so reverting the
+    # classifier turns the Bug 2 scenarios RED (verified teeth).
+    PERMISSION_DENIED_STDERR = (
+        "Got permission denied while trying to connect to the Docker socket "
+        "at unix:///var/run/docker.sock: dial unix /var/run/docker.sock: "
+        "connect: permission denied"
+    )
+    NOT_MOUNTED_STDERR = (
+        "error during connect: Get "
+        "\"http://%2Fvar%2Frun%2Fdocker.sock/v1.45/containers/json\": "
+        "open /var/run/docker.sock: no such file or directory"
+    )
+
+    def set_docker_socket_permission_denied(self, denied: bool = True) -> None:
+        """lead-wdvx (Bug 2): model the socket as MOUNTED but the calling user
+        denied access (permission-denied).  Docker-dependent driver calls
+        (`is_running`, `list_bc_containers`) raise
+        ``DockerSocketUnreachableError`` carrying the permission-denied stderr
+        signature, modelling the real docker CLI's behaviour."""
+        self._docker_socket_unreachable = (
+            self.PERMISSION_DENIED_STDERR if denied else None
+        )
+
+    def set_docker_socket_not_mounted(self, not_mounted: bool = True) -> None:
+        """lead-wdvx (Bug 2): model the docker socket as NOT mounted into the
+        calling environment.  Docker-dependent driver calls raise
+        ``DockerSocketUnreachableError`` carrying the not-mounted stderr
+        signature (a "no such file or directory" against the socket path)."""
+        self._docker_socket_unreachable = (
+            self.NOT_MOUNTED_STDERR if not_mounted else None
+        )
+
+    def set_host_socket_gid(self, gid: int | None) -> None:
+        """lead-wdvx (Bug 1): model the owning gid of the host docker socket
+        (what `host_socket_gid` resolves by stat-ing the host socket).  The
+        scenarios model gid 984."""
+        self._host_socket_gid = gid
+
+    def host_socket_gid(self, socket_path: str) -> int | None:
+        """lead-wdvx (Bug 1): return the configured host docker socket gid."""
+        return self._host_socket_gid
+
+    def container_group_add(self, container_name: str) -> list[str]:
+        """lead-wdvx (Bug 1): the supplementary groups the launcher granted
+        the container (`docker run --group-add`), i.e. docker inspect's
+        HostConfig.GroupAdd."""
+        return list(self._container_group_add.get(container_name, []))
+
+    def non_root_docker_call_permission_denied(
+        self, container_name: str, host_socket_gid: int
+    ) -> bool:
+        """lead-wdvx (Bug 1): model whether a docker call made by the
+        container's NON-ROOT default user against the mounted socket is
+        rejected permission-denied.
+
+        Faithful semantics: a non-root user can use the mounted socket ONLY
+        when the host socket's owning gid is among the container's
+        supplementary groups (the `--group-add <host-socket-gid>` the launcher
+        must grant).  Absent that group, the non-root user is outside the
+        socket's group and every docker call is permission-denied — exactly
+        the masked fault the bugfix repairs.
+        """
+        return str(host_socket_gid) not in self.container_group_add(
+            container_name
+        )
 
     def claude_launch_count(self, container_name: str) -> int:
         """lead-pixf (aeebb281): how many `agent-vault run -- claude ...`
@@ -1129,6 +1213,14 @@ class FakeDockerDriver:
     # --- DockerDriver protocol implementation ---
 
     def is_running(self, container_name: str) -> bool:
+        # lead-wdvx (Bug 2): a docker-dependent probe fails when the socket is
+        # unreachable (daemon down OR a config fault: permission-denied /
+        # not-mounted).  The decision to raise routes through the REAL
+        # classifier (see `_maybe_raise_docker_unreachable`), so `status`
+        # surfaces a cause-naming non-zero diagnostic instead of a (false)
+        # "stopped" state ONLY when the classifier recognises the fault —
+        # giving the Bug-2 status row genuine teeth.
+        self._maybe_raise_docker_unreachable()
         return container_name in self._running
 
     def run(
@@ -1139,12 +1231,19 @@ class FakeDockerDriver:
         mounts: list[tuple[str, str, str, bool]],
         network: str | None,
         detach: bool,
+        group_add: list[str] | None = None,
     ) -> None:
         cmd = ["docker", "run", "--name", container_name]
         if detach:
             cmd.append("-d")
         self._container_env[container_name] = dict(env)
         self._container_mounts_full[container_name] = list(mounts)
+        # lead-wdvx: record the supplementary groups the launcher granted
+        # (`docker run --group-add <gid>`).  This is what `docker inspect`'s
+        # HostConfig.GroupAdd would show — the container's supplementary groups.
+        self._container_group_add[container_name] = [
+            str(g) for g in (group_add or [])
+        ]
         for key, val in env.items():
             cmd += ["-e", f"{key}={val}"]
             if key == "SHOPMSG_DSN":
@@ -1152,6 +1251,8 @@ class FakeDockerDriver:
             if key == "HTTPS_PROXY":
                 self._container_proxy_env[container_name] = val
                 self._container_broker[container_name] = val
+        for gid in group_add or []:
+            cmd += ["--group-add", str(gid)]
         for mount_type, source, dest, readonly in mounts:
             spec = f"type={mount_type},source={source},target={dest}"
             if readonly:
@@ -2022,15 +2123,41 @@ class FakeDockerDriver:
         self._all_containers[container_name] = False
 
     def list_bc_containers(self) -> list[ContainerInfo]:
-        # lead-pixf (010e776c): an unreachable Docker socket is an infra
-        # failure, surfaced as an exception — NOT an empty list.
-        if self._docker_socket_unreachable is not None:
-            from bc_launcher.driver import DockerSocketUnreachableError
-            raise DockerSocketUnreachableError(self._docker_socket_unreachable)
+        # lead-pixf (010e776c) / lead-wdvx (Bug 2): a docker-dependent call
+        # fails with a recognizable stderr when the socket is unreachable
+        # (daemon-down OR a config fault: permission-denied / not-mounted).
+        # The DECISION to treat that as an infra failure (raise) vs. an
+        # ordinary empty result is made by the REAL classifier
+        # `_is_docker_socket_unreachable` — so the fake routes the canned
+        # stderr through it, giving the Bug-2 scenarios genuine teeth: a
+        # classifier that does NOT match the permission-denied / not-mounted
+        # stderr makes this fall through to the empty list, masking the fault
+        # exactly as the unfixed code does.
+        self._maybe_raise_docker_unreachable()
         return [
             ContainerInfo(name=name, running=running)
             for name, running in self._all_containers.items()
         ]
+
+    def _maybe_raise_docker_unreachable(self) -> None:
+        """Route the canned docker fault stderr through the REAL classifier.
+
+        Mirrors the real driver: a docker CLI call returns non-zero with the
+        fault stderr; the driver raises ``DockerSocketUnreachableError`` ONLY
+        when ``_is_docker_socket_unreachable`` classifies that stderr as a
+        socket-unreachable failure.  When no fault is configured, or the
+        classifier does not match the configured stderr, no raise — the caller
+        proceeds to its ordinary (empty/absent) result.
+        """
+        stderr = self._docker_socket_unreachable
+        if stderr is None:
+            return
+        from bc_launcher.driver import (
+            DockerSocketUnreachableError,
+            _is_docker_socket_unreachable,
+        )
+        if _is_docker_socket_unreachable(stderr):
+            raise DockerSocketUnreachableError(stderr)
 
     def agent_online(self, container_name: str) -> bool:
         """lead-pixf (f2ddd6c7 / aeebb281): report agent presence.

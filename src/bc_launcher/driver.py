@@ -98,8 +98,20 @@ class DockerDriver(Protocol):
         mounts: list[tuple[str, str, str, bool]],  # (type, source, dest, readonly)
         network: str | None,
         detach: bool,
+        group_add: list[str] | None = None,
     ) -> None:
-        """Start a new container."""
+        """Start a new container.
+
+        ``group_add`` carries supplementary group ids (or names) to grant the
+        launched container's process (``docker run --group-add <gid>``).  This
+        is REQUIRED for the opt-in docker-socket mount (lead-wdvx): bind-mounting
+        ``/var/run/docker.sock`` alone leaves the container's non-root default
+        user OUTSIDE the host socket's owning group, so every docker call inside
+        the container is rejected permission-denied.  Adding the host socket's
+        gid to the container's supplementary groups is what makes the mounted
+        socket actually usable.  None / empty adds no ``--group-add`` (the
+        default, so a launch WITHOUT the docker-socket flag grants no group).
+        """
         ...
 
     def exec_run(
@@ -145,6 +157,18 @@ class DockerDriver(Protocol):
 
     def stop(self, container_name: str) -> None:
         """Stop and remove the named container."""
+        ...
+
+    def host_socket_gid(self, socket_path: str) -> int | None:
+        """Return the owning group id of the host docker socket, or None.
+
+        lead-wdvx (Bug 1).  When the opt-in docker-socket mount is enabled the
+        launcher must grant the launched container supplementary-group access
+        to the mounted socket, so it needs the HOST socket's actual gid at run
+        time (it varies by host — the scenarios model gid 984).  This resolves
+        it by stat-ing ``socket_path``; None when the path is absent / cannot
+        be stat-ed (so the launcher adds no group rather than crashing).
+        """
         ...
 
     def list_bc_containers(self) -> list[ContainerInfo]:
@@ -315,12 +339,36 @@ def _is_docker_socket_unreachable(stderr: str) -> bool:
     daemon at unix:///var/run/docker.sock. Is the docker daemon running?".
     Matching on that signature lets ``list_bc_containers`` distinguish an
     infrastructure outage (raise) from an ordinary empty result (return []).
+
+    lead-wdvx (Bug 2).  The daemon-DOWN signatures above are NOT the only way
+    docker becomes unusable: a CONFIGURATION fault — the socket mounted but the
+    calling user denied access (permission-denied), or the socket not mounted
+    into the calling environment at all — also makes every docker call fail,
+    and the product authority asked the error handling cover "any future
+    configuration problems", not just daemon-down.  Those faults must ALSO be
+    classified as docker-unreachable so the docker-dependent subcommands exit
+    non-zero and NAME the cause, rather than falling through to the ordinary
+    empty-result path ("No BC containers found.", exit 0) and MASKING the real
+    fault.  The docker CLI emits recognizable signatures for these too:
+      * permission-denied:  "permission denied while trying to connect to the
+        Docker daemon socket at unix:///var/run/docker.sock: ... connect:
+        permission denied"
+      * not-mounted:        "no such file or directory" against the socket path
+        (the unix socket is absent from the calling environment).
     """
     text = (stderr or "").lower()
     return (
         "cannot connect to the docker daemon" in text
         or "is the docker daemon running" in text
         or ("docker" in text and "daemon" in text and "socket" in text)
+        # lead-wdvx: permission-denied to the mounted socket.
+        or "permission denied" in text
+        # lead-wdvx: the socket is not mounted into the calling environment
+        # ("no such file or directory" against the docker socket path).
+        or (
+            "no such file or directory" in text
+            and ("docker.sock" in text or "/var/run/docker" in text)
+        )
     )
 
 
@@ -362,6 +410,17 @@ class RealDockerDriver:
              "--format", "{{.Names}}"],
             capture_output=True, text=True, check=False,
         )
+        # lead-wdvx (Bug 2): a docker call that fails because the daemon socket
+        # is unreachable — daemon down, OR a CONFIG fault (socket mounted but
+        # permission-denied, or not mounted at all) — is an infrastructure
+        # failure, NOT "the container is not running".  Raise so callers like
+        # ``status`` surface it as a non-zero, cause-naming diagnostic rather
+        # than reporting a (false) "stopped" state that is indistinguishable
+        # from a legitimately-absent container.
+        if result.returncode != 0 and _is_docker_socket_unreachable(
+            result.stderr
+        ):
+            raise DockerSocketUnreachableError(result.stderr.strip())
         return container_name in result.stdout.split()
 
     def run(
@@ -372,12 +431,17 @@ class RealDockerDriver:
         mounts: list[tuple[str, str, str, bool]],
         network: str | None,
         detach: bool,
+        group_add: list[str] | None = None,
     ) -> None:
         cmd = ["docker", "run", "--name", container_name]
         if detach:
             cmd.append("-d")
         for key, val in env.items():
             cmd += ["-e", f"{key}={val}"]
+        # lead-wdvx: supplementary groups (e.g. the host docker socket's gid)
+        # so the container's non-root default user can use a mounted socket.
+        for gid in group_add or []:
+            cmd += ["--group-add", str(gid)]
         for mount_type, source, dest, readonly in mounts:
             spec = f"type={mount_type},source={source},target={dest}"
             if readonly:
@@ -425,6 +489,19 @@ class RealDockerDriver:
         cmd = ["docker", "rm", "-f", container_name]
         self._last_command = cmd
         subprocess.run(cmd, check=True)
+
+    def host_socket_gid(self, socket_path: str) -> int | None:
+        """Stat the host docker socket and return its owning gid (lead-wdvx).
+
+        Returns None when the socket path does not exist or cannot be stat-ed,
+        so a launch with the docker-socket flag against a host that has no
+        socket adds no ``--group-add`` rather than crashing.
+        """
+        import os as _os
+        try:
+            return _os.stat(socket_path).st_gid
+        except OSError:
+            return None
 
     def list_bc_containers(self) -> list[ContainerInfo]:
         # list all containers (running + stopped) whose name starts with bc-

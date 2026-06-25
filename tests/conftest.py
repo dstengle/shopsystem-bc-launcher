@@ -7547,6 +7547,208 @@ def assert_docker_inspect_socket_absent(ctx, fake_driver):
     )
 
 
+# ---------------------------------------------------------------------------
+# lead-wdvx Bug 1 — the docker-socket opt-in flag must grant USABLE access
+# (scenarios c63857720446813b / f49c7fd3c38ac741).  The PRESENCE/ABSENCE pins
+# ff370a4e / e177655b above stay green; these add the usability dimension:
+# the host socket's gid must be in the container's supplementary groups when
+# the flag is set (so a non-root call is NOT permission-denied), and ABSENT
+# when the flag is not set (guard against over-grant).
+# ---------------------------------------------------------------------------
+
+@given(parsers.parse('the host docker socket "{socket_path}" is owned by '
+                     'group id "{gid}"'))
+def host_docker_socket_owned_by_gid(socket_path, gid, ctx, fake_driver):
+    """Model the host docker socket's owning gid (what `host_socket_gid`
+    resolves by stat-ing the host socket).  The launcher must add THIS gid to
+    the container's supplementary groups when the docker-socket flag is set."""
+    fake_driver.set_host_socket_gid(int(gid))
+    ctx["host_socket_gid"] = int(gid)
+
+
+@then(parsers.parse('docker inspect of the container shows the host docker '
+                    'socket group id "{gid}" present in the container\'s '
+                    'supplementary groups'))
+def assert_host_socket_gid_present(gid, ctx, fake_driver):
+    """RED if no --group-add is added (the host socket gid is absent from the
+    container's supplementary groups) — the masked-fault state Bug 1 fixes."""
+    container_name = ctx["container_name"]
+    groups = fake_driver.container_group_add(container_name)
+    assert gid in groups, (
+        f"docker inspect (HostConfig.GroupAdd) must show the host docker "
+        f"socket gid {gid!r} in the container's supplementary groups when "
+        f"the docker-socket flag is set; got: {groups!r}"
+    )
+
+
+@then("a docker call made by the container's non-root default user is not "
+      "rejected with a permission-denied error against the docker socket")
+def assert_non_root_docker_not_permission_denied(ctx, fake_driver):
+    """RED if the non-root user is still outside the socket's group (no
+    --group-add granted) — i.e. docker calls are permission-denied."""
+    container_name = ctx["container_name"]
+    host_gid = ctx["host_socket_gid"]
+    denied = fake_driver.non_root_docker_call_permission_denied(
+        container_name, host_gid
+    )
+    assert not denied, (
+        "a docker call by the container's non-root default user must NOT be "
+        f"permission-denied: the host socket gid {host_gid} is not in the "
+        f"container's supplementary groups "
+        f"{fake_driver.container_group_add(container_name)!r}"
+    )
+
+
+@then(parsers.parse('docker inspect of the container shows the host docker '
+                    'socket group id "{gid}" absent from the container\'s '
+                    'supplementary groups'))
+def assert_host_socket_gid_absent(gid, ctx, fake_driver):
+    """RED if the gid is added WITHOUT the flag (over-grant)."""
+    container_name = ctx["container_name"]
+    groups = fake_driver.container_group_add(container_name)
+    assert gid not in groups, (
+        f"docker inspect (HostConfig.GroupAdd) must NOT show the host docker "
+        f"socket gid {gid!r} in the container's supplementary groups when the "
+        f"docker-socket flag is absent (over-grant guard); got: {groups!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# lead-wdvx Bug 2 — docker-dependent subcommands must surface a docker config
+# fault (permission-denied / not-mounted) as a NON-ZERO, cause-naming
+# diagnostic distinct from a legitimate empty/absent result
+# (scenarios 510d02951321628e / 2123096c12854ff1).
+# ---------------------------------------------------------------------------
+
+@given("the Docker socket is mounted but the calling user is denied access to "
+       "it so docker calls fail with a permission-denied error")
+def docker_socket_permission_denied(ctx, fake_driver):
+    """Model the socket mounted-but-permission-denied fault (lead-wdvx)."""
+    fake_driver.set_docker_socket_permission_denied(True)
+
+
+# The Scenario Outline parameterises the fault via <docker_fault>.  Map each
+# Examples phrasing onto the modelled fault.
+_WDVX_DOCKER_FAULTS = {
+    "the socket is permission-denied to the calling user":
+        "permission_denied",
+    "the socket is not mounted into the calling environment":
+        "not_mounted",
+}
+
+
+@given(parsers.parse("the Docker daemon cannot be reached because "
+                     "{docker_fault}"))
+def docker_daemon_unreachable_because(docker_fault, ctx, fake_driver):
+    fault = _WDVX_DOCKER_FAULTS.get(docker_fault.strip())
+    assert fault is not None, (
+        f"unmodelled docker_fault: {docker_fault!r}"
+    )
+    if fault == "permission_denied":
+        fake_driver.set_docker_socket_permission_denied(True)
+    else:
+        fake_driver.set_docker_socket_not_mounted(True)
+    ctx["wdvx_docker_fault"] = fault
+
+
+@when(parsers.parse('I run the Docker-dependent bc-container subcommand '
+                    '"{subcommand}"'))
+def run_docker_dependent_subcommand(subcommand, ctx, controller):
+    sub = subcommand.strip()
+    if sub == "list":
+        ctx["result"] = controller.list_containers()
+    elif sub == "status":
+        ctx["result"] = controller.status("shopsystem-messaging")
+    else:
+        raise AssertionError(f"unmodelled docker-dependent subcommand: {sub!r}")
+    ctx["wdvx_subcommand"] = sub
+
+
+@then("stderr names the cause as the Docker daemon being unreachable due to "
+      "the socket being permission-denied or not mounted")
+def assert_stderr_names_permission_or_not_mounted_cause(ctx):
+    """RED if permission-denied still masks as 'No BC containers found.' /
+    exit 0 (no cause-naming stderr)."""
+    result = ctx["result"]
+    stderr = (getattr(result, "stderr", "") or "").lower()
+    assert "docker" in stderr and (
+        "could not be reached" in stderr or "unreachable" in stderr
+    ), (
+        f"stderr must name the Docker daemon as unreachable; got: {stderr!r}"
+    )
+
+
+@then("stderr names the cause as the Docker daemon being unreachable")
+def assert_stderr_names_daemon_unreachable(ctx):
+    result = ctx["result"]
+    stderr = (getattr(result, "stderr", "") or "").lower()
+    assert "docker" in stderr and (
+        "could not be reached" in stderr or "unreachable" in stderr
+    ), (
+        f"stderr must name the Docker daemon as unreachable; got: {stderr!r}"
+    )
+
+
+@then(parsers.parse('stdout does not include "{text}"'))
+def assert_stdout_does_not_include(text, ctx):
+    result = ctx["result"]
+    stdout = getattr(result, "stdout", "") or ""
+    assert text not in stdout, (
+        f"Expected {text!r} ABSENT from stdout (a docker config fault must "
+        f"not be masked as an empty/absent result); got: {stdout!r}"
+    )
+
+
+@then("the output is distinguishable from the legitimate result the "
+      "subcommand would print when Docker is reachable but the queried "
+      "container is absent or the list is empty")
+def assert_distinguishable_from_legitimate_empty(ctx, fake_driver, controller):
+    """The fault output must be distinguishable from the LEGITIMATE
+    empty/absent result the same subcommand prints when docker is reachable.
+
+    Teeth: assert (a) the fault path exited non-zero with cause-naming stderr,
+    AND (b) running the SAME subcommand with docker reachable and no matching
+    container produces the legitimate empty/absent result at exit 0 — and the
+    two are NOT the same.  RED if any Examples row masks the fault as the
+    legitimate empty/absent result or exits zero.
+    """
+    fault_result = ctx["result"]
+    sub = ctx["wdvx_subcommand"]
+    assert fault_result.exit_code != 0, (
+        "the fault path must exit non-zero"
+    )
+
+    # Now clear the fault and re-run the SAME subcommand to capture the
+    # LEGITIMATE empty/absent result (docker reachable, nothing present).
+    fake_driver.set_docker_socket_unreachable(False)
+    legit_controller = controller
+    if sub == "list":
+        legit = legit_controller.list_containers()
+        assert legit.exit_code == 0, (
+            "a legitimately-empty list must still exit zero"
+        )
+        assert "No BC containers found." in legit.stdout, (
+            "the legitimate empty list must print 'No BC containers found.'; "
+            f"got: {legit.stdout!r}"
+        )
+    else:  # status
+        legit = legit_controller.status("shopsystem-messaging")
+        assert legit.exit_code == 0, (
+            "a legitimately-absent container status must still exit zero"
+        )
+        assert "container_state: stopped" in legit.stdout, (
+            "the legitimate absent-container status must report "
+            f"'container_state: stopped'; got: {legit.stdout!r}"
+        )
+
+    # Fault output is distinguishable from the legitimate empty/absent output.
+    assert fault_result.exit_code != legit.exit_code, (
+        "the docker-fault result must be distinguishable from the legitimate "
+        f"empty/absent result (fault exit {fault_result.exit_code}, legit "
+        f"exit {legit.exit_code})"
+    )
+
+
 # ===========================================================================
 # Engage blocking-option-screen Escape-handling step definitions (lead-q3uy)
 #

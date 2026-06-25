@@ -35,3 +35,22 @@ Feature: bc-container launch workspace-mount and opt-in docker-socket mount
     And the container starts
     Then the container has no bind mount whose source is the host docker socket "/var/run/docker.sock"
     And docker inspect of the container shows no docker socket mount present
+
+  @scenario_hash:c63857720446813b @bc:shopsystem-bc-launcher
+  Scenario: launch with the docker-socket opt-in flag grants the launched container's non-root user usable access to the mounted socket
+    Given the shopsystem-bc-launcher BC is installed
+    And the host docker socket "/var/run/docker.sock" is owned by group id "984"
+    When I run bc-container launch with the docker-socket opt-in flag enabled
+    And the container starts
+    Then the container has a bind mount whose source is the host docker socket "/var/run/docker.sock"
+    And docker inspect of the container shows the host docker socket group id "984" present in the container's supplementary groups
+    And a docker call made by the container's non-root default user is not rejected with a permission-denied error against the docker socket
+
+  @scenario_hash:f49c7fd3c38ac741 @bc:shopsystem-bc-launcher
+  Scenario: launch without the docker-socket opt-in flag adds no docker-socket group to the launched container
+    Given the shopsystem-bc-launcher BC is installed
+    And the host docker socket "/var/run/docker.sock" is owned by group id "984"
+    When I run bc-container launch without the docker-socket opt-in flag
+    And the container starts
+    Then the container has no bind mount whose source is the host docker socket "/var/run/docker.sock"
+    And docker inspect of the container shows the host docker socket group id "984" absent from the container's supplementary groups
