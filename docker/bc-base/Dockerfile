@@ -34,7 +34,7 @@ USER root
 # (ADR-022 / lead-czwo: this replaces the retired shopsystem-templates-release
 # repository_dispatch fan-in, which previously threaded the released tag in via
 # --build-arg from a dispatch client_payload.)
-ARG SHOP_TEMPLATES_VERSION=v0.28.0
+ARG SHOP_TEMPLATES_VERSION=v0.29.0
 
 # Framework utility CLIs, version-pinned in the
 # "<pkg> @ git+https://github.com/<owner>/<repo>.git@vMAJOR.MINOR.PATCH"
@@ -46,7 +46,7 @@ RUN pip install --no-cache-dir \
     "shopsystem-messaging @ git+https://github.com/dstengle/shopsystem-messaging.git@v0.4.0" \
     "scenarios @ git+https://github.com/dstengle/shopsystem-scenarios@v0.2.0" \
     "shop-templates @ git+https://github.com/dstengle/shopsystem-templates.git@${SHOP_TEMPLATES_VERSION}" \
-    "shopsystem-bc-launcher @ git+https://github.com/dstengle/shopsystem-bc-launcher.git@v0.3.15"
+    "shopsystem-bc-launcher @ git+https://github.com/dstengle/shopsystem-bc-launcher.git@v0.3.16"
 
 # agent-vault — the in-container broker client (bclaunch-9rr). The agent runs
 # wrapped as `agent-vault run -- claude`; agent-vault establishes the proxy
