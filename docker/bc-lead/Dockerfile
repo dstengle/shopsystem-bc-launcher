@@ -28,11 +28,17 @@ FROM ghcr.io/dstengle/shopsystem-bc-base:${BASE_VERSION}
 
 USER root
 
-# Install ONLY the docker CLI (docker-ce-cli — the docker client, not the
-# docker-ce daemon/engine) from Docker's official apt repository. The launcher
-# only ever shells out to the `docker` client; the daemon is provided by the
-# host (the launcher container talks to the host's docker socket). Keep this
-# THIN: nothing beyond what is required to install the docker client.
+# Install the docker CLI (docker-ce-cli — the docker client, not the
+# docker-ce daemon/engine) AND the docker compose plugin (docker-compose-plugin)
+# from Docker's official apt repository. The launcher shells out to the `docker`
+# client; the daemon is provided by the host (the launcher container talks to the
+# host's docker socket). The compose plugin is required because footing
+# (lead-ae4h, bin/bootstrap runs footing on this image) runs
+# `docker compose -f compose.yaml up -d postgres agent-vault` (footing L172):
+# without it `docker compose version` fails with "docker: unknown command:
+# docker compose" (lead-ys8x, scenario c5edfa89da00af8a). The same Docker apt
+# repo that ships docker-ce-cli also ships docker-compose-plugin, so it is one
+# extra package on the existing apt install — keep this THIN.
 RUN install -m 0755 -d /etc/apt/keyrings \
     && curl -fsSL https://download.docker.com/linux/debian/gpg \
        -o /etc/apt/keyrings/docker.asc \
@@ -40,9 +46,33 @@ RUN install -m 0755 -d /etc/apt/keyrings \
     && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian $(. /etc/os-release && echo "$VERSION_CODENAME") stable" \
        > /etc/apt/sources.list.d/docker.list \
     && apt-get update \
-    && apt-get install -y --no-install-recommends docker-ce-cli \
+    && apt-get install -y --no-install-recommends docker-ce-cli docker-compose-plugin \
     && rm -rf /var/lib/apt/lists/* \
-    && docker --version
+    && docker --version \
+    && docker compose version
+
+# dolt engine binary — required because footing runs `bd dolt push` (the bd
+# 1.0.3 client is inherited from bc-base, but `bd dolt` shells out to the dolt
+# engine, which is NOT on PATH in bc-base). Without dolt on PATH `bd dolt push`
+# fails for a missing engine (lead-ys8x, scenario 98a0683d0360349e). Installed
+# as a pinned third-party Go binary from dolthub/dolt releases (NOT
+# apt/pip-installable), mirroring the bd install idiom in bc-base. Pinned to a
+# specific version for reproducible builds; installed onto /usr/local/bin which
+# is on PATH for the vscode user.
+RUN set -e && \
+    ARCH=$(uname -m) && \
+    case "$ARCH" in \
+        x86_64)  DOLT_ARCH="amd64" ;; \
+        aarch64) DOLT_ARCH="arm64" ;; \
+        *)       echo "Unsupported architecture: $ARCH" && exit 1 ;; \
+    esac && \
+    DOLT_VERSION=1.43.14 && \
+    DOLT_URL="https://github.com/dolthub/dolt/releases/download/v${DOLT_VERSION}/dolt-linux-${DOLT_ARCH}.tar.gz" && \
+    curl -fsSL "$DOLT_URL" | tar -xz -C /tmp && \
+    install -m 0755 "/tmp/dolt-linux-${DOLT_ARCH}/bin/dolt" /usr/local/bin/dolt && \
+    rm -rf "/tmp/dolt-linux-${DOLT_ARCH}" && \
+    dolt version && \
+    command -v dolt
 
 # Reset the default user back to vscode after the root-only docker-CLI install
 # (lead-t3dy / lead-fwrx, scenario a4caf0477a74e4bc). bc-base now ends as

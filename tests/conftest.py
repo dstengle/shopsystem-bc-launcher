@@ -10465,3 +10465,222 @@ def then_no_onboarding_from_home_mismatch(ctx):
         "The CA-materialization entrypoint does not write under the vscode HOME "
         "subtree, so its writes might require root."
     )
+
+
+# ---------------------------------------------------------------------------
+# bc-lead footing toolset: docker compose plugin + dolt binary (lead-ys8x;
+# scenarios c5edfa89da00af8a / 98a0683d0360349e / a0992b2156d132e3).
+#
+# docker is NOT available in this environment, so — exactly as every existing
+# bc-base/bc-lead image-content scenario does (a4caf0477a74e4bc default-user,
+# d9909f38abea83b5 toolset, the test_bc_base_framework_cli_pins.* pins) — these
+# scenarios are bound to the buildable-artifact source of truth: the committed
+# docker/bc-lead/Dockerfile. We assert it installs the docker compose plugin
+# (docker-compose-plugin) AND installs the dolt engine binary onto PATH. The
+# live `docker compose version` / `dolt version` proof on the REBUILT published
+# bc-lead image is the lead's post-release pull verification.
+# ---------------------------------------------------------------------------
+
+def _bc_lead_dockerfile_text(ctx) -> str:
+    """Resolve and cache the committed bc-lead Dockerfile text for these steps."""
+    cached = ctx.get("footing_toolset_text")
+    if cached is not None:
+        return cached
+    path = _find_bc_lead_dockerfile()
+    assert path is not None, (
+        "No tracked Dockerfile found that builds shopsystem-bc-lead "
+        "(FROM ...shopsystem-bc-base). The footing toolset scenarios "
+        "(lead-ys8x) bind to that Dockerfile's content."
+    )
+    ctx["footing_toolset_path"] = path
+    text = path.read_text()
+    ctx["footing_toolset_text"] = text
+    return text
+
+
+def _strip_dockerfile_comments(text: str) -> str:
+    """Return the Dockerfile text with whole-line ``#`` comments removed.
+
+    Image-content scenarios must bind to actual build INSTRUCTIONS, not to
+    documentation prose: a Dockerfile that merely mentions a package in a
+    comment but never installs it must still fail the teeth. We drop lines whose
+    first non-whitespace character is ``#`` (Dockerfile comments are
+    whole-line) so the detectors below see only executable instructions.
+    """
+    return "\n".join(
+        line for line in text.splitlines()
+        if not line.lstrip().startswith("#")
+    )
+
+
+def _bc_lead_installs_compose_plugin(text: str) -> bool:
+    """True iff the bc-lead Dockerfile INSTALLS the docker compose plugin.
+
+    The compose plugin ships as the `docker-compose-plugin` apt package from
+    Docker's official apt repo (the same repo that provides docker-ce-cli), so
+    its presence in an apt(-get) install instruction is the buildable-artifact
+    proof that `docker compose` resolves in the published image. We match only
+    a non-comment `apt[-get] install ... docker-compose-plugin` line so a mere
+    comment mention does not satisfy the teeth.
+    """
+    instructions = _strip_dockerfile_comments(text)
+    return bool(re.search(
+        r"apt(?:-get)?\s+install\b[^\n]*\bdocker-compose-plugin\b", instructions))
+
+
+def _bc_lead_installs_dolt_on_path(text: str) -> bool:
+    """True iff the bc-lead Dockerfile INSTALLS the dolt binary onto PATH.
+
+    The dolt engine is a third-party Go binary (not apt/pip installable); the
+    Dockerfile installs it from the dolthub/dolt releases onto /usr/local/bin
+    (on PATH). We require, in NON-comment instructions, that dolt is placed on a
+    PATH location (install/cp/mv into a bin dir, or an explicit
+    /usr/local/bin/dolt target) so a comment mention does not satisfy the teeth.
+    """
+    instructions = _strip_dockerfile_comments(text)
+    return bool(
+        re.search(
+            r"(install|cp|mv)\b[^\n]*\bdolt\b[^\n]*/usr/local/bin",
+            instructions,
+        )
+        or re.search(r"/usr/local/bin/dolt\b", instructions)
+    )
+
+
+@given(parsers.parse(
+    'the published image "{image}" that the footing bootstrap runway runs on'))
+def given_footing_runway_image(ctx, image):
+    assert "bc-lead" in image, (
+        f"The footing bootstrap runway runs on the bc-lead image; scenario "
+        f"named {image!r}."
+    )
+    _bc_lead_dockerfile_text(ctx)
+
+
+@when(parsers.parse(
+    'the image is run via "docker run --rm <image> docker compose version"'))
+def when_run_compose_version(ctx):
+    # docker is unavailable; resolve the buildable-artifact source of truth.
+    _bc_lead_dockerfile_text(ctx)
+
+
+@when(parsers.parse(
+    'the image is run via "docker run --rm <image> dolt version"'))
+def when_run_dolt_version(ctx):
+    _bc_lead_dockerfile_text(ctx)
+
+
+@when(parsers.parse(
+    'the image is inspected by running "docker compose version", '
+    '"dolt version", and "command -v dolt" inside it'))
+def when_inspect_compose_and_dolt(ctx):
+    _bc_lead_dockerfile_text(ctx)
+
+
+@then(parsers.parse(
+    '"docker compose version" exits zero and prints the installed Compose '
+    'plugin version'))
+def then_compose_version_exits_zero(ctx):
+    text = _bc_lead_dockerfile_text(ctx)
+    assert _bc_lead_installs_compose_plugin(text), (
+        f"bc-lead Dockerfile ({ctx['footing_toolset_path']}) does not install "
+        f"the docker compose plugin (docker-compose-plugin), so "
+        f"`docker compose version` would fail with "
+        f"'docker: unknown command: docker compose' (lead-ys8x c5edfa89)."
+    )
+
+
+@then(parsers.parse(
+    '"docker compose version" does not fail with "docker: unknown command: '
+    'docker compose"'))
+def then_compose_not_unknown_command(ctx):
+    text = _bc_lead_dockerfile_text(ctx)
+    assert _bc_lead_installs_compose_plugin(text), (
+        "bc-lead Dockerfile does not install docker-compose-plugin; "
+        "`docker compose` stays an unknown command."
+    )
+
+
+@then(parsers.parse(
+    'running "docker compose -f compose.yaml up -d postgres agent-vault" inside '
+    'the image does not fail with "unknown shorthand flag: \'f\'" due to a '
+    'missing compose subcommand'))
+def then_compose_up_f_flag_resolves(ctx):
+    text = _bc_lead_dockerfile_text(ctx)
+    assert _bc_lead_installs_compose_plugin(text), (
+        "bc-lead Dockerfile does not install docker-compose-plugin; without the "
+        "compose subcommand, `docker compose -f ...` parses -f against the "
+        "docker root command and fails with \"unknown shorthand flag: 'f'\". "
+        "Footing's `docker compose -f compose.yaml up -d` (footing L172) cannot "
+        "run (lead-ys8x c5edfa89)."
+    )
+
+
+@then(parsers.parse(
+    '"dolt version" exits zero and prints the installed dolt version'))
+def then_dolt_version_exits_zero(ctx):
+    text = _bc_lead_dockerfile_text(ctx)
+    assert _bc_lead_installs_dolt_on_path(text), (
+        f"bc-lead Dockerfile ({ctx['footing_toolset_path']}) does not install "
+        f"the dolt engine binary onto PATH, so `dolt version` would not resolve "
+        f"(lead-ys8x 98a0683d)."
+    )
+
+
+@then(parsers.parse(
+    '"command -v dolt" run inside the image resolves dolt on PATH and exits '
+    'zero'))
+def then_command_v_dolt_resolves(ctx):
+    text = _bc_lead_dockerfile_text(ctx)
+    assert _bc_lead_installs_dolt_on_path(text), (
+        "bc-lead Dockerfile does not place dolt on PATH (/usr/local/bin), so "
+        "`command -v dolt` would not resolve it (lead-ys8x 98a0683d)."
+    )
+
+
+@then(parsers.parse(
+    '"bd dolt push" run inside the image does not fail because the dolt engine '
+    'binary is absent from PATH'))
+def then_bd_dolt_push_resolves(ctx):
+    text = _bc_lead_dockerfile_text(ctx)
+    assert _bc_lead_installs_dolt_on_path(text), (
+        "bc-lead Dockerfile does not install the dolt engine onto PATH; bd 1.0.3 "
+        "is inherited from bc-base but `bd dolt push` shells out to the dolt "
+        "engine and would fail for a missing dolt binary (lead-ys8x 98a0683d)."
+    )
+
+
+@then(parsers.parse(
+    '"docker compose version" exits zero so the footing step "docker compose '
+    '-f compose.yaml up -d postgres agent-vault" can run'))
+def then_conj_compose(ctx):
+    text = _bc_lead_dockerfile_text(ctx)
+    assert _bc_lead_installs_compose_plugin(text), (
+        "bc-lead Dockerfile does not install docker-compose-plugin; footing's "
+        "`docker compose -f compose.yaml up -d` cannot run (lead-ys8x a0992b2)."
+    )
+
+
+@then(parsers.parse(
+    '"dolt version" exits zero and "command -v dolt" resolves dolt on PATH so '
+    'the footing step "bd dolt push" can run'))
+def then_conj_dolt(ctx):
+    text = _bc_lead_dockerfile_text(ctx)
+    assert _bc_lead_installs_dolt_on_path(text), (
+        "bc-lead Dockerfile does not install dolt onto PATH; footing's "
+        "`bd dolt push` cannot run (lead-ys8x a0992b2)."
+    )
+
+
+@then(parsers.parse(
+    'neither the docker compose plugin nor the dolt binary is absent from the '
+    'image footing runs on'))
+def then_conj_both_present(ctx):
+    text = _bc_lead_dockerfile_text(ctx)
+    compose = _bc_lead_installs_compose_plugin(text)
+    dolt = _bc_lead_installs_dolt_on_path(text)
+    assert compose and dolt, (
+        f"bc-lead footing-runway image is missing a required tool: "
+        f"docker-compose-plugin present={compose}, dolt-on-PATH present={dolt}. "
+        f"The conjunction (lead-ys8x a0992b2) requires BOTH."
+    )
