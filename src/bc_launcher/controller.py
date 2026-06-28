@@ -311,7 +311,16 @@ def _clone_ca_materialize_script(ca_path: str = AGENT_VAULT_CONTAINER_CA_PATH) -
         # VERIFY: non-empty AND first line is the PEM BEGIN marker.  Exit
         # non-zero otherwise so git is never pointed at a bad CA path.
         '[ -s "$ca" ] || { echo "agent-vault CA file is empty: $ca" >&2; exit 1; }; '
-        f'head -n 1 "$ca" | grep -qx "{CA_PEM_FIRST_LINE}" '
+        # F3 grep-validation fix (lead-eqao): the BEGIN-CERTIFICATE marker
+        # begins with "-----", so a bare `grep -qx "{marker}"` made grep parse
+        # the dash-prefixed pattern as OPTIONS ("grep: unrecognized option") and
+        # exit non-zero on an ACTUALLY-VALID cert, falsely "missing BEGIN
+        # CERTIFICATE" and refusing the clone.  Use `-F` (fixed string, so no
+        # regex interpretation) and `--` (end-of-options, so the dash-prefixed
+        # marker is treated as a PATTERN, never as flags).  The negative limb
+        # stays honest: genuinely marker-less content still fails to match `-x`
+        # (whole-line) and is rejected fail-loud below.
+        f'head -n 1 "$ca" | grep -qxF -- "{CA_PEM_FIRST_LINE}" '
         '|| { echo "agent-vault CA file missing BEGIN CERTIFICATE: $ca" >&2; exit 1; }'
     )
 
