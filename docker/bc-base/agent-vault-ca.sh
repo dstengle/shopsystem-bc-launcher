@@ -30,16 +30,34 @@
 
 AGENT_VAULT_CA_PATH="/home/vscode/.config/agent-vault/ca.pem"
 
-# Materialize the CA file from AGENT_VAULT_CA_PEM when the env var is set, and
-# (re)write it if missing. Guarded on AGENT_VAULT_CA_PEM being set + non-empty.
-if [ -n "${AGENT_VAULT_CA_PEM:-}" ]; then
-    if [ ! -s "${AGENT_VAULT_CA_PATH}" ]; then
-        mkdir -p /home/vscode/.config/agent-vault
+# Materialize the CA file when missing, then export the trust vars.
+#
+# CA-CONTENT SOURCE PRECEDENCE (lead-z0v2 regression fix):
+#   1. the inline AGENT_VAULT_CA_PEM env (ADR-045) when set + non-empty;
+#   2. ELSE the working operator path `agent-vault ca fetch` — the SAME
+#      workaround an operator runs by hand (`agent-vault ca fetch > <ca>`).
+#
+# REGRESSION (lead-z0v2): previously the CA file was written ONLY when
+# AGENT_VAULT_CA_PEM was set, so a real flagless launch (empty PEM env) left
+# the file absent while the launcher still pointed git at it — the clone failed
+# "error setting certificate file: .../ca.pem".  The `agent-vault ca fetch`
+# fallback guarantees real CA *content* lands on disk even with no inline PEM.
+if [ ! -s "${AGENT_VAULT_CA_PATH}" ]; then
+    mkdir -p /home/vscode/.config/agent-vault
+    if [ -n "${AGENT_VAULT_CA_PEM:-}" ]; then
+        # (1) inline PEM (ADR-045) — guarded on AGENT_VAULT_CA_PEM being set.
         printf '%s\n' "${AGENT_VAULT_CA_PEM}" > "${AGENT_VAULT_CA_PATH}"
-        # vscode-owned: the agent runs as vscode and must be able to read it.
-        chown -R vscode:vscode /home/vscode/.config/agent-vault 2>/dev/null || true
+    elif command -v agent-vault >/dev/null 2>&1; then
+        # (2) operator path: fetch the broker CA from the running broker.
+        agent-vault ca fetch > "${AGENT_VAULT_CA_PATH}" 2>/dev/null || true
     fi
+    # vscode-owned: the agent runs as vscode and must be able to read it.
+    chown -R vscode:vscode /home/vscode/.config/agent-vault 2>/dev/null || true
+fi
 
+# Export the five trust vars pointing at the CA ONLY when a non-empty CA file
+# actually exists — never point tooling at a CA path we failed to write.
+if [ -s "${AGENT_VAULT_CA_PATH}" ]; then
     # Export the five trust vars pointing at the materialized CA so node
     # (claude), python (requests/openssl), git and curl all trust the broker.
     export GIT_SSL_CAINFO="${AGENT_VAULT_CA_PATH}"

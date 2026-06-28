@@ -10837,9 +10837,11 @@ def then_each_command_resolves(ctx, gh, agent_vault):
 # FACET 2 (scn 4154b0ea63d0516b): /workspace owned by the agent user (vscode)
 #   so the in-container clone performed AS that user succeeds without
 #   "/workspace/.git: Permission denied".
-# FACET 3 (scn 0d29c76818a323a1): the broker MITM root CA is materialized into
-#   the container trust store BEFORE the clone, so a clone routed through
-#   HTTPS_PROXY passes TLS verification.
+# FACET 3 (scn 09f871cf8b99a34b, lead-z0v2 — SUPERSEDES retired scn
+#   0d29c76818a323a1): the broker MITM root CA is WRITTEN as real, non-empty
+#   PEM content to the path git is configured to trust (write-path==trust-path)
+#   BEFORE the clone, so a clone routed through HTTPS_PROXY passes TLS
+#   verification and git is never pointed at a CA path that does not exist.
 # ===========================================================================
 
 
@@ -11043,57 +11045,86 @@ def assert_clone_no_permission_denied(ctx, fake_driver):
     )
 
 
-# --- FACET 3 steps ---------------------------------------------------------
-
-@given(parsers.parse(
-    'the agent-vault broker root CA is delivered to the launched BC as inline '
-    'PEM content via "AGENT_VAULT_CA_PEM" per ADR-045'
-))
-def facet3_ca_pem_delivered(ctx):
-    ctx["av_ca_pem"] = _FAKE_BROKER_CA_PEM
-
+# --- FACET 3 steps (lead-z0v2, scenario 09f871cf8b99a34b) ------------------
+#
+# These steps SUPERSEDE the lead-uiwu scenario-68 (0d29c76818a323a1) bindings,
+# which asserted only a hollow fake "materialized=true" flag and so could NOT
+# catch the v0.3.34 regression (git pointed at a CA path the launcher never
+# wrote).  Scenario 69 binds to the ACTUAL launcher-generated clone-prep
+# behavior: the launcher must WRITE real CA *content* to a path AND configure
+# git to trust that SAME path (write-path == trust-path), with the CA file
+# non-empty and a "-----BEGIN CERTIFICATE-----" first line.  A mismatch goes
+# RED with the exact real-container failure ("error setting certificate file").
+#
+# The scenario is exercised through the NO-FLAG manifest-resolution clone path
+# with NO ambient AGENT_VAULT_CA_PEM in the test process env (mandate #3): that
+# ambient leak is precisely what masked the bug.  The launcher itself supplies
+# the CA via the working operator path (`agent-vault ca fetch`).
 
 @given(parsers.parse(
     'the launched BC routes outbound HTTPS through the agent-vault MITM proxy '
-    'via "HTTPS_PROXY"'
+    'via "HTTPS_PROXY", so the clone\'s TLS is terminated by the broker MITM '
+    'and requires the broker root CA to verify'
 ))
 def facet3_routes_through_mitm_proxy(ctx):
     """The operator supplies agent-vault credentials so the launcher derives
     the :14322 MITM proxy and routes the clone's HTTPS_PROXY through it."""
     ctx["av_addr"] = "https://agent-vault:14321"
-    ctx["av_token"] = "av_agt_uiwu"
+    ctx["av_token"] = "av_agt_z0v2"
     ctx["av_vault"] = "shopsystem"
 
 
 @when(parsers.parse(
-    'bc-container launch is run with BC name "{bc_name}" and the in-container '
-    'clone of its remote is performed through "HTTPS_PROXY"'
+    'bc-container launch is run with BC name "{bc_name}" via the no-flag '
+    'manifest-resolution clone path and the running container is inspected '
+    'before the in-container clone runs'
 ))
-def facet3_launch_through_proxy(bc_name, ctx, controller, fake_driver, tmp_path):
+def facet3_launch_no_flag_clone(bc_name, ctx, controller, fake_driver, tmp_path):
+    """Run a flagless launch (clone source resolved from bc-manifest.yaml).
+
+    REAL-FIDELITY (lead-z0v2, mandate #3): NO AGENT_VAULT_CA_PEM is supplied —
+    not as a launch param and not in the test process env (the ambient leak is
+    actively scrubbed).  The container's broker CA is fetchable
+    (`agent-vault ca fetch` — the working operator path), so the launcher's own
+    clone-prep is the only thing that can write the CA.  If the launcher
+    pointed git at a CA path WITHOUT writing it (the v0.3.34 bug), the clone
+    fails "error setting certificate file" and this scenario goes RED.
+    """
     repo_url = f"https://github.com/dstengle/{bc_name}.git"
     manifest_path = tmp_path / "bc-manifest.yaml"
-    if not manifest_path.exists():
-        import yaml as _yaml
-        manifest_path.write_text(_yaml.dump({
+    manifest_path.write_text(
+        __import__("yaml").dump({
             "product": "shopsystem product",
             "bcs": [{"name": bc_name, "remote": repo_url, "role": "bc"}],
-        }))
+        })
+    )
+    container_name = f"bc-{bc_name}"
+    # Model the working operator path: the broker CA is fetchable inside the
+    # container via `agent-vault ca fetch`.  This is NOT the test process env —
+    # it is in-container broker reachability the launcher's clone-prep uses.
+    fake_driver.set_broker_ca_fetchable(container_name)
+
     import os as _os
+    # Operator agent-vault triple (addr/token/vault) — required so the launcher
+    # derives the :14322 MITM proxy and routes the clone through it.  These are
+    # passed as launch PARAMS, not relied on from ambient env.
     env_overrides = {
         "AGENT_VAULT_ADDR": ctx.get("av_addr"),
         "AGENT_VAULT_TOKEN": ctx.get("av_token"),
         "AGENT_VAULT_VAULT": ctx.get("av_vault"),
-        "AGENT_VAULT_CA_PEM": ctx.get("av_ca_pem"),
     }
     saved = {}
     for k, v in env_overrides.items():
         saved[k] = _os.environ.get(k)
         if v is not None:
             _os.environ[k] = v
+    # mandate #3: scrub any ambient AGENT_VAULT_CA_PEM so the launcher CANNOT
+    # rely on a harness-leaked inline PEM — it must write the CA itself.
+    saved_ca_pem = _os.environ.pop("AGENT_VAULT_CA_PEM", None)
     try:
         result = controller.launch(
             bc_name=bc_name,
-            repo_url=repo_url,
+            # no repo_url, no workspace_mount → no-flag manifest resolution
             manifest_path=manifest_path,
             credential_home=ctx.get("credential_home"),
             agent_vault_addr=ctx.get("av_addr"),
@@ -11106,45 +11137,98 @@ def facet3_launch_through_proxy(bc_name, ctx, controller, fake_driver, tmp_path)
                 _os.environ.pop(k, None)
             else:
                 _os.environ[k] = v
+        if saved_ca_pem is not None:
+            _os.environ["AGENT_VAULT_CA_PEM"] = saved_ca_pem
     ctx["result"] = result
-    ctx["container_name"] = f"bc-{bc_name}"
+    ctx["container_name"] = container_name
     ctx["bc_name"] = bc_name
 
 
 @then(parsers.parse(
-    'the running container has installed the agent-vault MITM root CA into its '
-    'git/system trust store before the clone is attempted'
+    'a regular file exists inside the running container at the exact path git '
+    'is configured to use as its CA bundle, and that file is non-empty and its '
+    'first line is "{begin_line}"'
 ))
-def assert_ca_materialized_before_clone(ctx, fake_driver):
+def assert_ca_file_at_git_trust_path(begin_line, ctx, fake_driver):
+    """write-path == trust-path WITH CONTENT (lead-z0v2).
+
+    The CA path git was configured to trust on the clone exec (GIT_SSL_CAINFO)
+    must name a REAL, non-empty file whose first line is the PEM BEGIN marker.
+    This is the assertion a hollow "materialized=true" flag could never satisfy:
+    it requires the launcher to have actually written CA content to the exact
+    path it points git at.
+    """
     container_name = ctx["container_name"]
-    assert fake_driver.broker_ca_materialized(container_name), (
-        f"The broker MITM root CA must be materialized into the trust store "
-        f"of {container_name!r} (lead-uiwu FACET 3)."
+    trust_path = fake_driver.clone_git_ca_trust_path(container_name)
+    assert trust_path, (
+        "The clone exec did not configure git's CA bundle (GIT_SSL_CAINFO) at "
+        "all; cannot establish a write-path==trust-path invariant (lead-z0v2)."
     )
-    assert fake_driver.ca_materialized_before_clone(container_name), (
-        f"The broker MITM root CA must be materialized BEFORE the clone is "
-        f"attempted in {container_name!r} — the CA-before-clone ordering "
-        f"(lead-uiwu FACET 3)."
+    content = fake_driver.container_file(container_name, trust_path)
+    assert content is not None, (
+        f"git is configured to trust CA path {trust_path!r} but NO file was "
+        f"written there by the launcher — the exact v0.3.34 regression "
+        f"(write-path-vs-trust-path mismatch) (lead-z0v2)."
     )
+    assert content.strip(), (
+        f"The CA file at the git trust path {trust_path!r} is empty (lead-z0v2)."
+    )
+    first_line = content.splitlines()[0] if content.splitlines() else ""
+    assert first_line == begin_line, (
+        f"The CA file at {trust_path!r} must begin with {begin_line!r}; "
+        f"got first line {first_line!r} (lead-z0v2)."
+    )
+    ctx["facet3_trust_path"] = trust_path
 
 
 @then(parsers.parse(
-    'the clone routed through "HTTPS_PROXY" completes its TLS handshake '
-    'without an "SSL certificate problem: unable to get local issuer '
-    'certificate" error'
+    '"git config --global http.sslCAInfo" inside the container names that '
+    'existing CA file (or, equivalently, the agent-vault broker root CA is '
+    'installed into the system trust store git uses by default), so git is '
+    'never pointed at a CA path that does not exist'
 ))
-def assert_clone_tls_ok(ctx, fake_driver):
+def assert_git_ca_names_existing_file(ctx, fake_driver):
+    """git's CA trust setting must name a path that ACTUALLY exists with
+    content — never a path that does not exist (lead-z0v2)."""
+    container_name = ctx["container_name"]
+    trust_path = fake_driver.clone_git_ca_trust_path(container_name)
+    # Either git is pointed at a real, written CA file ...
+    if trust_path:
+        content = fake_driver.container_file(container_name, trust_path)
+        assert content, (
+            f"git's configured CA path {trust_path!r} does not name an existing "
+            f"non-empty file — git is pointed at a CA path that does not exist "
+            f"(lead-z0v2)."
+        )
+    else:
+        # ... or the CA is installed into the default/system trust store.
+        assert fake_driver.broker_ca_materialized(container_name), (
+            "Neither a git CA path nor a default-trust-store install was "
+            "established before the clone (lead-z0v2)."
+        )
+
+
+@then(parsers.parse(
+    'the in-container clone of "{bc_name}" routed through "HTTPS_PROXY" '
+    'completes its TLS handshake with neither an "{err1}" error nor an '
+    '"{err2}" error'
+))
+def assert_clone_tls_ok(bc_name, err1, err2, ctx, fake_driver):
     result = ctx["result"]
     container_name = ctx["container_name"]
     assert result.exit_code == 0, (
         f"Expected the brokered clone to succeed, got exit "
-        f"{result.exit_code}; stderr: {result.stderr!r} (lead-uiwu FACET 3)."
+        f"{result.exit_code}; stderr: {result.stderr!r} (lead-z0v2 FACET 3)."
     )
-    assert "SSL certificate problem" not in (result.stderr or ""), (
-        f"The proxied clone must not fail TLS verification; "
-        f"stderr: {result.stderr!r} (lead-uiwu FACET 3)."
+    assert err1 not in (result.stderr or ""), (
+        f"The proxied clone must not fail with {err1!r}; "
+        f"stderr: {result.stderr!r} (lead-z0v2 FACET 3)."
+    )
+    assert err2 not in (result.stderr or ""), (
+        f"The proxied clone must not fail TLS verification ({err2!r}); "
+        f"stderr: {result.stderr!r} (lead-z0v2 FACET 3)."
     )
     assert fake_driver.workspace_is_git_repo(container_name), (
         "The brokered clone must have succeeded into /workspace "
-        "(lead-uiwu FACET 3)."
+        "(lead-z0v2 FACET 3)."
     )

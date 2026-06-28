@@ -30,12 +30,12 @@ Feature: bc-container launch clone-path regression guards (lead-uiwu)
       Then "/workspace" is owned by the agent user "vscode" (uid 1000), not by root
       And the clone performed into "/workspace" as the agent user completes without a "/workspace/.git: Permission denied" error
 
-  @scenario_hash:0d29c76818a323a1 @bc:shopsystem-bc-launcher
-    Scenario: a launched BC trusts the agent-vault MITM proxy CA before the clone runs so a clone routed through HTTPS_PROXY passes TLS verification
-      Given the shopsystem-bc-launcher BC is installed
-      And the agent-vault broker root CA is delivered to the launched BC as inline PEM content via "AGENT_VAULT_CA_PEM" per ADR-045
-      And the launched BC routes outbound HTTPS through the agent-vault MITM proxy via "HTTPS_PROXY"
-      When bc-container launch is run with BC name "shopsystem-templates" and the in-container clone of its remote is performed through "HTTPS_PROXY"
-      Then the running container has installed the agent-vault MITM root CA into its git/system trust store before the clone is attempted
-      And the clone routed through "HTTPS_PROXY" completes its TLS handshake without an "SSL certificate problem: unable to get local issuer certificate" error
+  @scenario_hash:09f871cf8b99a34b @bc:shopsystem-bc-launcher
+  Scenario: a launched BC materializes the agent-vault MITM root CA as a non-empty certificate file at the path git is configured to trust, so a clone routed through HTTPS_PROXY passes TLS verification
+    Given the shopsystem-bc-launcher BC is installed
+    And the launched BC routes outbound HTTPS through the agent-vault MITM proxy via "HTTPS_PROXY", so the clone's TLS is terminated by the broker MITM and requires the broker root CA to verify
+    When bc-container launch is run with BC name "shopsystem-test-harness" via the no-flag manifest-resolution clone path and the running container is inspected before the in-container clone runs
+    Then a regular file exists inside the running container at the exact path git is configured to use as its CA bundle, and that file is non-empty and its first line is "-----BEGIN CERTIFICATE-----"
+    And "git config --global http.sslCAInfo" inside the container names that existing CA file (or, equivalently, the agent-vault broker root CA is installed into the system trust store git uses by default), so git is never pointed at a CA path that does not exist
+    And the in-container clone of "shopsystem-test-harness" routed through "HTTPS_PROXY" completes its TLS handshake with neither an "error setting certificate file" error nor an "SSL certificate problem: unable to get local issuer certificate" error
 

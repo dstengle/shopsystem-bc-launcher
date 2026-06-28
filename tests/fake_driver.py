@@ -6,6 +6,7 @@ running the controller under test, then assert on the recorded calls.
 """
 from __future__ import annotations
 
+import re
 import subprocess
 from dataclasses import dataclass, field
 
@@ -16,6 +17,9 @@ from bc_launcher.driver import ContainerInfo, ContainerMount
 # controller internals.
 CONTAINER_WORKSPACE = "/workspace"
 AGENT_CONTAINER_USER = "vscode"
+# lead-z0v2 — the fixed container CA path (mirrors the controller constant);
+# used by the CA-materialization filesystem model below.
+AGENT_VAULT_CONTAINER_CA_PATH = "/home/vscode/.config/agent-vault/ca.pem"
 
 
 def is_bd_bootstrap_command(command: list[str]) -> bool:
@@ -473,7 +477,8 @@ class FakeDockerDriver:
         # succeeds; the remote it cloned from is recorded so the positive
         # scenario can assert /workspace was cloned from the manifest remote.
         self._workspace_cloned_from: dict[str, str] = {}
-        # FACET 3 (scn 0d29c76818a323a1): whether the broker MITM root CA has
+        # FACET 3 (scn 09f871cf8b99a34b, lead-z0v2 — supersedes retired
+        # 0d29c76818a323a1): whether the broker MITM root CA has
         # been materialized into the container trust store.  The agent-vault-ca
         # materializer (entrypoint script) sets this; a clone routed through the
         # MITM proxy (clone_env carries an HTTPS_PROXY) FAILS TLS verification
@@ -488,6 +493,20 @@ class FakeDockerDriver:
         # materializer can use (set from docker run -e).  The materializer is a
         # no-op when it is absent, modelling the real entrypoint guard.
         self._has_ca_pem: set[str] = set()
+        # lead-z0v2 — a REAL per-container filesystem model for CA materialization,
+        # so the test catches the actual regression (git pointed at a CA path
+        # that was never written).  ``_container_files`` maps a container to a
+        # {path: content} map of files the launcher's clone-prep actually wrote;
+        # the clone simulation checks that the path git is configured to trust
+        # (GIT_SSL_CAINFO on the clone exec) names a real, non-empty file whose
+        # first line is "-----BEGIN CERTIFICATE-----".  A write-path-vs-trust-
+        # path MISMATCH (the bug) therefore goes RED.  ``_av_ca_pem_value`` is
+        # the inline PEM the operator supplied (None when empty — the real
+        # flagless case).  ``_broker_ca_fetchable`` models whether
+        # `agent-vault ca fetch` would succeed inside the container.
+        self._container_files: dict[str, dict[str, str]] = {}
+        self._av_ca_pem_value: dict[str, str] = {}
+        self._broker_ca_fetchable: set[str] = set()
 
         # Explicit health-status overrides per container (when a test wants
         # to assert a docker-inspect status directly rather than derive it).
@@ -1194,6 +1213,70 @@ class FakeDockerDriver:
         """Whether the broker CA was materialized BEFORE the clone (FACET 3)."""
         return self._ca_materialized_before_clone.get(container_name, False)
 
+    # --- lead-z0v2: real container CA filesystem model ---------------------
+
+    _DEFAULT_FAKE_FETCHED_CA = (
+        "-----BEGIN CERTIFICATE-----\n"
+        "MIIB/fake/agent-vault/broker/root/CA/fetched/via/ca/fetch\n"
+        "-----END CERTIFICATE-----\n"
+    )
+
+    def set_broker_ca_fetchable(self, container_name: str) -> None:
+        """Mark a container so an in-container `agent-vault ca fetch` succeeds.
+
+        lead-z0v2 — models the working operator path: a running broker from
+        which the launcher's clone-prep can fetch the CA when no inline
+        AGENT_VAULT_CA_PEM was supplied.
+        """
+        self._broker_ca_fetchable.add(container_name)
+
+    @staticmethod
+    def _extract_ca_path_from_prep(script_body: str) -> str:
+        """Extract the CA target path the clone-prep script writes to.
+
+        The controller's script assigns ``ca="<path>"``; recover that literal
+        so the simulated write lands at the SAME path the script writes to (and
+        thus the SAME path GIT_SSL_CAINFO is set to) — that path-equality is the
+        whole point of the lead-z0v2 fix.
+        """
+        m = re.search(r'ca="([^"]+)"', script_body)
+        if m:
+            return m.group(1)
+        return AGENT_VAULT_CONTAINER_CA_PATH
+
+    def _write_container_ca_file(
+        self, container_name: str, path: str, content: str | None = None
+    ) -> None:
+        """Record that a real, non-empty CA file was written at ``path``.
+
+        ``content`` defaults to a fake PEM whose first line is the BEGIN
+        CERTIFICATE marker (modelling `agent-vault ca fetch`).  An inline PEM
+        is normalized to end with a newline, matching the script's
+        ``printf '%s\\n'``.
+        """
+        if content is None:
+            content = self._DEFAULT_FAKE_FETCHED_CA
+        elif not content.endswith("\n"):
+            content = content + "\n"
+        self._container_files.setdefault(container_name, {})[path] = content
+
+    def container_file(self, container_name: str, path: str) -> str | None:
+        """The content of a file the launcher wrote inside the container, or
+        None if no such file was written (lead-z0v2)."""
+        return self._container_files.get(container_name, {}).get(path)
+
+    def clone_git_ca_trust_path(self, container_name: str) -> str | None:
+        """The CA path git was configured to trust on the clone exec — i.e. the
+        GIT_SSL_CAINFO value on the `git clone` exec for this container, or None
+        if the clone exec set none (lead-z0v2)."""
+        for call in self.exec_calls:
+            if (
+                call.container == container_name
+                and call.command[:2] == ["git", "clone"]
+            ):
+                return (call.env or {}).get("GIT_SSL_CAINFO")
+        return None
+
     # --- lead-mf15: durable per-path ownership model -----------------------
 
     # The agent-touched workspace paths whose ownership the durable invariant
@@ -1375,6 +1458,9 @@ class FakeDockerDriver:
             # missing PEM leaves the clone untrusted).
             if key == "AGENT_VAULT_CA_PEM" and val:
                 self._has_ca_pem.add(container_name)
+                # lead-z0v2 — record the actual inline PEM value so the
+                # clone-prep simulation can write its real content to disk.
+                self._av_ca_pem_value[container_name] = val
         for gid in group_add or []:
             cmd += ["--group-add", str(gid)]
         for mount_type, source, dest, readonly in mounts:
@@ -1913,17 +1999,64 @@ class FakeDockerDriver:
                     state["buffer"] = text
             return subprocess.CompletedProcess(command, 0, "", "")
 
-        # Simulate the agent-vault broker CA materializer (lead-uiwu FACET 3 /
-        # bclaunch-9rr entrypoint script).  Running it materializes the broker
-        # MITM root CA into the container trust store — but ONLY when the inline
+        # Simulate the legacy agent-vault broker CA materializer entrypoint
+        # script (bclaunch-9rr).  Running it materializes the broker MITM root
+        # CA into the container trust store — but ONLY when the inline
         # AGENT_VAULT_CA_PEM env was supplied (modelling the real entrypoint
-        # guard `if [ -n "$AGENT_VAULT_CA_PEM" ]`).  The launcher runs this
-        # BEFORE the clone so the proxied clone trusts the broker CA.
+        # guard `if [ -n "$AGENT_VAULT_CA_PEM" ]`).  Retained for any caller
+        # that still invokes the bare entrypoint script.
         if command[:1] == ["/usr/local/bin/agent-vault-ca.sh"] or (
             command and command[0].endswith("agent-vault-ca.sh")
         ):
             if container_name in self._has_ca_pem:
                 self._broker_ca_materialized.add(container_name)
+                self._write_container_ca_file(
+                    container_name, AGENT_VAULT_CONTAINER_CA_PATH
+                )
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+        # lead-z0v2 — simulate the clone-prep CA materialization script the
+        # controller now runs (`/bin/sh -c "<script>"`).  This is the REAL-
+        # FIDELITY model that catches the v0.3.34 regression: the script must
+        # actually WRITE real CA *content* to a path and the launcher must point
+        # git at that SAME path.  We faithfully replicate the script's logic:
+        #   * extract the CA target path the script writes to;
+        #   * source the content from AGENT_VAULT_CA_PEM (inline PEM) when set,
+        #     ELSE from `agent-vault ca fetch` when the broker CA is fetchable;
+        #   * the file is non-empty (BEGIN CERTIFICATE) only when one source
+        #     produced content; otherwise the script exits NON-ZERO (the prep
+        #     fails and the launcher must refuse to point git at the path).
+        # A test that supplies NEITHER an inline PEM NOR a fetchable broker CA
+        # thus reproduces the real bug: nothing is written, prep fails, and
+        # git would have been pointed at a path that does not exist.
+        if (
+            command[:2] == ["/bin/sh", "-c"]
+            and len(command) >= 3
+            and "AGENT_VAULT_CA_PEM" in command[2]
+            and "ca fetch" in command[2]
+        ):
+            script_body = command[2]
+            ca_target = self._extract_ca_path_from_prep(script_body)
+            pem = self._av_ca_pem_value.get(container_name)
+            wrote = False
+            if pem:
+                # (1) inline PEM (ADR-045).
+                self._write_container_ca_file(container_name, ca_target, pem)
+                wrote = True
+            elif container_name in self._broker_ca_fetchable:
+                # (2) operator path: `agent-vault ca fetch`.
+                self._write_container_ca_file(container_name, ca_target)
+                wrote = True
+            if not wrote:
+                # No source produced CA content: the script's verify step
+                # (`[ -s "$ca" ]`) fails and it exits non-zero.  This is the
+                # exact regression — the launcher would otherwise have pointed
+                # git at an unwritten path.
+                return subprocess.CompletedProcess(
+                    command, 1, "",
+                    f"agent-vault CA file is empty: {ca_target}\n",
+                )
+            self._broker_ca_materialized.add(container_name)
             return subprocess.CompletedProcess(command, 0, "", "")
 
         # Simulate git clone (lead-uiwu FACETs 2 + 3).
@@ -1951,18 +2084,44 @@ class FakeDockerDriver:
                     f"{CONTAINER_WORKSPACE}/.git: Permission denied\n",
                 )
 
-            # FACET 3 (scn 0d29c76818a323a1): a clone routed through the
-            # agent-vault MITM proxy (clone exec carries an HTTPS_PROXY) FAILS
-            # TLS verification UNLESS the broker CA was materialized into the
-            # trust store BEFORE this clone.  An unproxied clone (no HTTPS_PROXY
-            # on the exec env) is unaffected.
+            # FACET 3 (scn 09f871cf8b99a34b, lead-z0v2): a clone routed through
+            # the agent-vault MITM proxy (clone exec carries an HTTPS_PROXY)
+            # FAILS TLS verification UNLESS git is configured to trust a CA path
+            # that NAMES A REAL, NON-EMPTY CA FILE with a BEGIN CERTIFICATE
+            # first line.  This is the write-path==trust-path invariant with
+            # teeth: the actual bug (git pointed at GIT_SSL_CAINFO=<path> while
+            # nothing was written to <path>) produces the EXACT real-container
+            # failure "error setting certificate file: <path>".  An unproxied
+            # clone (no HTTPS_PROXY on the exec env) is unaffected.
             clone_proxied = bool(env and (env.get("HTTPS_PROXY") or env.get("https_proxy")))
-            if clone_proxied and container_name not in self._broker_ca_materialized:
-                return subprocess.CompletedProcess(
-                    command, 1, "",
-                    "fatal: unable to access '...': SSL certificate problem: "
-                    "unable to get local issuer certificate\n",
-                )
+            if clone_proxied:
+                ca_trust_path = (env or {}).get("GIT_SSL_CAINFO")
+                files = self._container_files.get(container_name, {})
+                if ca_trust_path is not None:
+                    # git is explicitly pointed at a CA path: that path MUST
+                    # name a real, non-empty BEGIN-CERTIFICATE file, else git
+                    # cannot open it ("error setting certificate file").
+                    content = files.get(ca_trust_path)
+                    if not content:
+                        return subprocess.CompletedProcess(
+                            command, 1, "",
+                            f"fatal: unable to access '...': error setting "
+                            f"certificate file: {ca_trust_path}\n",
+                        )
+                    if not content.startswith("-----BEGIN CERTIFICATE-----"):
+                        return subprocess.CompletedProcess(
+                            command, 1, "",
+                            f"fatal: unable to access '...': error setting "
+                            f"certificate file: {ca_trust_path} (not a PEM)\n",
+                        )
+                elif container_name not in self._broker_ca_materialized:
+                    # git relies on the system/default trust store: the broker
+                    # CA must have been installed there before the clone.
+                    return subprocess.CompletedProcess(
+                        command, 1, "",
+                        "fatal: unable to access '...': SSL certificate problem: "
+                        "unable to get local issuer certificate\n",
+                    )
 
             # Clone succeeds: /workspace is now a git repo cloned from the
             # remote (command[2] is the remote URL, command[3] the dest).

@@ -253,6 +253,69 @@ AGENT_VAULT_CONTAINER_CA_PATH = "/home/vscode/.config/agent-vault/ca.pem"
 GIT_SSL_CAINFO_ENV = "GIT_SSL_CAINFO"
 
 # ---------------------------------------------------------------------------
+# Clone-prep CA materialization — write-path == trust-path (lead-z0v2)
+# ---------------------------------------------------------------------------
+#
+# REGRESSION (lead-z0v2, empirical v0.3.34): the launcher LOGGED that it had
+# "materialized the broker MITM root CA into the container trust store before
+# the clone" yet the clone FAILED with
+#   error setting certificate file: /home/vscode/.config/agent-vault/ca.pem
+# because the CA file did NOT exist:
+#   * the entrypoint materializer (agent-vault-ca.sh) writes the CA file ONLY
+#     when AGENT_VAULT_CA_PEM is set + non-empty; in the real flagless launch
+#     that env was EMPTY, so NOTHING was written; and
+#   * the controller UNCONDITIONALLY set GIT_SSL_CAINFO to the CA path on the
+#     clone exec, pointing git at a CA path that was never written.
+# That is a write-path-vs-trust-path MISMATCH: git was pointed at a path the
+# launcher never guaranteed to contain real CA content.
+#
+# FIX: a single clone-prep script that (a) ACTUALLY writes the broker MITM CA
+# *content* to AGENT_VAULT_CONTAINER_CA_PATH BEFORE the clone — sourcing the
+# content from AGENT_VAULT_CA_PEM when present (ADR-045 inline PEM), else from
+# the working operator path `agent-vault ca fetch` — and (b) configures git to
+# trust THAT SAME existing path.  The script EXITS NON-ZERO if the file does
+# not end up non-empty with a "-----BEGIN CERTIFICATE-----" first line, so the
+# launcher NEVER points git at an unwritten / empty / malformed CA path.  The
+# write-path and the trust-path are the identical constant
+# AGENT_VAULT_CONTAINER_CA_PATH, eliminating the mismatch.
+CA_PEM_FIRST_LINE = "-----BEGIN CERTIFICATE-----"
+
+
+def _clone_ca_materialize_script(ca_path: str = AGENT_VAULT_CONTAINER_CA_PATH) -> str:
+    """Shell that writes real broker CA *content* to ``ca_path`` then verifies
+    it, before the clone (lead-z0v2).
+
+    Source precedence for the CA content:
+      1. the inline ``AGENT_VAULT_CA_PEM`` env (ADR-045) when set + non-empty;
+      2. else the working operator path ``agent-vault ca fetch`` (the same
+         workaround an operator runs by hand: ``agent-vault ca fetch > <ca>``).
+
+    The script then VERIFIES the file is a non-empty PEM whose first line is
+    ``-----BEGIN CERTIFICATE-----``; if not, it exits non-zero so the caller
+    refuses to point git at an unwritten / empty / malformed CA path.  This is
+    the write-path side of the write==trust invariant; the caller sets
+    GIT_SSL_CAINFO to this SAME ``ca_path`` only after this script succeeds.
+    """
+    return (
+        "set -e; "
+        f'ca="{ca_path}"; '
+        'mkdir -p "$(dirname "$ca")"; '
+        # (1) inline PEM (ADR-045) wins; (2) else operator `agent-vault ca fetch`.
+        'if [ -n "${AGENT_VAULT_CA_PEM:-}" ]; then '
+        '  printf \'%s\\n\' "$AGENT_VAULT_CA_PEM" > "$ca"; '
+        "else "
+        '  agent-vault ca fetch > "$ca"; '
+        "fi; "
+        # vscode runs the clone and must read the CA.
+        'chown vscode:vscode "$ca" 2>/dev/null || true; '
+        # VERIFY: non-empty AND first line is the PEM BEGIN marker.  Exit
+        # non-zero otherwise so git is never pointed at a bad CA path.
+        '[ -s "$ca" ] || { echo "agent-vault CA file is empty: $ca" >&2; exit 1; }; '
+        f'head -n 1 "$ca" | grep -qx "{CA_PEM_FIRST_LINE}" '
+        '|| { echo "agent-vault CA file missing BEGIN CERTIFICATE: $ca" >&2; exit 1; }'
+    )
+
+# ---------------------------------------------------------------------------
 # Operator-supplied agent-vault credential + TLS-trust injection
 # (bclaunch-5hi / bclaunch-7pf)
 # ---------------------------------------------------------------------------
@@ -1373,31 +1436,54 @@ class BcContainerController:
                 # libcurl/git builds; set the canonical HTTPS_PROXY plus the
                 # lowercase https_proxy so the clone routes regardless.
                 clone_env["https_proxy"] = clone_proxy_url
-            clone_env[GIT_SSL_CAINFO_ENV] = AGENT_VAULT_CONTAINER_CA_PATH
 
-            # --- FACET 3 (lead-uiwu, scenario 0d29c76818a323a1):
-            #     materialize / trust the broker MITM root CA BEFORE the clone.
+            # --- FACET 3 (lead-z0v2 — supersedes scenario 0d29c76818a323a1
+            #     with scenario 09f871cf8b99a34b):
+            #     ACTUALLY write the broker MITM root CA content BEFORE the
+            #     clone, then point git at the SAME existing path.
             # The clone routes through HTTPS_PROXY at the agent-vault MITM proxy
             # (:14322), so container git must trust the broker's MITM root CA at
-            # CLONE time — not only at agent-run time.  The CA arrives as INLINE
-            # PEM content via AGENT_VAULT_CA_PEM (ADR-045 / lead-lu91); the
-            # bc-base entrypoint materializer (agent-vault-ca.sh) writes it to
-            # the fixed container CA path and exports the trust vars.  The clone
-            # runs in a non-login shell that does NOT source the entrypoint, so
-            # the launcher RUNS the materializer explicitly here — BEFORE the
-            # clone exec — so the CA file exists at AGENT_VAULT_CONTAINER_CA_PATH
-            # (which GIT_SSL_CAINFO above points at) when git verifies the
-            # proxy's MITM cert.  Without this, the clone fails "SSL certificate
-            # problem: unable to get local issuer certificate".  Run as root so
-            # the materializer can create the trust dir regardless of the prior
-            # ownership state; it is a no-op when AGENT_VAULT_CA_PEM is unset.
-            self._driver.exec_run(
+            # CLONE time — not only at agent-run time.
+            #
+            # REGRESSION (lead-z0v2): the prior implementation (a) ran the
+            # entrypoint materializer (agent-vault-ca.sh), which writes the CA
+            # file ONLY when AGENT_VAULT_CA_PEM is set, and (b) UNCONDITIONALLY
+            # set GIT_SSL_CAINFO to the CA path.  In a real flagless launch
+            # AGENT_VAULT_CA_PEM was EMPTY, so nothing was written, yet git was
+            # still pointed at the path — the clone failed
+            # "error setting certificate file: .../ca.pem".  That is a
+            # write-path-vs-trust-path MISMATCH.
+            #
+            # FIX: run a single clone-prep script that writes real CA *content*
+            # to AGENT_VAULT_CONTAINER_CA_PATH (from AGENT_VAULT_CA_PEM when
+            # present, else `agent-vault ca fetch`) and verifies it is a
+            # non-empty PEM (first line "-----BEGIN CERTIFICATE-----").  Only
+            # when the file is confirmed present do we point GIT_SSL_CAINFO at
+            # that SAME path.  If the prep fails, the launch fails LOUDLY rather
+            # than handing git a CA path that does not exist.  Run as root so
+            # the script can create the trust dir regardless of prior ownership.
+            ca_prep = self._driver.exec_run(
                 container,
-                ["/usr/local/bin/agent-vault-ca.sh"],
+                ["/bin/sh", "-c", _clone_ca_materialize_script()],
             )
+            if ca_prep.returncode != 0:
+                return CommandResult(
+                    exit_code=1,
+                    stdout="".join(out_lines),
+                    stderr=(
+                        "agent-vault broker CA materialization failed before "
+                        "the clone; refusing to point git at a CA path that "
+                        f"does not exist ({AGENT_VAULT_CONTAINER_CA_PATH}): "
+                        f"{ca_prep.stderr}"
+                    ),
+                )
+            # write-path == trust-path: point git at the SAME path we just wrote
+            # and verified.  Never set this for a path the prep did not produce.
+            clone_env[GIT_SSL_CAINFO_ENV] = AGENT_VAULT_CONTAINER_CA_PATH
             out_lines.append(
-                "Materialized the agent-vault broker MITM root CA into the "
-                "container trust store before the clone (lead-uiwu FACET 3)\n"
+                "Materialized the agent-vault broker MITM root CA content to "
+                f"{AGENT_VAULT_CONTAINER_CA_PATH} and pointed git at that same "
+                "existing path before the clone (lead-z0v2 FACET 3)\n"
             )
 
             # --- FACET 2 (lead-uiwu, scenario 4154b0ea63d0516b):
