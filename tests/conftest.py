@@ -10740,3 +10740,82 @@ def then_conj_both_present(ctx):
         f"docker-compose-plugin present={compose}, dolt-on-PATH present={dolt}. "
         f"The conjunction (lead-ys8x a0992b2) requires BOTH."
     )
+
+
+# ===========================================================================
+# lead-h755 — a launched bc-base BC has gh and agent-vault resolvable on PATH
+# at runtime. Regression guard pinning a present-but-unpinned RUNTIME
+# invariant: inside the running container, `command -v gh` and
+# `command -v agent-vault` each exit zero and print an executable path. docker
+# is EXPLICITLY EXCLUDED (bc-base carries no docker CLI by design; PDR-020
+# Addendum II). docker is unavailable in this environment, so the running
+# container is modelled through the FakeDockerDriver in-container exec model
+# (the same idiom as other launched-container runtime scenarios); the real
+# observable is the lead's pull verification for the published image.
+# ===========================================================================
+
+_BC_BASE_PINNED_IMAGE = (
+    "ghcr.io/dstengle/shopsystem-bc-base:latest"
+)
+
+
+@given(parsers.parse(
+    'the container "{container_name}" is running on the pinned bc-base image'))
+def given_container_running_on_bc_base(container_name, ctx, fake_driver):
+    # Place the (already-launched) container on the pinned bc-base image and
+    # seed its in-container PATH with the bc-base baked tool set — gh and
+    # agent-vault among them — but NOT docker (bc-base has none by design).
+    fake_driver.set_running_on_bc_base_image(
+        container_name, _BC_BASE_PINNED_IMAGE
+    )
+    assert fake_driver.is_running(container_name), (
+        f"Expected {container_name!r} to be running on the bc-base image."
+    )
+    ctx["container_name"] = container_name
+
+
+@when(parsers.parse(
+    '"command -v gh" and "command -v agent-vault" are executed inside that '
+    'running container'))
+def when_command_v_gh_and_agent_vault(ctx, fake_driver):
+    container_name = ctx["container_name"]
+    # Execute the real `command -v <tool>` vector inside the running container
+    # via the driver's in-container exec seam — exactly what a runtime PATH
+    # probe does. Record each (rc, stdout) so the Then can assert both.
+    ctx["command_v_results"] = {
+        tool: fake_driver.exec_run(container_name, ["command", "-v", tool])
+        for tool in ("gh", "agent-vault")
+    }
+
+
+@then(parsers.parse(
+    'each command exits zero and prints an executable path for "{gh}" and for '
+    '"{agent_vault}" respectively'))
+def then_each_command_resolves(ctx, gh, agent_vault):
+    results = ctx["command_v_results"]
+    # The scenario pins gh + agent-vault ONLY — it must NOT assert docker.
+    assert "docker" not in results, (
+        "The gh/agent-vault runtime-PATH guard must NOT probe docker; bc-base "
+        "carries no docker CLI by design (PDR-020 Addendum II)."
+    )
+    for tool in (gh, agent_vault):
+        result = results.get(tool)
+        assert result is not None, (
+            f"`command -v {tool}` was not executed inside the running "
+            f"container."
+        )
+        assert result.returncode == 0, (
+            f"`command -v {tool}` exited {result.returncode} inside the "
+            f"running bc-base container; it must exit zero (the tool must be "
+            f"resolvable on PATH at runtime). A non-zero exit means {tool!r} "
+            f"is NOT on PATH — the regression this guard catches."
+        )
+        path = result.stdout.strip()
+        assert path, (
+            f"`command -v {tool}` printed no path; it must print an executable "
+            f"path for {tool!r} on the in-container PATH."
+        )
+        assert path.startswith("/") and path.endswith(tool), (
+            f"`command -v {tool}` printed {path!r}, which is not an executable "
+            f"path for {tool!r}."
+        )

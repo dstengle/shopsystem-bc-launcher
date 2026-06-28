@@ -534,6 +534,15 @@ class FakeDockerDriver:
         # read by the controller from `.claude/shop/type.md`.  Defaults to
         # "bc"; tests may override via set_shop_type().
         self._shop_type: dict[str, str] = {}
+        # --- lead-h755: runtime in-container tool-PATH model ---------------
+        # The image each container was launched/placed on.
+        self._container_image: dict[str, str] = {}
+        # Per-container map of tool name -> absolute path resolvable on the
+        # in-container PATH.  A `command -v <tool>` exec resolves against this.
+        self._container_tool_path: dict[str, dict[str, str]] = {}
+        # Per-container set of tools explicitly modelled ABSENT from PATH
+        # (the teeth: a `command -v <tool>` for an absent tool exits non-zero).
+        self._container_tool_absent: dict[str, set[str]] = {}
         # Ordered record of shop-templates skill-refresh exec calls, so tests
         # can assert the refresh ran the VALID command inside the workspace.
         self.refresh_calls: list[ExecCall] = []
@@ -586,6 +595,59 @@ class FakeDockerDriver:
         else:
             self._running.discard(container_name)
             self._all_containers[container_name] = False
+
+    # --- lead-h755: runtime in-container tool-PATH model -------------------
+    # A launched bc-base BC ALREADY has gh and agent-vault resolvable on PATH
+    # at runtime ("command -v gh" / "command -v agent-vault" exit zero inside
+    # the running container).  This dispatch PINS that runtime invariant.  The
+    # model represents, per container, the executables resolvable on the
+    # in-container PATH (tool name -> absolute path).  A `command -v <tool>`
+    # exec inside the container returns exit 0 + the path when the tool is
+    # resolvable, or exit 1 + empty output when it is NOT — so the model can
+    # FAITHFULLY REPRESENT ABSENCE (the teeth: removing gh or agent-vault from
+    # the modelled PATH must drive the scenario RED).
+    #
+    # docker is EXPLICITLY EXCLUDED from the bc-base PATH (PDR-020 Addendum II;
+    # docker is bc-LEAD-only).  When a container is placed on the bc-base image
+    # the default modelled PATH carries gh + agent-vault (plus the other baked
+    # framework CLIs) but NOT docker — so a `command -v docker` would exit
+    # non-zero, matching the real bc-base image.
+    _BC_BASE_DEFAULT_PATH_TOOLS = {
+        "gh": "/usr/bin/gh",
+        "agent-vault": "/usr/local/bin/agent-vault",
+        "shop-msg": "/usr/local/bin/shop-msg",
+        "shop-templates": "/usr/local/bin/shop-templates",
+        "bc-container": "/usr/local/bin/bc-container",
+        "bd": "/usr/local/bin/bd",
+    }
+
+    def set_running_on_bc_base_image(
+        self, container_name: str, image: str
+    ) -> None:
+        """Mark ``container_name`` running on the pinned bc-base ``image``.
+
+        Seeds the in-container PATH with the bc-base baked tool set (gh +
+        agent-vault among them); docker is deliberately NOT seeded (bc-base
+        carries no docker CLI by design)."""
+        self.set_running(container_name, True)
+        self._container_image[container_name] = image
+        # Only seed defaults the test has not already overridden, so an
+        # absence override applied before this call survives.
+        seeded = self._container_tool_path.setdefault(container_name, {})
+        for tool, path in self._BC_BASE_DEFAULT_PATH_TOOLS.items():
+            seeded.setdefault(tool, path)
+
+    def set_container_tool_absent(
+        self, container_name: str, tool: str
+    ) -> None:
+        """Model ``tool`` as NOT resolvable on the container's in-container
+        PATH (drives the regression-guard scenario RED)."""
+        self._container_tool_path.setdefault(container_name, {}).pop(tool, None)
+        self._container_tool_absent.setdefault(container_name, set()).add(tool)
+
+    def container_image(self, container_name: str) -> str:
+        """Return the image the container was launched/placed on, or ""."""
+        return self._container_image.get(container_name, "")
 
     def add_tmux_session(self, container_name: str, session_name: str) -> None:
         self._tmux_sessions.setdefault(container_name, set()).add(session_name)
@@ -2095,6 +2157,37 @@ class FakeDockerDriver:
             ):
                 self._beads_owner[container_name] = AGENT_CONTAINER_USER
             return subprocess.CompletedProcess(command, 0, "", "")
+
+        # lead-h755 — `command -v <tool>` resolves against the per-container
+        # in-container PATH model.  Recognise both the bare vector
+        # ["command", "-v", "<tool>"] and a shell-wrapped form
+        # ["bash"/"sh", "-lc"/"-c", "command -v <tool>"].  When the tool is
+        # resolvable: exit 0 + the absolute path on stdout (what `command -v`
+        # prints).  When NOT resolvable: exit 1 + empty output.  This is what
+        # gives the regression guard its teeth — an absent gh/agent-vault
+        # exits non-zero and prints no path.
+        tool_query = None
+        if command[:2] == ["command", "-v"] and len(command) >= 3:
+            tool_query = command[2]
+        elif (
+            len(command) >= 3
+            and command[0] in ("bash", "sh")
+            and command[1] in ("-lc", "-c")
+            and command[2].strip().startswith("command -v ")
+        ):
+            tool_query = command[2].strip().split("command -v ", 1)[1].strip()
+        if tool_query is not None:
+            absent = tool_query in self._container_tool_absent.get(
+                container_name, set()
+            )
+            path = self._container_tool_path.get(
+                container_name, {}
+            ).get(tool_query)
+            if path and not absent:
+                return subprocess.CompletedProcess(
+                    command, 0, path + "\n", ""
+                )
+            return subprocess.CompletedProcess(command, 1, "", "")
 
         # Default: success
         return subprocess.CompletedProcess(command, 0, "", "")
