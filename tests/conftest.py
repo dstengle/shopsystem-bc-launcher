@@ -525,7 +525,14 @@ def run_launch_with_repo_url(bc_name, ctx, fake_driver, controller, tmp_path):
 
 @when(parsers.parse('I run bc-container launch with BC name "{bc_name}"'))
 def run_launch(bc_name, ctx, fake_driver, controller, tmp_path):
-    repo_url = ctx.get("repo_url", f"https://github.com/shopsystem/{bc_name}.git")
+    # lead-uiwu FACET 1: when the scenario declares that NO --repo-url and no
+    # --workspace-mount are provided, pass repo_url=None so the controller must
+    # resolve the clone source from bc-manifest.yaml (or fail loudly).  Default
+    # behaviour (no flag) is unchanged: a default repo_url is supplied.
+    if ctx.get("no_repo_flags"):
+        repo_url = None
+    else:
+        repo_url = ctx.get("repo_url", f"https://github.com/shopsystem/{bc_name}.git")
     manifest_path = ctx.get("launch_manifest_path")
     if manifest_path is None and "launch_no_manifest" not in ctx:
         # Provide a default manifest for scenarios that don't set one up explicitly
@@ -10819,3 +10826,325 @@ def then_each_command_resolves(ctx, gh, agent_vault):
             f"`command -v {tool}` printed {path!r}, which is not an executable "
             f"path for {tool!r}."
         )
+
+
+# ===========================================================================
+# lead-uiwu — bc-container launch clone-path regression guards
+#
+# FACET 1 (scn bdec2754d9135086 positive / 0b50d090c9cc3c45 negative):
+#   manifest remote resolution when no repo flags are given, and a LOUD
+#   non-zero failure (never a silent empty /workspace) when no source resolves.
+# FACET 2 (scn 4154b0ea63d0516b): /workspace owned by the agent user (vscode)
+#   so the in-container clone performed AS that user succeeds without
+#   "/workspace/.git: Permission denied".
+# FACET 3 (scn 0d29c76818a323a1): the broker MITM root CA is materialized into
+#   the container trust store BEFORE the clone, so a clone routed through
+#   HTTPS_PROXY passes TLS verification.
+# ===========================================================================
+
+
+# --- FACET 1 given steps ---------------------------------------------------
+
+@given(parsers.parse(
+    'the bc-manifest.yaml registers the BC "{bc_name}" with a valid git '
+    'remote URL, and is the declared source of remote URLs when launching BCs'
+))
+def manifest_registers_bc_remote(bc_name, ctx, tmp_path):
+    """Write a bc-manifest.yaml that registers ``bc_name`` with a remote URL.
+
+    Records the remote so the positive assertion can confirm /workspace was
+    cloned from THIS manifest remote (FACET 1, scn bdec2754d9135086).
+    """
+    import yaml as _yaml
+    remote = f"https://github.com/dstengle/{bc_name}.git"
+    manifest_path = tmp_path / "bc-manifest.yaml"
+    manifest_path.write_text(_yaml.dump({
+        "product": "shopsystem product",
+        "bcs": [{"name": bc_name, "remote": remote, "role": "bc"}],
+    }))
+    ctx["launch_manifest_path"] = manifest_path
+    ctx["manifest_remote_for"] = {bc_name: remote}
+
+
+@given(parsers.parse(
+    'no "--repo-url" flag and no "--workspace-mount" flag are provided'
+))
+def no_repo_flags_provided(ctx):
+    """Mark that the launch must run with neither --repo-url nor
+    --workspace-mount, so the controller resolves the clone source from
+    bc-manifest.yaml (FACET 1) or fails loudly."""
+    ctx["no_repo_flags"] = True
+
+
+@given(parsers.parse(
+    'bc-manifest.yaml carries no resolvable git remote URL for the BC '
+    '"{bc_name}"'
+))
+def manifest_has_no_remote_for_bc(bc_name, ctx, tmp_path):
+    """Write a bc-manifest.yaml that does NOT register ``bc_name`` (so no
+    remote is resolvable for it) — the no-source loud-failure path (FACET 1
+    negative, scn 0b50d090c9cc3c45)."""
+    import yaml as _yaml
+    manifest_path = tmp_path / "bc-manifest.yaml"
+    manifest_path.write_text(_yaml.dump({
+        "product": "shopsystem product",
+        # A different BC is registered; the named BC has no entry, so no remote
+        # resolves for it.
+        "bcs": [{
+            "name": "shopsystem-other",
+            "remote": "https://github.com/dstengle/shopsystem-other.git",
+            "role": "bc",
+        }],
+    }))
+    ctx["launch_manifest_path"] = manifest_path
+
+
+# --- FACET 1 then steps ----------------------------------------------------
+
+@then(parsers.parse(
+    'the "/workspace" directory inside the running container "{container_name}" '
+    'is a git repository cloned from the remote URL registered for '
+    '"{bc_name}" in bc-manifest.yaml'
+))
+def assert_workspace_cloned_from_manifest_remote(
+    container_name, bc_name, ctx, fake_driver
+):
+    assert fake_driver.is_running(container_name), (
+        f"Expected {container_name!r} to be running"
+    )
+    assert fake_driver.workspace_is_git_repo(container_name), (
+        f"Expected /workspace in {container_name!r} to be a git repository "
+        f"cloned from the manifest remote, but no clone happened — the silent "
+        f"empty-launch regression (lead-uiwu FACET 1)."
+    )
+    expected_remote = ctx["manifest_remote_for"][bc_name]
+    cloned_from = fake_driver.workspace_cloned_from(container_name)
+    assert cloned_from == expected_remote, (
+        f"Expected /workspace cloned from the manifest remote "
+        f"{expected_remote!r}, got {cloned_from!r} (lead-uiwu FACET 1)."
+    )
+
+
+@then(parsers.parse(
+    'the error output explicitly states that no repo source — neither '
+    '"--repo-url", "--workspace-mount", nor a bc-manifest.yaml remote — could '
+    'be resolved for "{bc_name}"'
+))
+def assert_loud_no_source_error(bc_name, ctx):
+    result = ctx["result"]
+    stderr = (result.stderr or "").lower()
+    assert result.exit_code != 0, (
+        f"Expected a non-zero exit for a no-source launch, got "
+        f"{result.exit_code} (lead-uiwu FACET 1 negative)."
+    )
+    assert "--repo-url" in stderr, (
+        f"Error output must name --repo-url as an unresolvable source; "
+        f"got: {result.stderr!r}"
+    )
+    assert "--workspace-mount" in stderr, (
+        f"Error output must name --workspace-mount as an unresolvable source; "
+        f"got: {result.stderr!r}"
+    )
+    assert "bc-manifest.yaml" in stderr, (
+        f"Error output must name the bc-manifest.yaml remote as an "
+        f"unresolvable source; got: {result.stderr!r}"
+    )
+    assert bc_name.lower() in stderr, (
+        f"Error output must name the BC {bc_name!r}; got: {result.stderr!r}"
+    )
+
+
+@then(parsers.parse(
+    'the launch does not silently succeed leaving an empty, non-git '
+    '"/workspace"'
+))
+def assert_no_silent_empty_workspace(ctx, fake_driver):
+    result = ctx["result"]
+    assert result.exit_code != 0, (
+        "A no-source launch must FAIL (non-zero), not silently succeed "
+        "(lead-uiwu FACET 1 negative)."
+    )
+    container_name = ctx.get("container_name")
+    if container_name is not None:
+        # No clone may have happened: /workspace must NOT be a (falsely)
+        # populated git repo, and the container must not have been left running
+        # with an empty non-git /workspace masquerading as success.
+        assert not fake_driver.workspace_is_git_repo(container_name), (
+            "A no-source launch must not leave /workspace as a git repo."
+        )
+
+
+# --- FACET 2 steps ---------------------------------------------------------
+
+@given(parsers.parse(
+    'bc-container launch is run with BC name "{bc_name}" with a valid repo URL'
+))
+def facet2_launch_with_repo_url(bc_name, ctx, fake_driver, controller, tmp_path):
+    """Launch ``bc_name`` with an explicit valid repo URL (FACET 2 setup)."""
+    repo_url = f"https://github.com/dstengle/{bc_name}.git"
+    manifest_path = tmp_path / "bc-manifest.yaml"
+    if not manifest_path.exists():
+        import yaml as _yaml
+        manifest_path.write_text(_yaml.dump({
+            "product": "shopsystem product",
+            "bcs": [{"name": bc_name, "remote": repo_url, "role": "bc"}],
+        }))
+    result = controller.launch(
+        bc_name=bc_name,
+        repo_url=repo_url,
+        manifest_path=manifest_path,
+        credential_home=ctx.get("credential_home"),
+    )
+    ctx["result"] = result
+    ctx["container_name"] = f"bc-{bc_name}"
+    ctx["bc_name"] = bc_name
+
+
+@when(parsers.parse(
+    'the ownership of the "/workspace" directory inside the running container '
+    'is inspected'
+))
+def inspect_workspace_ownership(ctx, fake_driver):
+    container_name = ctx["container_name"]
+    ctx["workspace_owner"] = fake_driver.workspace_owner(container_name)
+
+
+@then(parsers.parse(
+    '"/workspace" is owned by the agent user "{user}" (uid 1000), not by root'
+))
+def assert_workspace_owned_by_agent_user(user, ctx, fake_driver):
+    container_name = ctx["container_name"]
+    owner = fake_driver.workspace_owner(container_name)
+    assert owner == user, (
+        f"Expected /workspace in {container_name!r} owned by {user!r} "
+        f"(uid 1000), got {owner!r}.  A root-owned /workspace makes the "
+        f"non-root clone fail Permission denied (lead-uiwu FACET 2)."
+    )
+
+
+@then(parsers.parse(
+    'the clone performed into "/workspace" as the agent user completes without '
+    'a "/workspace/.git: Permission denied" error'
+))
+def assert_clone_no_permission_denied(ctx, fake_driver):
+    result = ctx["result"]
+    container_name = ctx["container_name"]
+    assert result.exit_code == 0, (
+        f"Expected the launch (incl. the as-vscode clone) to succeed, got "
+        f"exit {result.exit_code}; stderr: {result.stderr!r} (lead-uiwu "
+        f"FACET 2)."
+    )
+    assert "Permission denied" not in (result.stderr or ""), (
+        f"The clone must not hit '/workspace/.git: Permission denied'; "
+        f"stderr: {result.stderr!r} (lead-uiwu FACET 2)."
+    )
+    assert fake_driver.workspace_is_git_repo(container_name), (
+        "The clone into /workspace must have succeeded (lead-uiwu FACET 2)."
+    )
+
+
+# --- FACET 3 steps ---------------------------------------------------------
+
+@given(parsers.parse(
+    'the agent-vault broker root CA is delivered to the launched BC as inline '
+    'PEM content via "AGENT_VAULT_CA_PEM" per ADR-045'
+))
+def facet3_ca_pem_delivered(ctx):
+    ctx["av_ca_pem"] = _FAKE_BROKER_CA_PEM
+
+
+@given(parsers.parse(
+    'the launched BC routes outbound HTTPS through the agent-vault MITM proxy '
+    'via "HTTPS_PROXY"'
+))
+def facet3_routes_through_mitm_proxy(ctx):
+    """The operator supplies agent-vault credentials so the launcher derives
+    the :14322 MITM proxy and routes the clone's HTTPS_PROXY through it."""
+    ctx["av_addr"] = "https://agent-vault:14321"
+    ctx["av_token"] = "av_agt_uiwu"
+    ctx["av_vault"] = "shopsystem"
+
+
+@when(parsers.parse(
+    'bc-container launch is run with BC name "{bc_name}" and the in-container '
+    'clone of its remote is performed through "HTTPS_PROXY"'
+))
+def facet3_launch_through_proxy(bc_name, ctx, controller, fake_driver, tmp_path):
+    repo_url = f"https://github.com/dstengle/{bc_name}.git"
+    manifest_path = tmp_path / "bc-manifest.yaml"
+    if not manifest_path.exists():
+        import yaml as _yaml
+        manifest_path.write_text(_yaml.dump({
+            "product": "shopsystem product",
+            "bcs": [{"name": bc_name, "remote": repo_url, "role": "bc"}],
+        }))
+    import os as _os
+    env_overrides = {
+        "AGENT_VAULT_ADDR": ctx.get("av_addr"),
+        "AGENT_VAULT_TOKEN": ctx.get("av_token"),
+        "AGENT_VAULT_VAULT": ctx.get("av_vault"),
+        "AGENT_VAULT_CA_PEM": ctx.get("av_ca_pem"),
+    }
+    saved = {}
+    for k, v in env_overrides.items():
+        saved[k] = _os.environ.get(k)
+        if v is not None:
+            _os.environ[k] = v
+    try:
+        result = controller.launch(
+            bc_name=bc_name,
+            repo_url=repo_url,
+            manifest_path=manifest_path,
+            credential_home=ctx.get("credential_home"),
+            agent_vault_addr=ctx.get("av_addr"),
+            agent_vault_token=ctx.get("av_token"),
+            agent_vault_vault=ctx.get("av_vault"),
+        )
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                _os.environ.pop(k, None)
+            else:
+                _os.environ[k] = v
+    ctx["result"] = result
+    ctx["container_name"] = f"bc-{bc_name}"
+    ctx["bc_name"] = bc_name
+
+
+@then(parsers.parse(
+    'the running container has installed the agent-vault MITM root CA into its '
+    'git/system trust store before the clone is attempted'
+))
+def assert_ca_materialized_before_clone(ctx, fake_driver):
+    container_name = ctx["container_name"]
+    assert fake_driver.broker_ca_materialized(container_name), (
+        f"The broker MITM root CA must be materialized into the trust store "
+        f"of {container_name!r} (lead-uiwu FACET 3)."
+    )
+    assert fake_driver.ca_materialized_before_clone(container_name), (
+        f"The broker MITM root CA must be materialized BEFORE the clone is "
+        f"attempted in {container_name!r} — the CA-before-clone ordering "
+        f"(lead-uiwu FACET 3)."
+    )
+
+
+@then(parsers.parse(
+    'the clone routed through "HTTPS_PROXY" completes its TLS handshake '
+    'without an "SSL certificate problem: unable to get local issuer '
+    'certificate" error'
+))
+def assert_clone_tls_ok(ctx, fake_driver):
+    result = ctx["result"]
+    container_name = ctx["container_name"]
+    assert result.exit_code == 0, (
+        f"Expected the brokered clone to succeed, got exit "
+        f"{result.exit_code}; stderr: {result.stderr!r} (lead-uiwu FACET 3)."
+    )
+    assert "SSL certificate problem" not in (result.stderr or ""), (
+        f"The proxied clone must not fail TLS verification; "
+        f"stderr: {result.stderr!r} (lead-uiwu FACET 3)."
+    )
+    assert fake_driver.workspace_is_git_repo(container_name), (
+        "The brokered clone must have succeeded into /workspace "
+        "(lead-uiwu FACET 3)."
+    )

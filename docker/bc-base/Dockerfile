@@ -205,6 +205,18 @@ RUN chmod 0755 /usr/local/bin/bc-healthcheck.sh
 HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
     CMD ["/usr/local/bin/bc-healthcheck.sh"]
 
+# /workspace ownership (lead-uiwu FACET 2, scenario 4154b0ea63d0516b).
+#
+# REGRESSION FIX: a bare `WORKDIR /workspace` creates the directory root:root.
+# The agent — and the launch-time in-container clone — run as the unprivileged
+# vscode user (uid 1000), so a clone into a root-owned /workspace fails
+# "git clone failed: ... /workspace/.git: Permission denied".  The working
+# (5-day-old) messaging container has /workspace owned vscode:vscode.  Create
+# /workspace and hand it to vscode DURABLY here so the non-root clone succeeds
+# without a host-side `docker exec -u root chown vscode:vscode /workspace`.
+# This must come BEFORE the `USER vscode` switch below (chown requires root).
+RUN mkdir -p /workspace \
+    && chown vscode:vscode /workspace
 WORKDIR /workspace
 
 # Default to the vscode user so the running user's HOME is /home/vscode and the

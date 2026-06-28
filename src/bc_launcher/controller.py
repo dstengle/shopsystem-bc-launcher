@@ -809,6 +809,39 @@ class ManifestProductTypeError(Exception):
         )
 
 
+def _resolve_manifest_remote(manifest_path: Path, bc_name: str) -> str | None:
+    """Resolve the git remote URL registered for ``bc_name`` in bc-manifest.yaml.
+
+    lead-uiwu FACET 1.  bc-manifest.yaml registers each BC with its remote URL
+    and is "the declared source of remote URLs when launching BCs".  When a
+    ``bc-container launch`` carries NO ``--repo-url`` and NO
+    ``--workspace-mount``, the launcher resolves the BC's clone source from the
+    manifest's ``bcs[].remote`` entry for the named BC and clones it into
+    ``/workspace`` — rather than starting a container with a SILENT empty,
+    non-git ``/workspace``.
+
+    This is DISTINCT from ``_read_product_from_manifest`` (the manifest
+    ``product:`` field, used for network/system-slug derivation): this reads the
+    per-BC ``remote:`` field.  Returns the remote URL string for ``bc_name``, or
+    ``None`` when the manifest is absent / unparseable / carries no resolvable
+    remote for that BC, so the caller can apply the no-source loud-failure path
+    (FACET 1 negative, scenario 0b50d090c9cc3c45).
+    """
+    import yaml
+    from bc_launcher.manifest import load_manifest
+    if not manifest_path.exists():
+        return None
+    try:
+        manifest = load_manifest(manifest_path)
+    except (yaml.YAMLError, ValueError):
+        return None
+    for entry in manifest.entries:
+        if entry.name == bc_name:
+            remote = (entry.remote or "").strip()
+            return remote or None
+    return None
+
+
 def _read_product_from_manifest(manifest_path: Path) -> str | None:
     """Read the 'product' field from a bc-manifest.yaml file.
 
@@ -1040,6 +1073,47 @@ class BcContainerController:
         if auto_create_network and not self._driver.network_exists(resolved_network):
             self._driver.network_create(resolved_network)
 
+        # --- Repo-source resolution (lead-uiwu FACET 1) ---
+        # The clone source is resolved with this precedence:
+        #   1. an explicit ``--repo-url`` (``repo_url``) wins;
+        #   2. an explicit ``--workspace-mount`` bind-mounts a host tree and
+        #      SKIPS the clone entirely (handled in the mounts block below);
+        #   3. otherwise — NO repo flags — RESOLVE the BC's git remote from
+        #      bc-manifest.yaml (its per-BC ``remote:`` field; the manifest is
+        #      "the declared source of remote URLs when launching BCs") and
+        #      clone THAT into ``/workspace`` (scenario bdec2754d9135086).
+        #
+        # REGRESSION FIX: previously, a launch with neither ``--repo-url`` nor
+        # ``--workspace-mount`` fell straight through to agent-start with an
+        # EMPTY, non-git ``/workspace`` — no clone, no error (the silent empty
+        # launch).  Now, when NO source is resolvable (no ``--repo-url``, no
+        # ``--workspace-mount``, and no manifest remote for the BC), the launch
+        # FAILS LOUDLY with a non-zero exit naming all three unresolvable
+        # sources (scenario 0b50d090c9cc3c45) — it never silently succeeds with
+        # an empty ``/workspace``.
+        if repo_url is None and workspace_mount is None:
+            resolved_remote = _resolve_manifest_remote(effective_manifest, bc_name)
+            if resolved_remote:
+                repo_url = resolved_remote
+                out_lines_remote = (
+                    f"Resolved repo remote for {bc_name!r} from "
+                    f"{effective_manifest} (bc-manifest.yaml)\n"
+                )
+            else:
+                return CommandResult(
+                    exit_code=1,
+                    stdout="",
+                    stderr=(
+                        f"no repo source for {bc_name!r}: could not resolve a "
+                        f"clone source — neither --repo-url, --workspace-mount, "
+                        f"nor a bc-manifest.yaml remote for {bc_name!r} was "
+                        f"available; refusing to launch with an empty, non-git "
+                        f"/workspace\n"
+                    ),
+                )
+        else:
+            out_lines_remote = None
+
         # --- Agent-vault broker resolution (ADR-026) ---
         # No host credential path is resolved; the broker is the sole
         # credential path.  Resolve the broker's CONTROL-API address from the
@@ -1262,6 +1336,8 @@ class BcContainerController:
 
         out_lines: list[str] = [f"Started container {container}\n"]
         err_lines: list[str] = []
+        if out_lines_remote:
+            out_lines.append(out_lines_remote)
 
         # ADR-026: NO host gitconfig or .claude.json is copied into the
         # container.  GitHub and git identity flow through the agent-vault
@@ -1298,9 +1374,63 @@ class BcContainerController:
                 # lowercase https_proxy so the clone routes regardless.
                 clone_env["https_proxy"] = clone_proxy_url
             clone_env[GIT_SSL_CAINFO_ENV] = AGENT_VAULT_CONTAINER_CA_PATH
+
+            # --- FACET 3 (lead-uiwu, scenario 0d29c76818a323a1):
+            #     materialize / trust the broker MITM root CA BEFORE the clone.
+            # The clone routes through HTTPS_PROXY at the agent-vault MITM proxy
+            # (:14322), so container git must trust the broker's MITM root CA at
+            # CLONE time — not only at agent-run time.  The CA arrives as INLINE
+            # PEM content via AGENT_VAULT_CA_PEM (ADR-045 / lead-lu91); the
+            # bc-base entrypoint materializer (agent-vault-ca.sh) writes it to
+            # the fixed container CA path and exports the trust vars.  The clone
+            # runs in a non-login shell that does NOT source the entrypoint, so
+            # the launcher RUNS the materializer explicitly here — BEFORE the
+            # clone exec — so the CA file exists at AGENT_VAULT_CONTAINER_CA_PATH
+            # (which GIT_SSL_CAINFO above points at) when git verifies the
+            # proxy's MITM cert.  Without this, the clone fails "SSL certificate
+            # problem: unable to get local issuer certificate".  Run as root so
+            # the materializer can create the trust dir regardless of the prior
+            # ownership state; it is a no-op when AGENT_VAULT_CA_PEM is unset.
+            self._driver.exec_run(
+                container,
+                ["/usr/local/bin/agent-vault-ca.sh"],
+            )
+            out_lines.append(
+                "Materialized the agent-vault broker MITM root CA into the "
+                "container trust store before the clone (lead-uiwu FACET 3)\n"
+            )
+
+            # --- FACET 2 (lead-uiwu, scenario 4154b0ea63d0516b):
+            #     /workspace owned by the agent user BEFORE the clone.
+            # REGRESSION FIX: in the v0.3.33 image /workspace is created
+            # root:root (Dockerfile WORKDIR), while the agent + clone run as the
+            # unprivileged vscode user (uid 1000).  A clone performed as vscode
+            # into a root-owned /workspace fails "git clone failed: ...
+            # /workspace/.git: Permission denied".  The working messaging
+            # container has /workspace owned vscode:vscode.  So chown /workspace
+            # to vscode FIRST (as root), THEN perform the clone AS vscode so the
+            # non-root clone writes /workspace/.git without Permission denied.
+            # This makes the operator workaround (`docker exec -u root chown
+            # vscode:vscode /workspace` then clone as vscode) durable.
+            # Recursive (-R) to coexist with the lead-d64 invariant that EVERY
+            # /workspace chown is recursive; /workspace is empty at this
+            # pre-clone point, so -R is harmless here while still delivering the
+            # FACET 2 ownership precondition.
+            self._driver.exec_run(
+                container,
+                ["chown", "-R",
+                 f"{AGENT_CONTAINER_USER}:{AGENT_CONTAINER_USER}",
+                 CONTAINER_WORKSPACE],
+            )
+            out_lines.append(
+                f"Chowned {CONTAINER_WORKSPACE} to {AGENT_CONTAINER_USER} "
+                "before the clone (lead-uiwu FACET 2)\n"
+            )
+
             clone_result = self._driver.exec_run(
                 container,
                 ["git", "clone", repo_url, CONTAINER_WORKSPACE],
+                user=AGENT_CONTAINER_USER,
                 env=clone_env,
             )
             if clone_result.returncode != 0:

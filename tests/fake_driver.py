@@ -466,6 +466,29 @@ class FakeDockerDriver:
         # agent session is started.
         self._workspace_path_owner_at_agent_start: dict[str, dict[str, str]] = {}
 
+        # --- lead-uiwu clone-path regression model -------------------------
+        # FACET 1 (scn bdec2754d9135086 / 0b50d090c9cc3c45): the git-repo state
+        # of /workspace and the remote it was cloned from.  A container is NOT a
+        # git repo at /workspace until a `git clone <remote> /workspace` exec
+        # succeeds; the remote it cloned from is recorded so the positive
+        # scenario can assert /workspace was cloned from the manifest remote.
+        self._workspace_cloned_from: dict[str, str] = {}
+        # FACET 3 (scn 0d29c76818a323a1): whether the broker MITM root CA has
+        # been materialized into the container trust store.  The agent-vault-ca
+        # materializer (entrypoint script) sets this; a clone routed through the
+        # MITM proxy (clone_env carries an HTTPS_PROXY) FAILS TLS verification
+        # ("unable to get local issuer certificate") UNLESS the CA was
+        # materialized BEFORE the clone exec ran.
+        self._broker_ca_materialized: set[str] = set()
+        # Whether the CA was materialized BEFORE the (first) clone exec, so the
+        # ordering teeth (CA-before-clone) are observable independently of the
+        # clone's own pass/fail.
+        self._ca_materialized_before_clone: dict[str, bool] = {}
+        # Whether the AGENT_VAULT_CA_PEM env carries an inline PEM the
+        # materializer can use (set from docker run -e).  The materializer is a
+        # no-op when it is absent, modelling the real entrypoint guard.
+        self._has_ca_pem: set[str] = set()
+
         # Explicit health-status overrides per container (when a test wants
         # to assert a docker-inspect status directly rather than derive it).
         self._health_override: dict[str, str] = {}
@@ -1138,6 +1161,39 @@ class FakeDockerDriver:
         """
         return self._beads_owner.get(container_name, "root")
 
+    # --- lead-uiwu: clone-path regression accessors ------------------------
+
+    def workspace_is_git_repo(self, container_name: str) -> bool:
+        """Whether /workspace is a git repository (a clone succeeded into it).
+
+        lead-uiwu FACET 1.  False after a SILENT empty launch (no clone) and
+        after a clone that failed; True only once a `git clone <remote>
+        /workspace` exec succeeded.
+        """
+        return container_name in self._workspace_cloned_from
+
+    def workspace_cloned_from(self, container_name: str) -> str | None:
+        """The remote URL /workspace was cloned from, or None (lead-uiwu)."""
+        return self._workspace_cloned_from.get(container_name)
+
+    def workspace_owner(self, container_name: str) -> str:
+        """Owner of the /workspace directory (lead-uiwu FACET 2).
+
+        Defaults to "root" (the image WORKDIR default); becomes "vscode" once a
+        chown to the agent user covers /workspace.
+        """
+        return self._workspace_path_owner.get(container_name, {}).get(
+            CONTAINER_WORKSPACE, "root"
+        )
+
+    def broker_ca_materialized(self, container_name: str) -> bool:
+        """Whether the broker MITM root CA is in the trust store (FACET 3)."""
+        return container_name in self._broker_ca_materialized
+
+    def ca_materialized_before_clone(self, container_name: str) -> bool:
+        """Whether the broker CA was materialized BEFORE the clone (FACET 3)."""
+        return self._ca_materialized_before_clone.get(container_name, False)
+
     # --- lead-mf15: durable per-path ownership model -----------------------
 
     # The agent-touched workspace paths whose ownership the durable invariant
@@ -1313,6 +1369,12 @@ class FakeDockerDriver:
             if key == "HTTPS_PROXY":
                 self._container_proxy_env[container_name] = val
                 self._container_broker[container_name] = val
+            # lead-uiwu FACET 3: the broker CA arrives as inline PEM via
+            # AGENT_VAULT_CA_PEM (ADR-045).  Record its presence so the
+            # CA-materializer exec can model materializing from it (and so a
+            # missing PEM leaves the clone untrusted).
+            if key == "AGENT_VAULT_CA_PEM" and val:
+                self._has_ca_pem.add(container_name)
         for gid in group_add or []:
             cmd += ["--group-add", str(gid)]
         for mount_type, source, dest, readonly in mounts:
@@ -1690,6 +1752,15 @@ class FakeDockerDriver:
             prefix += ["-u", user]
         self._last_command = prefix + [container_name] + command
 
+        # lead-uiwu FACET 2 — capture the /workspace owner as it stood BEFORE
+        # this exec's own write re-owns it, so the clone simulation can decide
+        # Permission-denied against the ownership the clone actually encountered
+        # (set by a prior pre-clone chown), not the ownership the clone's own
+        # write leaves behind.
+        _ws_owner_before = self._workspace_path_owner.get(
+            container_name, {}
+        ).get(CONTAINER_WORKSPACE, "root")
+
         # lead-mf15 — update the durable per-path ownership model for every
         # exec.  This runs BEFORE the command-specific simulations below so the
         # tmux new-session snapshot reflects the writes this same launch
@@ -1842,8 +1913,61 @@ class FakeDockerDriver:
                     state["buffer"] = text
             return subprocess.CompletedProcess(command, 0, "", "")
 
-        # Simulate git clone
+        # Simulate the agent-vault broker CA materializer (lead-uiwu FACET 3 /
+        # bclaunch-9rr entrypoint script).  Running it materializes the broker
+        # MITM root CA into the container trust store — but ONLY when the inline
+        # AGENT_VAULT_CA_PEM env was supplied (modelling the real entrypoint
+        # guard `if [ -n "$AGENT_VAULT_CA_PEM" ]`).  The launcher runs this
+        # BEFORE the clone so the proxied clone trusts the broker CA.
+        if command[:1] == ["/usr/local/bin/agent-vault-ca.sh"] or (
+            command and command[0].endswith("agent-vault-ca.sh")
+        ):
+            if container_name in self._has_ca_pem:
+                self._broker_ca_materialized.add(container_name)
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+        # Simulate git clone (lead-uiwu FACETs 2 + 3).
         if command[0] == "git" and command[1] == "clone":
+            # FACET 3 ordering teeth: record whether the broker CA was
+            # materialized BEFORE this (first) clone attempt, independent of the
+            # clone's own outcome.
+            self._ca_materialized_before_clone.setdefault(
+                container_name,
+                container_name in self._broker_ca_materialized,
+            )
+
+            # FACET 2 (scn 4154b0ea63d0516b): a clone performed AS the agent
+            # user (vscode) into a ROOT-owned /workspace fails
+            # "/workspace/.git: Permission denied".  The clone succeeds only
+            # when /workspace is vscode-owned (the launcher chowns it before the
+            # clone), OR when the clone runs as root (the legacy path).
+            ws_owner = _ws_owner_before
+            if user == AGENT_CONTAINER_USER and ws_owner != AGENT_CONTAINER_USER:
+                return subprocess.CompletedProcess(
+                    command, 1, "",
+                    f"fatal: could not create work tree dir "
+                    f"'{CONTAINER_WORKSPACE}': could not create leading "
+                    f"directories of '{CONTAINER_WORKSPACE}/.git': "
+                    f"{CONTAINER_WORKSPACE}/.git: Permission denied\n",
+                )
+
+            # FACET 3 (scn 0d29c76818a323a1): a clone routed through the
+            # agent-vault MITM proxy (clone exec carries an HTTPS_PROXY) FAILS
+            # TLS verification UNLESS the broker CA was materialized into the
+            # trust store BEFORE this clone.  An unproxied clone (no HTTPS_PROXY
+            # on the exec env) is unaffected.
+            clone_proxied = bool(env and (env.get("HTTPS_PROXY") or env.get("https_proxy")))
+            if clone_proxied and container_name not in self._broker_ca_materialized:
+                return subprocess.CompletedProcess(
+                    command, 1, "",
+                    "fatal: unable to access '...': SSL certificate problem: "
+                    "unable to get local issuer certificate\n",
+                )
+
+            # Clone succeeds: /workspace is now a git repo cloned from the
+            # remote (command[2] is the remote URL, command[3] the dest).
+            if len(command) >= 3:
+                self._workspace_cloned_from[container_name] = command[2]
             return subprocess.CompletedProcess(command, 0, "", "")
 
         # Simulate `git -C <ws> show HEAD:.beads/issues.jsonl` (lead-rply →
