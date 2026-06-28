@@ -540,6 +540,7 @@ def run_launch(bc_name, ctx, fake_driver, controller, tmp_path):
     credential_home = ctx.get("credential_home")
     result = controller.launch(bc_name=bc_name, repo_url=repo_url,
                                manifest_path=manifest_path,
+                               shop_network=ctx.get("shop_network"),
                                credential_home=credential_home)
     ctx["result"] = result
     ctx.setdefault("all_results", []).append(result)
@@ -2527,6 +2528,48 @@ def no_explicit_network_flag(ctx):
     ctx["explicit_network"] = None
 
 
+# ---------------------------------------------------------------------------
+# On-disk shop network resolution (lead-ngzl, scenario 63)
+# ---------------------------------------------------------------------------
+
+@given(parsers.parse(
+    'the shop\'s on-disk configuration declares the shop docker network name '
+    '"{network_name}" as the single derived network coordinate (the ADR-043 D2 '
+    'ops-coordinates derivation root; in the interim the compose.yaml network '
+    '"{compose_network}" and the product slug)'
+))
+def shop_on_disk_network_declared(network_name, compose_network, ctx):
+    """Model the shop network resolved from the shop's on-disk configuration.
+
+    The interim resolution (_resolve_shop_network) reads the compose.yaml
+    network / product slug on the real shop; in the test harness we inject the
+    RESOLVED value the way the CLI would pass it into controller.launch(),
+    pinning the BEHAVIOR + resolved VALUE without hard-pinning the source
+    artifact shape (ADR-043 D2 ops-coordinates not yet finalized; lead-7wta)."""
+    ctx["shop_network"] = network_name
+
+
+@given(parsers.parse(
+    'the bc-manifest.yaml registers the BC "{bc_name}" but carries no '
+    'shop-level network or product launch field'
+))
+def manifest_registers_bc_no_product(bc_name, ctx, tmp_path):
+    """Create a bc-manifest.yaml that registers the BC but has NO top-level
+    product/network field — exactly the case the product authority hit, where
+    the old code hard-errored and the fix must instead resolve the shop network
+    from on-disk config."""
+    import yaml as _yaml
+    manifest_path = tmp_path / "bc-manifest.yaml"
+    manifest_path.write_text(_yaml.dump({
+        "bcs": [{
+            "name": bc_name,
+            "remote": f"https://github.com/dstengle/{bc_name}.git",
+            "role": "bc",
+        }],
+    }))
+    ctx["launch_manifest_path"] = manifest_path
+
+
 @given(parsers.parse('no Docker network named "{network_name}" exists'))
 def no_docker_network(network_name, ctx, fake_driver):
     """Ensure the named network does not exist in the fake driver."""
@@ -2572,6 +2615,19 @@ def assert_stderr_includes_text(text, ctx):
     stderr = result.stderr if hasattr(result, "stderr") else ""
     assert text in stderr, (
         f"Expected {text!r} in stderr, got: {stderr!r}"
+    )
+
+
+@then(parsers.parse('the command does not emit the error "{text}"'))
+def assert_command_does_not_emit_error(text, ctx):
+    """Assert the narrowed (lead-ngzl) "no network" error did NOT fire — the
+    on-disk shop network was resolvable, so launch must not hard-error."""
+    result = ctx.get("result")
+    assert result is not None, "No result in ctx"
+    stderr = result.stderr if hasattr(result, "stderr") else ""
+    assert text not in stderr, (
+        f"Expected {text!r} NOT in stderr, but it was present.\n"
+        f"stderr: {stderr!r}"
     )
 
 

@@ -502,6 +502,66 @@ def _slugify(text: str) -> str:
     return re.sub(r"\s+", "-", text.strip().lower())
 
 
+def _resolve_shop_network(start_dir: Path | None = None) -> str | None:
+    """Resolve the shop's docker network name from on-disk shop configuration.
+
+    This is the fallback network source (lead-ngzl): when no explicit
+    ``--network`` is given AND bc-manifest.yaml carries no shop-level
+    network/product field, the network is resolved from the shop's known
+    on-disk configuration rather than hard-erroring.  Per ADR-038 D3 the
+    precedence is: explicit override > manifest product > on-disk shop
+    network / hard default ``"shopsystem"``.
+
+    SEQUENCING (lead-ngzl / ADR-043 D2): the canonical single-source
+    ops-coordinates artifact (``bin/ops-coordinates``) does not exist yet
+    (lead-7wta).  In the interim this resolves the network name from, in
+    order:
+
+      1. ``compose.yaml`` ``networks:`` — the first network entry that
+         declares an explicit ``name:`` (the live shop wiring:
+         ``networks: shopsystem: {name: shopsystem}``);
+      2. the product slug from ``.claude/shop/name.md`` with a trailing
+         ``-product`` suffix stripped (``"shopsystem-product"`` ->
+         ``"shopsystem"``).
+
+    Returns the resolved network name, or ``None`` when no on-disk shop
+    network configuration is discoverable (the error path is then the
+    caller's responsibility when ``--network`` is also absent).
+    """
+    import yaml
+
+    base = start_dir or Path.cwd()
+
+    # (1) compose.yaml networks: <key>: {name: <network>}
+    compose_path = base / "compose.yaml"
+    if compose_path.exists():
+        try:
+            data = yaml.safe_load(compose_path.read_text())
+        except yaml.YAMLError:
+            data = None
+        if isinstance(data, dict):
+            networks = data.get("networks")
+            if isinstance(networks, dict):
+                for spec in networks.values():
+                    if isinstance(spec, dict):
+                        name = spec.get("name")
+                        if isinstance(name, str) and name.strip():
+                            return name.strip()
+
+    # (2) product slug from .claude/shop/name.md minus a "-product" suffix
+    name_md = base / ".claude" / "shop" / "name.md"
+    if name_md.exists():
+        raw = name_md.read_text().strip()
+        if raw:
+            token = raw.splitlines()[0].strip()
+            if token.endswith("-product"):
+                token = token[: -len("-product")]
+            if token:
+                return _slugify(token)
+
+    return None
+
+
 def _mitm_proxy_host(agent_vault_addr: str) -> str | None:
     """Derive the broker's MITM-proxy host:port from AGENT_VAULT_ADDR.
 
@@ -838,6 +898,7 @@ class BcContainerController:
         image: str | None = None,
         startup_prompt: str | None = None,
         network: str | None = None,
+        shop_network: str | None = None,
         manifest_path: Path | None = None,
         credential_home: Path | None = None,
         agent_vault_broker: str | None = None,
@@ -853,12 +914,24 @@ class BcContainerController:
 
         Idempotent: if the container is already running, report and exit 0.
 
-        Network resolution (in priority order):
+        Network resolution (in priority order — ADR-038 D3):
         1. If ``network`` is provided explicitly, use it as-is (no auto-create).
         2. Otherwise, read ``product:`` from bc-manifest.yaml (at ``manifest_path``
            or ``Path("bc-manifest.yaml")`` in CWD), slugify it, and use that as the
            network name.  If the network does not yet exist, create it first.
-        3. If neither source is available, return a non-zero error.
+        3. Otherwise, fall back to ``shop_network`` — the shop's docker network
+           name resolved from on-disk shop configuration (lead-ngzl).  When the
+           manifest carries no shop-level network/product field, launch resolves
+           the network from the shop's known on-disk config (the canonical
+           network is ``shopsystem``, derived in the interim from the
+           ``compose.yaml`` network / product slug — see
+           ``_resolve_shop_network``) instead of hard-erroring.  If this network
+           does not yet exist, create it first.
+        4. Only when NEITHER an explicit ``network``, NOR a manifest product,
+           NOR an on-disk ``shop_network`` is resolvable does launch return a
+           non-zero "no network" error.  The error path is NARROWED (lead-ngzl):
+           a manifest that merely lacks a product field no longer hard-errors so
+           long as the shop network is resolvable on disk.
 
         Credential model (ADR-026 — agent-vault broker, the SOLE path; CA via
         env var per the operator no-bind-mount directive):
@@ -945,7 +1018,18 @@ class BcContainerController:
             if manifest_product:
                 resolved_network = _slugify(manifest_product)
                 auto_create_network = True
+            elif shop_network:
+                # On-disk shop network fallback (lead-ngzl, ADR-038 D3): when
+                # the manifest carries no shop-level network/product field,
+                # resolve the network from the shop's known on-disk config
+                # rather than hard-erroring.  Same auto-create semantics as a
+                # manifest-derived network.
+                resolved_network = shop_network
+                auto_create_network = True
             else:
+                # NARROWED error path (lead-ngzl): fire ONLY when NEITHER an
+                # on-disk shop network NOR --network is resolvable — NOT merely
+                # because the manifest lacks a product field.
                 return CommandResult(
                     exit_code=1,
                     stdout="",

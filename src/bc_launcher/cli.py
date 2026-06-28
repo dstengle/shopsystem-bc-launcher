@@ -10,7 +10,7 @@ import os
 import sys
 from pathlib import Path
 
-from bc_launcher.controller import BcContainerController
+from bc_launcher.controller import BcContainerController, _resolve_shop_network
 from bc_launcher.driver import RealDockerDriver
 from bc_launcher.manifest import ManifestController, RealGitDriver, RealGitHubDriver
 
@@ -404,6 +404,11 @@ def main(argv: list[str] | None = None) -> int:
             image=getattr(args, "image", None),
             startup_prompt=startup_prompt,
             network=getattr(args, "network", None),
+            # On-disk shop network fallback (lead-ngzl): resolved from the
+            # shop's known on-disk configuration so a manifest lacking a
+            # shop-level network/product field does not hard-error.  Only used
+            # when no explicit --network and no manifest product is present.
+            shop_network=_resolve_shop_network(),
             agent_vault_broker=getattr(args, "agent_vault_broker", None),
             agent_vault_addr=env_vals.get("AGENT_VAULT_ADDR"),
             agent_vault_token=env_vals.get("AGENT_VAULT_TOKEN"),

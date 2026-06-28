@@ -89,3 +89,15 @@ Feature: bc-container product-scoped Docker network naming
     When I run bc-container launch with BC name "shopsystem-messaging"
     And I run bc-container launch with BC name "shopsystem-scenarios"
     Then the FakeDockerDriver records that "docker network create shopsystem-product" was called exactly once across both launches
+
+  @scenario_hash:5a1fc25a7823b268 @bc:shopsystem-bc-launcher
+  Scenario: bc-container launch resolves the shop docker network from the shop's known on-disk configuration without a per-launch --network flag when bc-manifest.yaml carries no shop-level network field
+    Given the shopsystem-bc-launcher BC is installed
+    And the shop's on-disk configuration declares the shop docker network name "shopsystem" as the single derived network coordinate (the ADR-043 D2 ops-coordinates derivation root; in the interim the compose.yaml network "shopsystem" and the product slug)
+    And the bc-manifest.yaml registers the BC "shopsystem-templates" but carries no shop-level network or product launch field
+    And no explicit "--network" flag is provided
+    And no Docker container named "bc-shopsystem-templates" is running
+    When I run bc-container launch with BC name "shopsystem-templates"
+    Then the command exits zero
+    And the FakeDockerDriver records that the docker run command for "bc-shopsystem-templates" includes the flag "--network shopsystem"
+    And the command does not emit the error "no network: bc-manifest.yaml not found and --network not provided"
