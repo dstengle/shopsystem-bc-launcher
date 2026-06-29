@@ -36,6 +36,31 @@ USER root
 # --build-arg from a dispatch client_payload.)
 ARG SHOP_TEMPLATES_VERSION=v0.47.0
 
+# The bc-launcher RELEASE version (the pushed v* tag) is threaded in as a build
+# ARG by the publish workflow (build-args: SHOPSYSTEM_BC_LAUNCHER_VERSION=
+# ${{ github.ref_name }}). The default below records a known-good value for a
+# plain (non-CI) build; the workflow overrides it with the pushed tag. Promoted
+# to a persisted ENV below so it surfaces in `docker inspect` (lead-5xnd).
+ARG SHOPSYSTEM_BC_LAUNCHER_VERSION=v0.3.38
+
+# Promote both version ARGs to PERSISTED ENV so the published image (and any
+# container started from it) surfaces the baked bc-launcher release version and
+# baked shop-templates version via `docker image inspect` / `docker container
+# inspect` Config.Env — independent of the run-tag the image is addressed by
+# (lead-5xnd, scenarios 7c0c949fccdf9df2 / 26d1817c9d115f0d). bc-lead is
+# FROM bc-base so it INHERITS these ENV unchanged. A Dockerfile ENV/LABEL is
+# inherited via FROM and overrides the misleading upstream devcontainer-base
+# org.opencontainers.image.version label value "3.1.2"; the per-build OCI
+# version/revision labels are set authoritatively by the workflow `labels:`
+# input (build-set labels override inherited base-image labels).
+ENV SHOP_TEMPLATES_VERSION=${SHOP_TEMPLATES_VERSION}
+ENV SHOPSYSTEM_BC_LAUNCHER_VERSION=${SHOPSYSTEM_BC_LAUNCHER_VERSION}
+
+# Belt-and-suspenders LABEL for the baked shop-templates version: a Dockerfile
+# LABEL is inherited via FROM (so bc-lead carries it too) and overrides the
+# upstream value. The per-build version/revision labels remain workflow-set.
+LABEL shopsystem.shop-templates.version=${SHOP_TEMPLATES_VERSION}
+
 # Framework utility CLIs, version-pinned in the
 # "<pkg> @ git+https://github.com/<owner>/<repo>.git@vMAJOR.MINOR.PATCH"
 # VCS-pin shape. The owner is dstengle for these four shopsystem packages.

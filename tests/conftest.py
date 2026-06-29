@@ -11484,3 +11484,445 @@ def s70_assert_clone_refused(ctx):
     assert not ctx["s70_clone_runs"], (
         "the proxied clone must NOT run after a failed CA validation."
     )
+
+
+# ===========================================================================
+# lead-5xnd — published bc-base / bc-lead images surface the bc-launcher
+# release version + baked shop-templates version via OCI labels and ENV,
+# OVERRIDING the misleading upstream devcontainer-base
+# org.opencontainers.image.version label value "3.1.2".
+#
+# Scenarios 7c0c949fccdf9df2 (Outline over bc-base + bc-lead) and
+# 26d1817c9d115f0d (container inspect of bc-base:latest).
+#
+# docker is NOT available in this environment; per the scenario-40
+# declarative-artifact precedent these scenarios are pinned at the honest
+# fidelity for DECLARATIVE labels/ENV: parse the committed publish-bc-base.yml
+# `labels:` inputs (build-set labels OVERRIDE inherited base-image labels, which
+# is how the inherited "3.1.2" is defeated) and the committed Dockerfile ENV
+# instructions. The live `docker image/container inspect` of the published
+# image is the lead's post-release pull verification, out of band of this suite.
+# ===========================================================================
+
+# The upstream devcontainer-base label value we are overriding.
+_UPSTREAM_BASE_VERSION_LABEL = "3.1.2"
+
+
+def _parse_kv_block(value) -> dict:
+    """Parse a GHA action `with:` multiline "key=value" block (labels /
+    build-args) into a dict. Accepts the YAML-parsed string (newline-joined)
+    or a list of "key=value" strings."""
+    out: dict[str, str] = {}
+    if value is None:
+        return out
+    if isinstance(value, str):
+        lines = value.splitlines()
+    elif isinstance(value, (list, tuple)):
+        lines = list(value)
+    else:
+        return out
+    for line in lines:
+        line = line.strip()
+        if not line or "=" not in line:
+            continue
+        k, _, v = line.partition("=")
+        out[k.strip()] = v.strip()
+    return out
+
+
+def _publish_workflow_doc(ctx):
+    """Locate the committed publish workflow triggered on a "v*" tag push."""
+    workflows = _load_workflows()
+    for path, doc in workflows.items():
+        if not isinstance(doc, dict):
+            continue
+        on = doc.get("on", doc.get(True))
+        if not isinstance(on, dict):
+            continue
+        push = on.get("push")
+        if isinstance(push, dict):
+            tags = push.get("tags") or []
+            if any(str(t).startswith("v") for t in tags):
+                return path, doc
+    return None
+
+
+def _build_step_for_image(doc, image_base):
+    """Return the docker/build-push-action step in the workflow whose `tags`
+    input references the given image_base (e.g.
+    "ghcr.io/dstengle/shopsystem-bc-base"), or None."""
+    jobs = doc.get("jobs", {})
+    for job in jobs.values():
+        for step in job.get("steps", []) or []:
+            uses = str(step.get("uses", ""))
+            if "build-push-action" not in uses:
+                continue
+            with_ = step.get("with", {}) or {}
+            tags = with_.get("tags", "")
+            tags_text = tags if isinstance(tags, str) else "\n".join(
+                str(t) for t in (tags or [])
+            )
+            if image_base in tags_text:
+                return step
+    return None
+
+
+def _baked_shop_templates_version() -> str | None:
+    """Resolve the baked shop-templates version: the
+    ARG SHOP_TEMPLATES_VERSION=vX.Y.Z default in the bc-base Dockerfile."""
+    dockerfile = _find_bc_base_dockerfile()
+    if dockerfile is None:
+        return None
+    m = re.search(
+        r"ARG\s+SHOP_TEMPLATES_VERSION=(v\d+\.\d+\.\d+)", dockerfile.read_text()
+    )
+    return m.group(1) if m else None
+
+
+def _bc_base_dockerfile_text() -> str:
+    df = _find_bc_base_dockerfile()
+    return df.read_text() if df is not None else ""
+
+
+def _dockerfile_env_value(text: str, name: str) -> str | None:
+    """Return the value an `ENV <name>=<value>` instruction sets, or None.
+
+    Matches `ENV NAME=value` (the only form used here). The value may be a
+    ${VAR} expansion of a same-named ARG, which is the promote-ARG-to-ENV
+    idiom — that still surfaces in `docker inspect`."""
+    m = re.search(
+        rf"(?im)^\s*ENV\s+{re.escape(name)}=(\S+)", text
+    )
+    return m.group(1) if m else None
+
+
+def _dockerfile_arg_declared(text: str, name: str) -> bool:
+    return bool(re.search(rf"(?im)^\s*ARG\s+{re.escape(name)}\b", text))
+
+
+# --- Scenario 7c0c949fccdf9df2: Outline over bc-base + bc-lead --------------
+
+@given(parsers.parse(
+    'the bc-launcher publish workflow built and published the "{image}" image '
+    'at bc-launcher release version "{rel_ver}" baking shop-templates version '
+    '"{tpl_ver}"'
+))
+def given_publish_built_image(image, rel_ver, tpl_ver, ctx):
+    wf = _publish_workflow_doc(ctx)
+    assert wf is not None, (
+        'No committed publish workflow triggered on a "v*" tag push was found '
+        "under .github/workflows."
+    )
+    ctx["v5xnd_workflow"] = wf
+    ctx["v5xnd_image"] = image
+    ctx["v5xnd_rel_ver"] = rel_ver
+    ctx["v5xnd_tpl_ver"] = tpl_ver
+    step = _build_step_for_image(wf[1], image)
+    assert step is not None, (
+        f"The publish workflow has no docker/build-push-action build step "
+        f"publishing {image!r}."
+    )
+    ctx["v5xnd_build_step"] = step
+    with_ = step.get("with", {}) or {}
+    ctx["v5xnd_labels"] = _parse_kv_block(with_.get("labels"))
+    ctx["v5xnd_build_args"] = _parse_kv_block(with_.get("build-args"))
+
+
+@when(parsers.parse(
+    'the published "{image}:latest" image is examined with "docker image '
+    'inspect"'
+))
+def when_image_inspect(image, ctx):
+    # docker is OUT-OF-BAND; the in-suite proxy is the committed workflow
+    # `labels:` input and the bc-base Dockerfile ENV (the build-set labels
+    # override the inherited base-image labels). Already loaded in the Given.
+    ctx["v5xnd_dockerfile_text"] = _bc_base_dockerfile_text()
+
+
+@then(parsers.parse(
+    'the image\'s "org.opencontainers.image.version" OCI label equals the '
+    'bc-launcher release version "{rel_ver}"'
+))
+def then_image_version_label(rel_ver, ctx):
+    labels = ctx["v5xnd_labels"]
+    val = labels.get("org.opencontainers.image.version")
+    assert val is not None, (
+        f"The build step for {ctx['v5xnd_image']!r} does not SET the "
+        "org.opencontainers.image.version OCI label via the build-push-action "
+        "labels: input, so the inherited upstream value "
+        f"{_UPSTREAM_BASE_VERSION_LABEL!r} would survive."
+    )
+    # The release version is the pushed v* tag (github.ref_name). The label is
+    # set to that expression so the published label equals the release version.
+    assert "ref_name" in val or val == rel_ver, (
+        "The org.opencontainers.image.version label is not set to the "
+        f"bc-launcher release tag (github.ref_name / {rel_ver!r}); got {val!r}."
+    )
+    assert val != _UPSTREAM_BASE_VERSION_LABEL, (
+        "The version label is the inherited upstream "
+        f"{_UPSTREAM_BASE_VERSION_LABEL!r} value, not the release version."
+    )
+
+
+@then(parsers.parse(
+    'the image\'s "org.opencontainers.image.revision" OCI label is a non-empty '
+    'git commit sha identifying the source revision the image was built from'
+))
+def then_image_revision_label(ctx):
+    labels = ctx["v5xnd_labels"]
+    val = labels.get("org.opencontainers.image.revision")
+    assert val is not None and val != "", (
+        f"The build step for {ctx['v5xnd_image']!r} does not SET a non-empty "
+        "org.opencontainers.image.revision OCI label."
+    )
+    # The revision is the source commit sha (github.sha) — non-empty per build.
+    assert "github.sha" in val or "sha" in val or re.fullmatch(
+        r"[0-9a-f]{7,40}", val
+    ), (
+        "The org.opencontainers.image.revision label is not the source commit "
+        f"sha (github.sha); got {val!r}."
+    )
+
+
+@then(parsers.parse(
+    'the image\'s "shopsystem.shop-templates.version" OCI label equals the '
+    'baked shop-templates version "{tpl_ver}"'
+))
+def then_image_shop_templates_label(tpl_ver, ctx):
+    labels = ctx["v5xnd_labels"]
+    val = labels.get("shopsystem.shop-templates.version")
+    assert val is not None, (
+        f"The build step for {ctx['v5xnd_image']!r} does not SET the "
+        "shopsystem.shop-templates.version OCI label."
+    )
+    baked = _baked_shop_templates_version()
+    assert baked is not None, (
+        "Could not resolve the baked shop-templates version "
+        "(ARG SHOP_TEMPLATES_VERSION=vX.Y.Z) from the bc-base Dockerfile."
+    )
+    # The label must equal the baked version. It may be the literal baked value,
+    # a build-arg expression, or a workflow step-output expression that resolves
+    # the baked SHOP_TEMPLATES_VERSION from the Dockerfile ARG default.
+    assert (
+        val == baked
+        or val == tpl_ver
+        or "SHOP_TEMPLATES_VERSION" in val
+        or "shop_templates_version" in val
+    ), (
+        "The shopsystem.shop-templates.version label is not the baked "
+        f"shop-templates version ({baked!r} / {tpl_ver!r}); got {val!r}."
+    )
+    assert baked == tpl_ver, (
+        f"The baked shop-templates version {baked!r} does not match the "
+        f"scenario's expected {tpl_ver!r}."
+    )
+
+
+@then(parsers.parse(
+    'the image\'s configured environment includes "SHOPSYSTEM_BC_LAUNCHER_'
+    'VERSION" equal to the bc-launcher release version "{rel_ver}"'
+))
+def then_image_env_launcher_version(rel_ver, ctx):
+    text = ctx["v5xnd_dockerfile_text"]
+    val = _dockerfile_env_value(text, "SHOPSYSTEM_BC_LAUNCHER_VERSION")
+    assert val is not None, (
+        "The bc-base Dockerfile does not declare ENV "
+        "SHOPSYSTEM_BC_LAUNCHER_VERSION, so it would not surface in "
+        "docker inspect (bc-lead inherits it FROM bc-base)."
+    )
+    # The ENV is promoted from a same-named build ARG threaded with the release
+    # tag (github.ref_name) by the workflow build-args.
+    assert _dockerfile_arg_declared(text, "SHOPSYSTEM_BC_LAUNCHER_VERSION"), (
+        "ENV SHOPSYSTEM_BC_LAUNCHER_VERSION is set but the matching ARG is not "
+        "declared, so the workflow cannot thread the release version in."
+    )
+    build_args = ctx.get("v5xnd_build_args", {})
+    bav = build_args.get("SHOPSYSTEM_BC_LAUNCHER_VERSION")
+    assert bav is not None and ("ref_name" in bav or bav == rel_ver), (
+        "The build step does not pass SHOPSYSTEM_BC_LAUNCHER_VERSION="
+        "github.ref_name as a build-arg, so the ENV would not equal the "
+        f"release version {rel_ver!r}; got {bav!r}."
+    )
+
+
+@then(parsers.parse(
+    'the image\'s configured environment includes "SHOP_TEMPLATES_VERSION" '
+    'equal to the baked shop-templates version "{tpl_ver}"'
+))
+def then_image_env_shop_templates_version(tpl_ver, ctx):
+    text = ctx["v5xnd_dockerfile_text"]
+    val = _dockerfile_env_value(text, "SHOP_TEMPLATES_VERSION")
+    assert val is not None, (
+        "The bc-base Dockerfile does not declare ENV SHOP_TEMPLATES_VERSION "
+        "(promote the existing ARG to a persisted ENV), so the baked "
+        "shop-templates version would not surface in docker inspect."
+    )
+    baked = _baked_shop_templates_version()
+    assert baked == tpl_ver, (
+        f"The baked shop-templates version {baked!r} does not match the "
+        f"scenario's expected {tpl_ver!r}."
+    )
+
+
+@then(parsers.parse(
+    'the bc-launcher version surfaced by inspect is "{rel_ver}" rather than '
+    'the upstream devcontainer base label value "{base_ver}"'
+))
+def then_version_overrides_upstream(rel_ver, base_ver, ctx):
+    labels = ctx["v5xnd_labels"]
+    val = labels.get("org.opencontainers.image.version")
+    assert val is not None, (
+        f"The build step for {ctx['v5xnd_image']!r} leaves "
+        "org.opencontainers.image.version INHERITED, so the published label "
+        f"is the upstream {base_ver!r}, not the release version {rel_ver!r}."
+    )
+    assert val != base_ver, (
+        f"The version label is the upstream {base_ver!r}, not overridden to "
+        f"the release version {rel_ver!r}."
+    )
+    assert "ref_name" in val or val == rel_ver, (
+        "The version label override does not resolve to the bc-launcher "
+        f"release version {rel_ver!r}; got {val!r}."
+    )
+
+
+# --- Scenario 26d1817c9d115f0d: container inspect of bc-base:latest ---------
+
+@given(parsers.parse(
+    'the published "{image}" image at bc-launcher release version "{rel_ver}" '
+    'baking shop-templates version "{tpl_ver}" carries those versions as OCI '
+    'labels and ENV'
+))
+def given_published_bc_base_carries_versions(image, rel_ver, tpl_ver, ctx):
+    wf = _publish_workflow_doc(ctx)
+    assert wf is not None, (
+        'No committed publish workflow triggered on a "v*" tag push was found.'
+    )
+    ctx["c5xnd_image"] = image
+    ctx["c5xnd_rel_ver"] = rel_ver
+    ctx["c5xnd_tpl_ver"] = tpl_ver
+    step = _build_step_for_image(wf[1], image)
+    assert step is not None, (
+        f"The publish workflow has no build step publishing {image!r}."
+    )
+    with_ = step.get("with", {}) or {}
+    ctx["c5xnd_labels"] = _parse_kv_block(with_.get("labels"))
+    ctx["c5xnd_build_args"] = _parse_kv_block(with_.get("build-args"))
+    ctx["c5xnd_dockerfile_text"] = _bc_base_dockerfile_text()
+
+
+@given(parsers.parse(
+    'a container is started from that image addressed only by its "latest" '
+    'tag, so the originating version tag is not recoverable from the running '
+    'container'
+))
+def given_container_started_latest_only(ctx):
+    # The run-tag is intentionally not recoverable; the surfaced versions must
+    # therefore come from the image's baked labels/ENV (declarative artifacts),
+    # not from the tag used to address the image. Nothing to set up beyond the
+    # already-loaded committed artifacts.
+    ctx["c5xnd_run_tag_recoverable"] = False
+
+
+@when('the running container is examined with "docker container inspect"')
+def when_container_inspect(ctx):
+    # docker is OUT-OF-BAND; the in-suite proxy is the committed bc-base
+    # workflow `labels:` input and the bc-base Dockerfile ENV that a running
+    # container's Config.Labels / Config.Env would surface.
+    pass
+
+
+@then(parsers.parse(
+    'the container\'s configured labels surface "org.opencontainers.image.'
+    'version" equal to the bc-launcher release version "{rel_ver}"'
+))
+def then_container_version_label(rel_ver, ctx):
+    val = ctx["c5xnd_labels"].get("org.opencontainers.image.version")
+    assert val is not None, (
+        "The bc-base build step does not SET org.opencontainers.image.version, "
+        "so a running container's Config.Labels would surface the inherited "
+        f"upstream {_UPSTREAM_BASE_VERSION_LABEL!r}."
+    )
+    assert "ref_name" in val or val == rel_ver, (
+        "The container's org.opencontainers.image.version label is not the "
+        f"bc-launcher release version {rel_ver!r}; got {val!r}."
+    )
+    assert val != _UPSTREAM_BASE_VERSION_LABEL
+
+
+@then(parsers.parse(
+    'the container\'s configured labels surface "shopsystem.shop-templates.'
+    'version" equal to the baked shop-templates version "{tpl_ver}"'
+))
+def then_container_shop_templates_label(tpl_ver, ctx):
+    val = ctx["c5xnd_labels"].get("shopsystem.shop-templates.version")
+    assert val is not None, (
+        "The bc-base build step does not SET the shopsystem.shop-templates."
+        "version label."
+    )
+    baked = _baked_shop_templates_version()
+    assert baked == tpl_ver, (
+        f"The baked shop-templates version {baked!r} != expected {tpl_ver!r}."
+    )
+    assert (
+        val == baked
+        or val == tpl_ver
+        or "SHOP_TEMPLATES_VERSION" in val
+        or "shop_templates_version" in val
+    ), (
+        "The container's shopsystem.shop-templates.version label is not the "
+        f"baked version ({baked!r}); got {val!r}."
+    )
+
+
+@then(parsers.parse(
+    'the container\'s configured environment surfaces "SHOPSYSTEM_BC_LAUNCHER_'
+    'VERSION" equal to "{rel_ver}"'
+))
+def then_container_env_launcher_version(rel_ver, ctx):
+    text = ctx["c5xnd_dockerfile_text"]
+    val = _dockerfile_env_value(text, "SHOPSYSTEM_BC_LAUNCHER_VERSION")
+    assert val is not None, (
+        "The bc-base Dockerfile does not declare ENV "
+        "SHOPSYSTEM_BC_LAUNCHER_VERSION, so a running container's Config.Env "
+        "would not surface it."
+    )
+    bav = ctx.get("c5xnd_build_args", {}).get("SHOPSYSTEM_BC_LAUNCHER_VERSION")
+    assert bav is not None and ("ref_name" in bav or bav == rel_ver), (
+        "The bc-base build step does not pass SHOPSYSTEM_BC_LAUNCHER_VERSION="
+        f"github.ref_name as a build-arg; got {bav!r}."
+    )
+
+
+@then(parsers.parse(
+    'the container\'s configured environment surfaces "SHOP_TEMPLATES_VERSION" '
+    'equal to "{tpl_ver}"'
+))
+def then_container_env_shop_templates_version(tpl_ver, ctx):
+    text = ctx["c5xnd_dockerfile_text"]
+    val = _dockerfile_env_value(text, "SHOP_TEMPLATES_VERSION")
+    assert val is not None, (
+        "The bc-base Dockerfile does not declare ENV SHOP_TEMPLATES_VERSION, "
+        "so a running container's Config.Env would not surface it."
+    )
+    baked = _baked_shop_templates_version()
+    assert baked == tpl_ver, (
+        f"The baked shop-templates version {baked!r} != expected {tpl_ver!r}."
+    )
+
+
+@then(parsers.parse(
+    'the surfaced bc-launcher version is "{rel_ver}" rather than the upstream '
+    'devcontainer base label value "{base_ver}"'
+))
+def then_container_version_overrides_upstream(rel_ver, base_ver, ctx):
+    val = ctx["c5xnd_labels"].get("org.opencontainers.image.version")
+    assert val is not None, (
+        "The bc-base build step leaves org.opencontainers.image.version "
+        f"INHERITED, so the running container surfaces the upstream {base_ver!r}."
+    )
+    assert val != base_ver, (
+        f"The surfaced bc-launcher version is the upstream {base_ver!r}, not "
+        f"overridden to {rel_ver!r}."
+    )
+    assert "ref_name" in val or val == rel_ver

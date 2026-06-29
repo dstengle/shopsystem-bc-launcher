@@ -35,12 +35,41 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # Resolve the baked shop-templates version from the Dockerfile's
+      # ARG SHOP_TEMPLATES_VERSION default so the OCI label tracks the SAME
+      # version actually baked into the image (lead-5xnd). The centralized poll
+      # (poll-bc-base-deps.yml) bumps that ARG default in place; resolving it
+      # here keeps the label DRY-synced to the baked value instead of a literal
+      # that could drift.
+      - name: Resolve baked shop-templates version
+        id: baked
+        run: |
+          ver=$(sed -n 's/^ARG SHOP_TEMPLATES_VERSION=\(v[0-9.]*\).*/\1/p' \
+            ./docker/bc-base/Dockerfile | head -n1)
+          echo "shop_templates_version=${ver}" >> "$GITHUB_OUTPUT"
+
       - name: Build and push bc-base, tagging both the version and latest
         uses: docker/build-push-action@v6
         with:
           context: ./docker/bc-base
           file: ./docker/bc-base/Dockerfile
           push: true
+          # Thread the bc-launcher release tag in as a build-arg so the baked
+          # ENV SHOPSYSTEM_BC_LAUNCHER_VERSION equals the release version
+          # (lead-5xnd).
+          build-args: |
+            SHOPSYSTEM_BC_LAUNCHER_VERSION=${{ github.ref_name }}
+          # OCI labels. Build-set labels OVERRIDE inherited base-image labels,
+          # which is how the misleading upstream devcontainer-base
+          # org.opencontainers.image.version value "3.1.2" is defeated: we set
+          # the version label to the bc-launcher release tag (github.ref_name),
+          # the revision to the source commit sha (github.sha, non-empty), and
+          # the baked shop-templates version label to the resolved ARG default
+          # (lead-5xnd).
+          labels: |
+            org.opencontainers.image.version=${{ github.ref_name }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            shopsystem.shop-templates.version=${{ steps.baked.outputs.shop_templates_version }}
           # Tag the SAME built digest with both the immutable version tag and
           # the moving "latest" tag, so "latest" and "v*" resolve to one digest.
           tags: |
@@ -93,15 +122,40 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # Resolve the baked shop-templates version the SAME way the bc-base job
+      # does (from the bc-base Dockerfile ARG default), so bc-lead's
+      # shopsystem.shop-templates.version label equals the version baked into
+      # the bc-base layer it is FROM (lead-5xnd).
+      - name: Resolve baked shop-templates version
+        id: baked
+        run: |
+          ver=$(sed -n 's/^ARG SHOP_TEMPLATES_VERSION=\(v[0-9.]*\).*/\1/p' \
+            ./docker/bc-base/Dockerfile | head -n1)
+          echo "shop_templates_version=${ver}" >> "$GITHUB_OUTPUT"
+
       - name: Build and push bc-lead, tagging both the version and latest
         uses: docker/build-push-action@v6
         with:
           context: ./docker/bc-lead
           file: ./docker/bc-lead/Dockerfile
           push: true
-          # Build bc-lead FROM the SAME bc-base version published in this run.
+          # Build bc-lead FROM the SAME bc-base version published in this run,
+          # and thread the bc-launcher release tag through so any re-declared
+          # ENV resolves to the release version (bc-lead also inherits the ENV
+          # from bc-base FROM).
           build-args: |
             BASE_VERSION=${{ github.ref_name }}
+            SHOPSYSTEM_BC_LAUNCHER_VERSION=${{ github.ref_name }}
+          # Set the OCI labels EXPLICITLY on the bc-lead build too (OCI labels
+          # set via the build are NOT guaranteed inherited the way needed) with
+          # the SAME version values: bc-lead's release version == bc-base's, and
+          # the shop-templates version == the baked one. This overrides the
+          # inherited upstream "3.1.2" version label on bc-lead as well
+          # (lead-5xnd).
+          labels: |
+            org.opencontainers.image.version=${{ github.ref_name }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            shopsystem.shop-templates.version=${{ steps.baked.outputs.shop_templates_version }}
           # Mirror bc-base's tagging exactly: tag the SAME built digest with
           # both the immutable version tag and the moving "latest" tag.
           tags: |
