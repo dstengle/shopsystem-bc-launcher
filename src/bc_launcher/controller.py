@@ -1395,6 +1395,14 @@ class BcContainerController:
                 launch_image = f"{repo}@{resolved_digest}"
             else:
                 launch_image = resolved_digest
+            # Freshness at launch (af2f03d3ac519cb5): PULL the resolved digest
+            # into the local cache BEFORE starting the container.  Resolving
+            # alone is not enough — if the republished digest (D_new) is not
+            # fetched, a run can still serve whatever content the local cache
+            # holds under the moving "latest" tag (D_old).  Pulling the
+            # digest-pinned reference guarantees the new container runs from
+            # D_new, the republished image, rather than the stale cached D_old.
+            self._driver.pull(launch_image)
 
         self._driver.run(
             container_name=container,

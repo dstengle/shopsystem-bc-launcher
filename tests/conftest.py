@@ -5728,26 +5728,45 @@ def then_no_rebuild_required(digest_label, ctx):
 _BC_BASE_LATEST_REF = "ghcr.io/dstengle/shopsystem-bc-base:latest"
 
 
+def _digest_sha_for_label(label):
+    """Turn a scenario digest LABEL (e.g. "D_old"/"D_new") into a distinct,
+    well-formed sha256 value carrying the label, so D_old and D_new are
+    genuinely DIFFERENT content-addressable digests (D_old != D_new)."""
+    label_hex = "".join(c for c in label.lower() if c in "0123456789abcdef")
+    # Prefix with the label's letters mapped to hex so labels with no hex
+    # chars of their own (e.g. "D_old" -> "d") still differ from one another.
+    seed = "".join(format(ord(c), "x") for c in label.lower())
+    return f"sha256:{(seed + label_hex)}".ljust(71, "0")[:71]
+
+
 @given(parsers.parse('the local Docker cache holds the bc-base "latest" tag '
                      'at an older digest "{old_digest}"'))
-def given_cache_holds_old_digest(old_digest, ctx):
-    ctx["cached_digest"] = old_digest
+def given_cache_holds_old_digest(old_digest, ctx, fake_driver):
+    # Model the STALE local state: the bc-base ":latest" tag is cached locally
+    # at the older digest D_old.  A launch that runs the bare ":latest" tag (the
+    # v0.3.34 regression) therefore serves THIS D_old content from the cache.
+    old_sha = _digest_sha_for_label(old_digest)
+    fake_driver.seed_local_cache(_BC_BASE_LATEST_REF, old_sha)
+    ctx["cached_old_digest"] = old_digest
+    ctx["cached_old_sha"] = old_sha
 
 
 @given(parsers.parse('the registry "{image_ref}" now publishes the "latest" '
                      'tag at a newer digest "{new_digest}"'))
-def given_registry_publishes_new_digest(image_ref, new_digest, ctx):
+def given_registry_publishes_new_digest(image_ref, new_digest, ctx, fake_driver):
     registry_driver = FakeRegistryDriver()
-    # The registry resolves the bc-base "latest" reference to the new digest.
-    # Model the digest as a content-addressable sha256 value carrying the
-    # scenario's digest label, so the resolved reference is a genuine
-    # repo@sha256:... pin (the shape the real driver produces) while remaining
-    # assertable by the label.
-    # Use a hex-only token derived from the label so the value is a
-    # well-formed sha256 digest, and remember it for assertions.
-    label_hex = "".join(c for c in new_digest.lower() if c in "0123456789abcdef")
-    sha = f"sha256:{label_hex}".ljust(71, "0")[:71]
+    # The registry resolves the bc-base "latest" reference to the NEW digest
+    # D_new — DIFFERENT from the cached D_old.  Model the digest as a genuine
+    # content-addressable sha256 pin (the shape the real driver produces).
+    sha = _digest_sha_for_label(new_digest)
+    assert sha != ctx.get("cached_old_sha"), (
+        "test setup error: D_new must differ from the cached D_old"
+    )
     registry_driver.set_registry_digest(_BC_BASE_LATEST_REF, sha)
+    # Wire the registry into the fake docker driver so a PULL of the resolved
+    # digest pin populates the local cache with D_new content (and so a manual
+    # pull of the ":latest" tag would re-resolve it).
+    fake_driver.set_registry_for_pull(registry_driver)
     ctx["registry_driver"] = registry_driver
     ctx["registry_new_digest"] = new_digest
     ctx["registry_new_sha"] = sha
@@ -5757,21 +5776,44 @@ def given_registry_publishes_new_digest(image_ref, new_digest, ctx):
                     'registry and pulls digest "{new_digest}" before starting '
                     "the container"))
 def then_launch_resolves_new_digest(new_digest, ctx):
+    fake_driver = ctx["fake_driver_for_run"]
     registry_driver = ctx["registry_driver"]
+    resolved_sha = ctx["registry_new_sha"]
+
+    # (1) launch RESOLVED the bc-base "latest" tag against the registry.
     assert _BC_BASE_LATEST_REF in registry_driver.resolve_calls, (
         "launch did not resolve the bc-base \"latest\" tag against the "
         f"registry; resolve calls were: {registry_driver.resolve_calls!r}"
     )
-    # The resolution must occur BEFORE the container is started: the recorded
-    # docker run command for the container must reference the resolved digest.
-    resolved_sha = ctx["registry_new_sha"]
-    run_cmd = ctx["fake_driver_for_run"].run_command_for_container(
-        ctx["container_name"]
+
+    # (2) launch PULLED the resolved D_new digest pin (so the republished image
+    # is fetched into the local cache instead of serving the stale cached
+    # ":latest").  Without a pull of the registry-current digest, the local
+    # cache still serves D_old — exactly the v0.3.34 regression.
+    pulled_dnew = [r for r in fake_driver.pull_calls if resolved_sha in r]
+    assert pulled_dnew, (
+        f"launch did not pull the resolved D_new digest {resolved_sha!r} "
+        f"(label {new_digest!r}); pull calls were: {fake_driver.pull_calls!r}. "
+        "A launch that resolves but does not pull the registry-current digest "
+        "serves the stale cached :latest (D_old)."
     )
-    assert any(resolved_sha in tok for tok in run_cmd), (
-        f"launch did not run the container from the resolved digest "
-        f"{resolved_sha!r} (label {new_digest!r}); docker run command was: "
-        f"{run_cmd!r}"
+
+    # (3) the pull happened BEFORE the container started: the pull of D_new must
+    # precede the run of the bc-shopsystem-messaging container in op order.
+    ops = fake_driver.operation_log
+    pull_idx = next(
+        (i for i, (op, arg) in enumerate(ops)
+         if op == "pull" and resolved_sha in arg),
+        None,
+    )
+    run_idx = next(
+        (i for i, (op, arg) in enumerate(ops)
+         if op == "run" and arg == ctx["container_name"]),
+        None,
+    )
+    assert pull_idx is not None and run_idx is not None and pull_idx < run_idx, (
+        f"launch did not pull D_new ({resolved_sha!r}) BEFORE starting the "
+        f"container; operation order was: {ops!r}"
     )
 
 
@@ -5779,30 +5821,46 @@ def then_launch_resolves_new_digest(new_digest, ctx):
                     'image digest "{new_digest}" rather than the cached '
                     '"{old_digest}"'))
 def then_container_runs_from_new_digest(container_name, new_digest, old_digest, ctx):
-    run_cmd = ctx["fake_driver_for_run"].run_command_for_container(container_name)
+    fake_driver = ctx["fake_driver_for_run"]
+    new_sha = ctx["registry_new_sha"]
+    old_sha = ctx["cached_old_sha"]
+
+    run_cmd = fake_driver.run_command_for_container(container_name)
     image_tokens = [tok for tok in run_cmd if "shopsystem-bc-base" in tok]
     assert image_tokens, (
         f"docker run for {container_name} carries no bc-base image reference: "
         f"{run_cmd!r}"
     )
     image_ref = image_tokens[0]
-    resolved_sha = ctx["registry_new_sha"]
+
     # The container must run from the registry-resolved digest pin
-    # (repo@sha256:...), NOT from the bare ":latest" tag that the local cache
-    # would otherwise serve as the stale D_old.
-    assert resolved_sha in image_ref, (
-        f"Container {container_name} not started from the resolved new digest "
-        f"{resolved_sha!r} (label {new_digest!r}): image ref was {image_ref!r}."
-    )
-    assert image_ref.endswith("@" + resolved_sha), (
-        f"Container {container_name} bc-base image ref is not a digest pin "
-        f"({old_digest!r} cached-latest tag would otherwise be served): "
-        f"{image_ref!r}."
-    )
+    # (repo@sha256:D_new), NOT the bare ":latest" tag that the local cache
+    # serves as the stale D_old.
     assert ":latest" not in image_ref, (
         f"Container {container_name} started from the moving :latest tag (the "
-        f"cached {old_digest!r}) instead of the resolved digest pin: "
+        f"cached {old_digest!r}={old_sha!r}) instead of the resolved digest "
+        f"pin: {image_ref!r}."
+    )
+    assert image_ref.endswith("@" + new_sha), (
+        f"Container {container_name} bc-base image ref is not the resolved "
+        f"D_new digest pin (cached {old_digest!r} would otherwise be served): "
         f"{image_ref!r}."
+    )
+
+    # CONTENT FIDELITY: resolve what the run image ACTUALLY serves from the
+    # local cache.  Because launch pulled D_new, the digest pin serves D_new;
+    # the stale cached ":latest" still holds D_old.  Assert the served content
+    # is D_new and is NOT the cached D_old — so a regression that ran the cached
+    # :latest (serving D_old) goes RED here.
+    served = fake_driver.served_digest_for_run(container_name)
+    assert served == new_sha, (
+        f"Container {container_name} is NOT serving the republished D_new "
+        f"content {new_sha!r} (label {new_digest!r}); it served {served!r}. "
+        f"A launch that ran the cached :latest would serve D_old {old_sha!r}."
+    )
+    assert served != old_sha, (
+        f"Container {container_name} is running the STALE cached D_old "
+        f"{old_sha!r} (label {old_digest!r}) instead of the republished D_new."
     )
 
 

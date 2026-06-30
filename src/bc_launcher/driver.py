@@ -114,6 +114,20 @@ class DockerDriver(Protocol):
         """
         ...
 
+    def pull(self, image_ref: str) -> None:
+        """Pull ``image_ref`` from the registry into the local Docker cache.
+
+        Scenario af2f03d3ac519cb5 (freshness at launch): launch resolves the
+        bc-base ``latest`` tag's CURRENT registry digest (``D_new``) and then
+        pulls THAT digest before starting the container, so the local cache is
+        populated with the republished content rather than serving whatever
+        digest (``D_old``) the cache already holds under the moving ``latest``
+        tag.  The real implementation shells out to ``docker pull <image_ref>``;
+        the test fake fetches the registry-current digest into its in-memory
+        local cache so a run of the digest-pinned reference serves ``D_new``.
+        """
+        ...
+
     def exec_run(
         self,
         container_name: str,
@@ -451,6 +465,16 @@ class RealDockerDriver:
             cmd += ["--network", network]
         cmd.append(image)
         cmd += ["sleep", "infinity"]
+        self._last_command = cmd
+        subprocess.run(cmd, check=True)
+
+    def pull(self, image_ref: str) -> None:
+        # Scenario af2f03d3ac519cb5: fetch the registry-current content for
+        # ``image_ref`` (a digest-pinned reference resolved from the moving
+        # ``latest`` tag) into the local cache before ``run`` starts the
+        # container, so the republished image (D_new) reaches the new container
+        # instead of the stale cached ``latest`` (D_old).
+        cmd = ["docker", "pull", image_ref]
         self._last_command = cmd
         subprocess.run(cmd, check=True)
 

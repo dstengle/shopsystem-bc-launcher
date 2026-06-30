@@ -171,6 +171,23 @@ class FakeDockerDriver:
         # Per-container run commands indexed by container name (for multi-launch scenarios)
         self._run_commands_by_container: dict[str, list[str]] = {}
 
+        # --- Scenario af2f03d3ac519cb5: local Docker image cache model ---
+        # Maps an image reference (a moving tag like "repo:latest" OR a
+        # content-addressable digest pin like "repo@sha256:...") to the DIGEST
+        # CONTENT the local cache currently serves for that reference.  A tag's
+        # cached entry is the digest the local cache holds under that tag (the
+        # stale "D_old" when the registry has since republished "latest").  A
+        # pull populates the digest-pinned reference so a run of that pin serves
+        # the registry-current content.  Empty by default — only the freshness
+        # scenario seeds it, so all other launch scenarios are unaffected.
+        self._local_image_cache: dict[str, str] = {}
+        # Ordered record of pull(image_ref) calls.
+        self.pull_calls: list[str] = []
+        # An optional RegistryDriver-like object the fake consults on pull to
+        # fetch the registry-current digest into the local cache.  Set by the
+        # freshness scenario via ``set_registry_for_pull``.
+        self._registry_for_pull = None
+
         # Pane-marker simulation: list of (container_name, session, marker)
         # tuples that wait_for_pane_marker should treat as "never observed"
         # (i.e. simulate the timeout path).  Anything not listed is treated
@@ -2560,6 +2577,65 @@ class FakeDockerDriver:
     def run_command_for_container(self, container_name: str) -> list[str]:
         """Return the docker run command recorded for a specific container."""
         return self._run_commands_by_container.get(container_name, [])
+
+    # --- Scenario af2f03d3ac519cb5: local cache / pull / served-digest -------
+
+    def seed_local_cache(self, image_ref: str, digest: str) -> None:
+        """Seed the in-memory local Docker cache so ``image_ref`` serves ``digest``.
+
+        Used to model the stale state: ``repo:latest`` cached at ``D_old`` while
+        the registry has since republished ``latest`` at ``D_new``.  A run that
+        references the bare ``:latest`` tag therefore serves ``D_old`` from this
+        cache; only a digest-pinned reference that was PULLED serves ``D_new``.
+        """
+        self._local_image_cache[image_ref] = digest
+
+    def set_registry_for_pull(self, registry_driver) -> None:
+        """Wire the registry the fake consults when ``pull`` fetches content.
+
+        On ``pull(repo@sha256:Dnew)`` the fake records the digest content for
+        that pinned reference so a subsequent run of the pin serves ``D_new``.
+        On ``pull(repo:latest)`` the fake would re-resolve the tag against the
+        registry and update the cached tag content (modelling ``docker pull``
+        of a moving tag).
+        """
+        self._registry_for_pull = registry_driver
+
+    def pull(self, image_ref: str) -> None:
+        self.pull_calls.append(image_ref)
+        self.operation_log.append(("pull", image_ref))
+        # A digest-pinned reference (repo@sha256:...) names content directly:
+        # pulling it makes that exact content available in the local cache.
+        if "@sha256:" in image_ref:
+            digest = image_ref.split("@", 1)[1]
+            self._local_image_cache[image_ref] = digest
+            return
+        # A tag reference: pulling re-resolves the tag against the registry
+        # (if wired) and updates what the cached tag serves — the corrective
+        # action that a manual ``docker pull repo:latest`` performs.
+        if self._registry_for_pull is not None:
+            self._local_image_cache[image_ref] = (
+                self._registry_for_pull.resolve_digest(image_ref)
+            )
+
+    def served_digest_for_run(self, container_name: str) -> str | None:
+        """Return the DIGEST CONTENT the container's run image actually serves.
+
+        Resolves the trailing image token of the recorded ``docker run`` command
+        against the local cache: a digest-pinned reference serves its pinned
+        content (only if that content was pulled into the cache); a bare tag
+        serves whatever the local cache holds under that tag (the stale
+        ``D_old`` when the registry has since moved the tag).  ``None`` when the
+        reference is not present in the local cache (an unpulled digest pin —
+        i.e. a run that would have to pull on demand, which the fake does not
+        auto-populate).
+        """
+        run_cmd = self._run_commands_by_container.get(container_name, [])
+        image_tokens = [t for t in run_cmd if "shopsystem-bc-base" in t]
+        if not image_tokens:
+            return None
+        image_ref = image_tokens[0]
+        return self._local_image_cache.get(image_ref)
 
     # --- Interactive-agent submission model queries (lead-xsmn / lead-hyee) ---
 
