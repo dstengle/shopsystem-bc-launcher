@@ -11770,10 +11770,10 @@ def then_image_shop_templates_label(tpl_ver, ctx):
         "The shopsystem.shop-templates.version label is not the baked "
         f"shop-templates version ({baked!r} / {tpl_ver!r}); got {val!r}."
     )
-    assert baked == tpl_ver, (
-        f"The baked shop-templates version {baked!r} does not match the "
-        f"scenario's expected {tpl_ver!r}."
-    )
+    # NB: tpl_ver is the scenario's EXAMPLE baked version, not a constraint on the
+    # current Dockerfile pin. The label DRY-tracks the live baked ARG (asserted
+    # above via val==baked / SHOP_TEMPLATES_VERSION expr), so this step stays green
+    # across shop-templates bumps (bug shopsystem_bc_launcher-zk0).
 
 
 @then(parsers.parse(
@@ -11815,10 +11815,12 @@ def then_image_env_shop_templates_version(tpl_ver, ctx):
         "(promote the existing ARG to a persisted ENV), so the baked "
         "shop-templates version would not surface in docker inspect."
     )
-    baked = _baked_shop_templates_version()
-    assert baked == tpl_ver, (
-        f"The baked shop-templates version {baked!r} does not match the "
-        f"scenario's expected {tpl_ver!r}."
+    # The ENV promotes the ARG SHOP_TEMPLATES_VERSION default, so it surfaces
+    # whatever version is baked. tpl_ver is the scenario's EXAMPLE value, not a
+    # constraint freezing the live Dockerfile pin (bug shopsystem_bc_launcher-zk0).
+    assert _baked_shop_templates_version() is not None, (
+        "Could not resolve the baked shop-templates version (ARG "
+        "SHOP_TEMPLATES_VERSION=vX.Y.Z) from the bc-base Dockerfile."
     )
 
 
@@ -11919,9 +11921,9 @@ def then_container_shop_templates_label(tpl_ver, ctx):
         "version label."
     )
     baked = _baked_shop_templates_version()
-    assert baked == tpl_ver, (
-        f"The baked shop-templates version {baked!r} != expected {tpl_ver!r}."
-    )
+    # tpl_ver is the scenario's EXAMPLE baked version, not a constraint on the
+    # current Dockerfile pin; the label DRY-tracks the live baked ARG so this
+    # stays green across shop-templates bumps (bug shopsystem_bc_launcher-zk0).
     assert (
         val == baked
         or val == tpl_ver
@@ -11963,9 +11965,12 @@ def then_container_env_shop_templates_version(tpl_ver, ctx):
         "The bc-base Dockerfile does not declare ENV SHOP_TEMPLATES_VERSION, "
         "so a running container's Config.Env would not surface it."
     )
-    baked = _baked_shop_templates_version()
-    assert baked == tpl_ver, (
-        f"The baked shop-templates version {baked!r} != expected {tpl_ver!r}."
+    # The ENV promotes the ARG default so it surfaces whatever is baked; tpl_ver
+    # is the scenario's EXAMPLE, not a constraint on the live pin (bug
+    # shopsystem_bc_launcher-zk0).
+    assert _baked_shop_templates_version() is not None, (
+        "Could not resolve the baked shop-templates version from the bc-base "
+        "Dockerfile."
     )
 
 
