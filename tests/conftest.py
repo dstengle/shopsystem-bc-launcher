@@ -8940,6 +8940,225 @@ def assert_diagnostic_states_why(ctx):
 
 
 # ===========================================================================
+# lead-bnhn — launch-diagnostic write is best-effort/non-fatal + user-writable
+# default. Two robustness pins scenario 56 (0d010cf8f3175226, 7084bbbfdef94f81)
+# left UNPINNED:
+#   (a) a diagnostic-write FAILURE must NOT abort the launch (it is caught, a
+#       host-discoverable warning is surfaced, the launch continues);
+#   (b) the DEFAULT diagnostic location (no BCLAUNCHER_HOST_STATE_DIR override)
+#       is a user-writable per-user state dir, NOT root-owned /var/lib.
+# ---------------------------------------------------------------------------
+
+
+@given(parsers.parse(
+    "writing the launch diagnostic file will fail because the diagnostic "
+    "target directory is not writable"
+))
+def diagnostic_write_will_fail(fake_driver):
+    """Force the diagnostic write to RAISE PermissionError (lead-bnhn).
+
+    Models the /var/lib/bc-launcher non-writable-target crash: the driver's
+    write_launch_diagnostic raises instead of writing.  The controller's
+    best-effort wrap MUST catch this so the launch is not aborted.
+    """
+    fake_driver.fail_launch_diagnostic_write()
+
+
+@then(parsers.parse(
+    "the launch is not aborted by the diagnostic-write failure and runs to "
+    "its own failure result"
+))
+def assert_launch_not_aborted_by_diagnostic_failure(ctx, fake_driver):
+    """NON-FATAL teeth: the launch produced its OWN failure result (the
+    messaging-DB readiness failure), NOT a crash/exception from the diagnostic
+    write.  If the controller re-raised the write error (fatal), the When step
+    would have propagated the PermissionError and ``ctx['result']`` would never
+    have been set — so reaching a CommandResult at all proves non-fatality.
+    """
+    result = ctx["result"]
+    # The launch ran to a normal CommandResult rather than crashing.
+    assert result is not None, (
+        "Expected the launch to produce a CommandResult despite the "
+        "diagnostic-write failure; a fatal re-raise would have crashed the "
+        "When step before any result was recorded"
+    )
+    # It is the launch's OWN failure (non-zero exit for the messaging-DB
+    # readiness barrier), not a success masking the abort.
+    assert result.exit_code != 0, (
+        f"Expected the launch to report its own (messaging-DB) failure; "
+        f"got exit_code={result.exit_code}"
+    )
+    # The controller DID attempt the diagnostic write to the documented path
+    # (it just failed) — confirming the non-fatal wrap sits AROUND a real
+    # attempt, not that the write was simply skipped.
+    assert fake_driver.launch_diagnostic_writes, (
+        "Expected the controller to ATTEMPT a diagnostic write (which the "
+        "fake forced to fail), but no write attempt was recorded"
+    )
+
+
+@then(parsers.parse(
+    "bc-container surfaces a host-discoverable warning that the launch "
+    "diagnostic could not be written, naming the target path and the "
+    "write-failure cause"
+))
+def assert_diagnostic_write_failure_warning(ctx, fake_driver):
+    """The launch result's stderr is the host-discoverable warning surface
+    here (no persisted file could be written).  It must name that the
+    diagnostic could not be written, the target path, and the write-failure
+    cause — so an operator learns WHY the diagnostic is missing without a tmux
+    attach.  Teeth: re-raising the write error (fatal) RED'd the prior step;
+    swallowing it silently (no warning) REDs this one.
+    """
+    stderr = ctx["result"].stderr
+    assert "could not write launch diagnostic" in stderr, (
+        f"Expected a host-discoverable warning that the diagnostic could not "
+        f"be written; stderr: {stderr!r}"
+    )
+    # The target path the controller tried to write to is named in the warning.
+    from bc_launcher.controller import launch_diagnostic_path
+    path = launch_diagnostic_path(ctx["bc_name"])
+    assert str(path) in stderr, (
+        f"Expected the warning to NAME the target path {path}; stderr: "
+        f"{stderr!r}"
+    )
+    # The write-failure cause (the exception) is named so the operator can fix
+    # it (e.g. PermissionError / Permission denied).
+    assert "PermissionError" in stderr or "Permission denied" in stderr, (
+        f"Expected the warning to name the write-failure cause; stderr: "
+        f"{stderr!r}"
+    )
+    # No persisted file exists at the documented path (the write failed), so
+    # the warning — not a file — is the legible fallback surface.
+    assert not path.exists(), (
+        f"The diagnostic write was forced to fail; no file should exist at "
+        f"{path}"
+    )
+
+
+@then(parsers.parse(
+    "the underlying launch-failure cause is still reported on the "
+    "host-discoverable warning surface"
+))
+def assert_underlying_cause_still_reported(ctx):
+    """Even with no persisted diagnostic file, the ACTUAL launch-failure cause
+    (the messaging-DB readiness failure) is still legible on stderr, so the
+    diagnostic-write failure degraded gracefully without hiding the real
+    failure it was meant to describe.
+    """
+    stderr = ctx["result"].stderr
+    assert "messaging readiness failure" in stderr or "not reachable" in stderr, (
+        f"Expected the underlying launch-failure cause to remain reported on "
+        f"the host-discoverable warning surface; stderr: {stderr!r}"
+    )
+
+
+@given(parsers.parse(
+    "no BCLAUNCHER_HOST_STATE_DIR override is set in the environment"
+))
+def no_host_state_dir_override(ctx, monkeypatch):
+    """Resolve the DEFAULT diagnostic location (lead-bnhn).
+
+    The autouse ``_lead63em_host_state_dir`` fixture sets
+    BCLAUNCHER_HOST_STATE_DIR for the whole suite; DELETE it here so this
+    scenario exercises the genuine DEFAULT resolution (the per-user state dir),
+    which is the property under pin.
+    """
+    monkeypatch.delenv("BCLAUNCHER_HOST_STATE_DIR", raising=False)
+
+
+@when(parsers.parse(
+    'I resolve the documented launch-diagnostic location for BC name '
+    '"{bc_name}"'
+))
+def resolve_default_diagnostic_location(bc_name, ctx):
+    from bc_launcher.controller import launch_diagnostic_path
+    ctx["bc_name"] = bc_name
+    ctx["resolved_diagnostic_path"] = launch_diagnostic_path(bc_name)
+
+
+@then(parsers.parse(
+    "the resolved diagnostic location is under a user-writable per-user state "
+    "directory rooted at XDG_STATE_HOME or its default ~/.local/state"
+))
+def assert_resolved_under_user_state_dir(ctx):
+    """USER-WRITABLE teeth: the default root is the per-user state dir, which
+    the invoking user can write to.  A default of /var/lib/bc-launcher
+    (root-required) would land the path elsewhere and RED both this and the
+    NOT-/var/lib step below.
+    """
+    import os as _os
+    from pathlib import Path as _Path
+    from bc_launcher.controller import default_host_state_dir
+    path = ctx["resolved_diagnostic_path"]
+    expected_root = default_host_state_dir()
+    # The resolved path is under the per-user default state root.
+    assert str(path).startswith(str(expected_root)), (
+        f"Resolved diagnostic path {path} is not under the per-user default "
+        f"state root {expected_root}"
+    )
+    # That root is rooted at $XDG_STATE_HOME when set, else ~/.local/state.
+    xdg = _os.environ.get("XDG_STATE_HOME")
+    base = _Path(xdg) if xdg else (_Path.home() / ".local" / "state")
+    assert str(expected_root).startswith(str(base)), (
+        f"Default state root {expected_root} is not rooted at the per-user "
+        f"base {base} (XDG_STATE_HOME or ~/.local/state)"
+    )
+    # It is genuinely the invoking user's tree (writable), not a root-owned one.
+    assert str(base) == str(_Path.home() / ".local" / "state") or xdg, (
+        "Per-user state base must be XDG_STATE_HOME or ~/.local/state"
+    )
+
+
+@then(parsers.parse(
+    "the resolved diagnostic location is NOT under the root-owned "
+    "/var/lib/bc-launcher"
+))
+def assert_resolved_not_var_lib(ctx):
+    path = ctx["resolved_diagnostic_path"]
+    assert not str(path).startswith("/var/lib/bc-launcher"), (
+        f"Resolved diagnostic path {path} must NOT default to the root-owned "
+        f"/var/lib/bc-launcher (the lead-bnhn PermissionError crash root)"
+    )
+
+
+@then(parsers.parse(
+    "the resolved diagnostic location is the known, documented per-BC "
+    "host-discoverable path found by a host lookup that does not attach into "
+    "any tmux session"
+))
+def assert_resolved_host_discoverable(ctx, fake_driver):
+    """ADR-041 D2 preserved: the location is the documented per-BC path
+    (``<root>/bc-<bc>/launch-diagnostic.txt``), found by the SAME pure host
+    lookup (``launch_diagnostic_path``) the 63em host-discovery scenario uses
+    — no docker exec, no tmux attach.
+    """
+    from bc_launcher.controller import (
+        launch_diagnostic_path,
+        LAUNCH_DIAGNOSTIC_FILENAME,
+    )
+    path = ctx["resolved_diagnostic_path"]
+    # Pure host lookup reproduces it (idempotent, no session involved).
+    assert path == launch_diagnostic_path(ctx["bc_name"]), (
+        "The documented location must be reproducible by the pure host lookup"
+    )
+    # Per-BC layout: <root>/bc-<bc_name>/launch-diagnostic.txt.
+    assert path.name == LAUNCH_DIAGNOSTIC_FILENAME, (
+        f"Expected the documented diagnostic filename; got {path.name!r}"
+    )
+    assert path.parent.name == f"bc-{ctx['bc_name']}", (
+        f"Expected a per-BC subdir bc-{ctx['bc_name']}; got "
+        f"{path.parent.name!r}"
+    )
+    # The lookup attached into NO tmux session.
+    assert not fake_driver.interactive_calls, (
+        "Host-discovery of the diagnostic location must NOT require a tmux "
+        f"attach; interactive calls: "
+        f"{[c.command for c in fake_driver.interactive_calls]!r}"
+    )
+
+
+# ===========================================================================
 # lead-czwo — centralized scheduled bc-base dependency check-bump-rebuild.
 #
 # A SINGLE scheduled workflow polls every baked bc-base dependency for its

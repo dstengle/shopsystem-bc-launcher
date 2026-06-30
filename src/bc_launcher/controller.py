@@ -61,22 +61,56 @@ SHOPMSG_DSN_ENV = "SHOPMSG_DSN"
 #
 # where the per-BC state root is the launcher host directory the operator's
 # per-BC mailbox/state is read from.  It is resolved from the
-# ``BCLAUNCHER_HOST_STATE_DIR`` env var when set, else defaults to
-# ``/var/lib/bc-launcher`` (a stable, documented host path).  Each BC owns a
-# per-BC subdirectory named for its container (``bc-<bc_name>`` —
-# ``LAUNCH_DIAGNOSTIC_PER_BC_SUBDIR_FMT``), exactly the per-BC layout shape
-# the launcher already uses for the container identity surface, so the
+# ``BCLAUNCHER_HOST_STATE_DIR`` env var when set, else defaults to a
+# per-USER state directory (``$XDG_STATE_HOME/bc-launcher``, falling back to
+# ``~/.local/state/bc-launcher``).  Each BC owns a per-BC subdirectory named
+# for its container (``bc-<bc_name>``), exactly the per-BC layout shape the
+# launcher already uses for the container identity surface, so the
 # diagnostic file lands on the SAME per-BC surface and is host-discoverable
 # at a single, documented, predictable path.  The launcher creates the
 # directory tree on demand, so the surface exists even on the very first
 # failed launch (when no container directory had been created yet).
 #
+# lead-bnhn (P1 bugfix): the default state root was ``/var/lib/bc-launcher``,
+# which is root-owned and NOT writable by the invoking (shop-shell) user, so
+# the on-demand ``mkdir(parents=True)`` in the diagnostic write raised
+# PermissionError and ABORTED the very launch the diagnostic was supposed to
+# describe.  The default is now a per-USER state directory the invoking user
+# can always write to, so the documented host-discoverable surface no longer
+# REQUIRES a root-pre-created path.  (The diagnostic write is ALSO wrapped
+# best-effort / non-fatal at the controller call site — see
+# ``_write_launch_diagnostic`` — so even an unwritable override location can
+# never abort the launch.)
+#
 # The file is a single human-readable line carrying the literal cause-marker
 # token (so an operator / tool can grep for the cause) followed by a
 # human-readable reason describing why the session failed to come up.
 BCLAUNCHER_HOST_STATE_DIR_ENV = "BCLAUNCHER_HOST_STATE_DIR"
-DEFAULT_HOST_STATE_DIR = "/var/lib/bc-launcher"
+XDG_STATE_HOME_ENV = "XDG_STATE_HOME"
+# Per-USER default state-dir LEAF, joined under $XDG_STATE_HOME (or
+# ~/.local/state when XDG_STATE_HOME is unset) — a location writable by the
+# invoking user, never the root-owned /var/lib (lead-bnhn).
+DEFAULT_HOST_STATE_DIR_LEAF = "bc-launcher"
 LAUNCH_DIAGNOSTIC_FILENAME = "launch-diagnostic.txt"
+
+
+def default_host_state_dir() -> Path:
+    """The per-USER default launch-diagnostic state root (lead-bnhn).
+
+    Resolves to ``$XDG_STATE_HOME/bc-launcher`` when ``XDG_STATE_HOME`` is set,
+    else ``~/.local/state/bc-launcher`` (the XDG Base Directory default for
+    per-user state).  This is a location the INVOKING (shop-shell) user can
+    write to, so the on-demand parent ``mkdir`` in the diagnostic write does
+    NOT require a root-pre-created ``/var/lib/bc-launcher`` and cannot raise
+    PermissionError on a fresh-adopter bootstrap.  Used ONLY when
+    ``BCLAUNCHER_HOST_STATE_DIR`` is unset; an explicit override still wins.
+    """
+    xdg = os.environ.get(XDG_STATE_HOME_ENV)
+    if xdg:
+        base = Path(xdg)
+    else:
+        base = Path.home() / ".local" / "state"
+    return base / DEFAULT_HOST_STATE_DIR_LEAF
 
 # The four documented launch-failure cause-marker tokens.  Each is the
 # literal token written into the diagnostic file's ``cause:`` field so the
@@ -95,15 +129,19 @@ def launch_diagnostic_path(bc_name: str) -> Path:
 
         <state-root>/<container-name>/launch-diagnostic.txt
 
-    The state root is ``BCLAUNCHER_HOST_STATE_DIR`` when set, else
-    ``DEFAULT_HOST_STATE_DIR``.  The per-BC subdirectory is the container name
-    (``bc-<bc_name>``), matching the launcher's existing per-BC identity
-    shape.  This is the SAME host-visible per-BC surface the operator's
-    per-BC mailbox/state is read from — readable from the host with NO tmux
-    attach and independent of the launch command's stderr.
+    The state root is ``BCLAUNCHER_HOST_STATE_DIR`` when set, else the
+    per-USER ``default_host_state_dir()`` (``$XDG_STATE_HOME/bc-launcher``,
+    default ``~/.local/state/bc-launcher`` — lead-bnhn: writable by the
+    invoking user, never the root-owned ``/var/lib/bc-launcher``).  The
+    per-BC subdirectory is the container name (``bc-<bc_name>``), matching
+    the launcher's existing per-BC identity shape.  This is the SAME
+    host-visible per-BC surface the operator's per-BC mailbox/state is read
+    from — readable from the host with NO tmux attach and independent of the
+    launch command's stderr.
     """
-    root = os.environ.get(BCLAUNCHER_HOST_STATE_DIR_ENV) or DEFAULT_HOST_STATE_DIR
-    return Path(root) / _container_name(bc_name) / LAUNCH_DIAGNOSTIC_FILENAME
+    override = os.environ.get(BCLAUNCHER_HOST_STATE_DIR_ENV)
+    root = Path(override) if override else default_host_state_dir()
+    return root / _container_name(bc_name) / LAUNCH_DIAGNOSTIC_FILENAME
 
 # SHOPMSG_SYSTEM_SLUG (lead-53y0): bc-launcher RESOLVES + INJECTS this slug
 # into the launched BC container's docker run env.  bc-launcher itself NEVER
@@ -1877,8 +1915,12 @@ class BcContainerController:
     # ------------------------------------------------------------------
 
     def _write_launch_diagnostic(
-        self, bc_name: str, cause_marker: str, reason: str
-    ) -> Path:
+        self,
+        bc_name: str,
+        cause_marker: str,
+        reason: str,
+        err_lines: list[str],
+    ) -> Path | None:
         """Persist a launch-failure diagnostic FILE on the per-BC host surface.
 
         lead-63em.  Writes a single human-readable line carrying the literal
@@ -1886,16 +1928,48 @@ class BcContainerController:
         host-discoverable path (``launch_diagnostic_path``).  The file is
         readable from the host WITHOUT attaching into any tmux session and
         WITHOUT relying on the launch command's stderr or the bc-container
-        monitor tmux pane.  Returns the path written (so the caller can name
-        it in the launch result's stderr for convenience — the FILE, not the
-        stderr line, is the authoritative diagnostic surface).
+        monitor tmux pane.
+
+        lead-bnhn (P1 bugfix) — BEST-EFFORT / NON-FATAL.  The diagnostic write
+        (its on-demand parent ``mkdir`` and the file write) is wrapped so that
+        ANY write failure (``PermissionError`` / ``OSError`` from an unwritable
+        target dir, a read-only filesystem, etc.) is CAUGHT here, surfaced as a
+        host-discoverable WARNING on the launch result's stderr (naming that
+        the diagnostic could NOT be written, the target path, and the cause),
+        and then SWALLOWED so the launch is NOT aborted.  A diagnostic-write
+        failure is strictly less severe than the launch failure it would
+        describe; it must degrade gracefully, never escalate.  This method is
+        the single choke point ALL launch-failure-diagnostic call sites pass
+        through, so wrapping it here protects EVERY call site at once.
+
+        On success the method itself appends the host-discoverable
+        ``launch diagnostic persisted to <path>`` line to ``err_lines`` and
+        returns the path written; on a caught write failure it appends the
+        warning line and returns ``None``.  The FILE, not the stderr line, is
+        the authoritative diagnostic surface when the write succeeds — but the
+        stderr warning is the legible fallback when even the file cannot be
+        written.
         """
         path = launch_diagnostic_path(bc_name)
         content = (
             f"cause: {cause_marker}\n"
             f"reason: {reason}\n"
         )
-        self._driver.write_launch_diagnostic(str(path), content)
+        try:
+            self._driver.write_launch_diagnostic(str(path), content)
+        except OSError as exc:
+            # NON-FATAL: the diagnostic write failed (e.g. the target dir is
+            # not writable — the lead-bnhn /var/lib/bc-launcher PermissionError
+            # crash).  Surface a host-discoverable WARNING and CONTINUE; never
+            # let the diagnostic-write failure abort the launch it describes.
+            err_lines.append(
+                f"warning: could not write launch diagnostic to {path}: "
+                f"{type(exc).__name__}: {exc}; continuing without the "
+                f"persisted diagnostic file (the launch failure cause is "
+                f"reported on stderr above)\n"
+            )
+            return None
+        err_lines.append(f"launch diagnostic persisted to {path}\n")
         return path
 
     def _start_agent_session(
@@ -1963,12 +2037,9 @@ class BcContainerController:
                     f"{SHOPMSG_DSN_ENV}={dsn} is not reachable; "
                     f"startup prompt NOT injected"
                 )
-                diag_path = self._write_launch_diagnostic(
-                    bc_name, CAUSE_MARKER_MESSAGING_DB, reason
-                )
                 err_lines.append(reason + "\n")
-                err_lines.append(
-                    f"launch diagnostic persisted to {diag_path}\n"
+                self._write_launch_diagnostic(
+                    bc_name, CAUSE_MARKER_MESSAGING_DB, reason, err_lines
                 )
                 return CommandResult(
                     exit_code=1,
@@ -2001,12 +2072,9 @@ class BcContainerController:
                     f"{probe_broker_address} is not reachable; "
                     f"startup prompt NOT injected"
                 )
-                diag_path = self._write_launch_diagnostic(
-                    bc_name, CAUSE_MARKER_AGENT_VAULT, reason
-                )
                 err_lines.append(reason + "\n")
-                err_lines.append(
-                    f"launch diagnostic persisted to {diag_path}\n"
+                self._write_launch_diagnostic(
+                    bc_name, CAUSE_MARKER_AGENT_VAULT, reason, err_lines
                 )
                 return CommandResult(
                     exit_code=1,
@@ -2124,12 +2192,9 @@ class BcContainerController:
                     f"readiness timeout (claude or its tmux session never "
                     f"started); startup prompt NOT injected"
                 )
-                diag_path = self._write_launch_diagnostic(
-                    bc_name, CAUSE_MARKER_AGENT_STARTUP, reason
-                )
                 err_lines.append("warning: " + reason + "\n")
-                err_lines.append(
-                    f"launch diagnostic persisted to {diag_path}\n"
+                self._write_launch_diagnostic(
+                    bc_name, CAUSE_MARKER_AGENT_STARTUP, reason, err_lines
                 )
                 return CommandResult(
                     exit_code=1,
@@ -2234,12 +2299,9 @@ class BcContainerController:
                         f"readiness barrier never reported both supporting "
                         f"servers ready); startup prompt NOT injected"
                     )
-                    diag_path = self._write_launch_diagnostic(
-                        bc_name, CAUSE_MARKER_READINESS, reason
-                    )
                     err_lines.append("warning: " + reason + "\n")
-                    err_lines.append(
-                        f"launch diagnostic persisted to {diag_path}\n"
+                    self._write_launch_diagnostic(
+                        bc_name, CAUSE_MARKER_READINESS, reason, err_lines
                     )
                     return CommandResult(
                         exit_code=1,

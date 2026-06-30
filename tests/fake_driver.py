@@ -205,6 +205,15 @@ class FakeDockerDriver:
         # scenarios pin.
         self.launch_diagnostic_writes: list[tuple[str, str]] = []
 
+        # lead-bnhn: when set, write_launch_diagnostic RAISES this OSError
+        # instead of writing — modelling a non-writable diagnostic target dir
+        # (the /var/lib/bc-launcher PermissionError crash).  The controller's
+        # best-effort wrap must CATCH this so the launch is NOT aborted.  The
+        # ATTEMPTED (host_path, content) is still recorded in
+        # ``launch_diagnostic_writes`` so the test can assert the controller
+        # tried to write to the documented path before the failure.
+        self._launch_diagnostic_write_error: OSError | None = None
+
         # lead-63em: when True, EVERY agent-vault broker probe reports
         # unreachable regardless of address.  Used by the agent-vault
         # launch-failure scenario so the test need not re-derive the
@@ -1007,9 +1016,32 @@ class FakeDockerDriver:
         """
         from pathlib import Path as _Path
         self.launch_diagnostic_writes.append((host_path, content))
+        # lead-bnhn: model a non-writable target dir — raise BEFORE any real
+        # write so the controller's best-effort wrap is exercised end-to-end.
+        if self._launch_diagnostic_write_error is not None:
+            raise self._launch_diagnostic_write_error
         p = _Path(host_path)
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(content, encoding="utf-8")
+
+    def fail_launch_diagnostic_write(
+        self, error: OSError | None = None
+    ) -> None:
+        """Force ``write_launch_diagnostic`` to RAISE (lead-bnhn).
+
+        Models a non-writable diagnostic target directory — e.g. the
+        root-owned ``/var/lib/bc-launcher`` PermissionError the fresh-adopter
+        operator E2E hit.  ``error`` defaults to a ``PermissionError`` whose
+        message mirrors the real ``[Errno 13] Permission denied`` so the
+        controller's host-discoverable warning carries a realistic cause.  The
+        controller's best-effort wrap MUST catch this so the launch is not
+        aborted; re-raising it (fatal) is the RED teeth for the non-fatal pin.
+        """
+        if error is None:
+            error = PermissionError(
+                13, "Permission denied"
+            )
+        self._launch_diagnostic_write_error = error
 
     # --- lead-cs7k: probe-execution-context model -------------------------
     # The readiness probes must run from INSIDE the launched container's
