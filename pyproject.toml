@@ -15,5 +15,14 @@ bc-container = "bc_launcher.cli:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+# Ship the self-contained fabro loop def bundle (lead-h2bj — S2 def-bundle
+# delivery, ADR-051) as package data so the 15 def-root asset files under
+# src/bc_launcher/assets/fabro-def/ (workflow.fabro, workflow.toml,
+# project.toml, vaults/default/secrets.json, nodes/*.md) travel with an
+# installed wheel and the launcher can place them into every launched
+# container.
+[tool.setuptools.package-data]
+bc_launcher = ["assets/fabro-def/*", "assets/fabro-def/**/*"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]

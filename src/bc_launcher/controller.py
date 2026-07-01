@@ -363,6 +363,110 @@ def _clone_ca_materialize_script(ca_path: str = AGENT_VAULT_CONTAINER_CA_PATH) -
     )
 
 # ---------------------------------------------------------------------------
+# Self-contained fabro loop def bundle (lead-h2bj — S2 def-bundle delivery)
+# ---------------------------------------------------------------------------
+#
+# The launcher ships the bc-shop Implementer->Reviewer loop fabro def (ADR-051)
+# as a set of packaged ASSET files under ``src/bc_launcher/assets/fabro-def/``
+# and PLACES them into every launched container so the container carries a
+# self-contained fabro def runnable FROM THE DEF ALONE — nothing is fetched at
+# run time.  The def-root layout (``workflow.fabro`` / ``workflow.toml`` /
+# ``project.toml`` / ``vaults/default/secrets.json`` / ``nodes/*.md``) is
+# reproduced verbatim inside the container at ``/workspace/.fabro/`` (the
+# project.toml comment pins that in a real ``.fabro/`` tree this file lives at
+# ``.fabro/project.toml``).
+#
+# NATIVE-VAULT INVARIANT (ADR-049): the def's fabro vault
+# (``vaults/default/secrets.json``) ships ``__PLACEHOLDER__``-only; real
+# credentials ride the agent-vault surface (the shim + HTTPS_PROXY baked in
+# S1), NEVER the fabro vault.  The asset file is placed verbatim, so no real
+# secret is introduced by placement.
+#
+# Placement mechanism: the DockerDriver exposes only ``exec_run`` (docker exec)
+# — there is no ``docker cp`` seam — so the bundle is placed by a single
+# ``/bin/sh -c`` script that base64-decodes each file's bytes into its
+# def-root-relative path.  base64 keeps the file bytes EXACTLY intact through
+# the shell (no quoting/escaping/newline hazards regardless of file content),
+# so the placed def is byte-identical to the shipped asset.
+FABRO_DEF_CONTAINER_DIR = f"{CONTAINER_WORKSPACE}/.fabro"
+FABRO_DEF_ASSET_SUBDIR = "assets/fabro-def"
+# The 15 def-root-relative paths the bundle ships (acceptance criterion 0).
+# Enumerated explicitly so a dropped/renamed asset is a loud failure, not a
+# silently-thinner bundle.
+FABRO_DEF_FILES: tuple[str, ...] = (
+    "workflow.fabro",
+    "workflow.toml",
+    "project.toml",
+    "vaults/default/secrets.json",
+    "nodes/bc-implementer.md",
+    "nodes/bc-review.md",
+    "nodes/bc-reviewer.md",
+    "nodes/bc-router.md",
+    "nodes/bc-sufficiency-check.md",
+    "nodes/integrating-to-main.md",
+    "nodes/subagent-driven-development.md",
+    "nodes/test-driven-development.md",
+    "nodes/using-git-worktrees.md",
+    "nodes/work-done-gate.md",
+    "nodes/writing-plans-bdd.md",
+)
+
+
+def _fabro_def_asset_root() -> Path:
+    """Absolute path to the packaged fabro-def asset directory.
+
+    Resolves relative to THIS module so the bundle is found whether the
+    launcher runs from a source checkout or an installed wheel (the assets are
+    packaged as package data under ``bc_launcher/assets/``).
+    """
+    return Path(__file__).resolve().parent / FABRO_DEF_ASSET_SUBDIR
+
+
+def _load_fabro_def_files() -> dict[str, bytes]:
+    """Read the 15 packaged def-bundle asset files as raw bytes.
+
+    Returns a mapping of def-root-relative path -> file bytes.  Raises
+    ``FileNotFoundError`` if any enumerated asset is missing, so a broken
+    package surfaces loudly rather than placing a thinner bundle.
+    """
+    root = _fabro_def_asset_root()
+    out: dict[str, bytes] = {}
+    for rel in FABRO_DEF_FILES:
+        src = root / rel
+        out[rel] = src.read_bytes()
+    return out
+
+
+def _fabro_def_install_script(
+    files: dict[str, bytes],
+    dest_dir: str = FABRO_DEF_CONTAINER_DIR,
+) -> str:
+    """Build a ``/bin/sh -c`` script that places the def bundle into a container.
+
+    lead-h2bj.  Each file's bytes are base64-encoded on the HOST and decoded on
+    the CONTAINER into ``<dest_dir>/<relpath>``, so the placed def is
+    byte-identical to the shipped asset regardless of file content (no shell
+    quoting/escaping/newline hazards).  The script creates each file's parent
+    directory first so the ``nodes/`` and ``vaults/default/`` subtrees are
+    reproduced exactly.
+    """
+    import base64
+    import shlex
+
+    lines = ["set -e", f"mkdir -p {shlex.quote(dest_dir)}"]
+    for rel in FABRO_DEF_FILES:
+        data = files[rel]
+        b64 = base64.b64encode(data).decode("ascii")
+        target = f"{dest_dir}/{rel}"
+        parent = os.path.dirname(target)
+        q_target = shlex.quote(target)
+        q_parent = shlex.quote(parent)
+        lines.append(f"mkdir -p {q_parent}")
+        # base64 -d is POSIX-portable on the bc-base image (coreutils).
+        lines.append(f"printf %s {shlex.quote(b64)} | base64 -d > {q_target}")
+    return "\n".join(lines) + "\n"
+
+# ---------------------------------------------------------------------------
 # Operator-supplied agent-vault credential + TLS-trust injection
 # (bclaunch-5hi / bclaunch-7pf)
 # ---------------------------------------------------------------------------
@@ -1858,6 +1962,55 @@ class BcContainerController:
                     f"Refreshed shop-templates skill-group "
                     f"(shop-type={shop_type}) into "
                     f"{CONTAINER_WORKSPACE}/.claude/skills/\n"
+                )
+
+            # Self-contained fabro loop def bundle placement (lead-h2bj —
+            # S2 def-bundle delivery, ADR-051).
+            #
+            # PLACE the 15 packaged def-bundle asset files into the launched
+            # container at FABRO_DEF_CONTAINER_DIR (/workspace/.fabro/) so the
+            # container carries the bc-shop Implementer->Reviewer loop fabro def
+            # runnable FROM THE DEF ALONE — nothing is fetched at run time.  The
+            # def is placed via a single exec_run running a base64-decode script
+            # (the driver exposes no `docker cp` seam), so each file lands
+            # byte-identical to the shipped asset regardless of content.
+            #
+            # NATIVE-VAULT INVARIANT (ADR-049): the placed
+            # vaults/default/secrets.json is the packaged `__PLACEHOLDER__`-only
+            # asset — real credentials ride the agent-vault surface, NEVER the
+            # fabro vault; placement introduces no real secret.
+            #
+            # ADDITIVE: this is purely a new provisioning write under
+            # /workspace; the tmux launch default, the shop-msg mailbox
+            # (ADR-050), and every prior provisioning step are unchanged, and
+            # nothing is retired.  Runs BEFORE the FINAL ownership assertion so
+            # the final chown also hands the freshly-placed .fabro/ tree to the
+            # vscode agent.  Run as vscode so the def is agent-owned.
+            def_files = _load_fabro_def_files()
+            def_place_result = self._driver.exec_run(
+                container,
+                ["/bin/sh", "-c", _fabro_def_install_script(def_files)],
+                user=AGENT_CONTAINER_USER,
+            )
+            if def_place_result.returncode != 0:
+                # A failed def placement is a boot convenience failure, NOT a
+                # precondition for the agent to run (mirrors the lead-k4k7 /
+                # lead-5k8c warn-and-continue disposition for the bd-bootstrap
+                # and skill-refresh provisioning steps): warn and PROCEED to
+                # agent-start rather than stranding a healthy cloned container
+                # with no agent.
+                err_lines.append(
+                    "warning: fabro loop def-bundle placement failed (exit "
+                    f"{def_place_result.returncode}): "
+                    f"{(def_place_result.stderr or def_place_result.stdout).strip()}"
+                    f"; the container may lack {FABRO_DEF_CONTAINER_DIR} but the "
+                    "agent will still be started (lead-h2bj)\n"
+                )
+            else:
+                out_lines.append(
+                    f"Placed the self-contained fabro loop def bundle "
+                    f"({len(FABRO_DEF_FILES)} files) into "
+                    f"{FABRO_DEF_CONTAINER_DIR} (lead-h2bj, ADR-051)\n"
                 )
 
             # FINAL ownership assertion (lead-mf15, scenario
