@@ -7,6 +7,7 @@ and FakeGitDriver.
 """
 from __future__ import annotations
 
+import platform
 import re
 import subprocess
 import sys
@@ -12665,4 +12666,443 @@ def then_fabro_bare_rebuild_not_satisfy(pin, ctx):
     assert f"fabro|{_FABRO_CANONICAL_REPO}" in stripped, (
         "The fabro DEPS entry is absent from the executable body, so the bump "
         "branch is never reached and a bare rebuild would leave the pin stale."
+    )
+
+
+# ===========================================================================
+# lead-ky63 — companion block-only PIN (@scenario_hash:2dfefe2ba81e418d) for
+# the self-contained fabro loop def bundle delivered by lead-h2bj under
+# src/bc_launcher/assets/fabro-def/.
+#
+# This scenario pins the def's VALIDITY as an ADR-051 Implementer->Reviewer
+# loop: `fabro validate` accepts it (LEG 1), its graph satisfies the ADR-051
+# structural invariants (LEG 2), and its native fabro vault holds only
+# placeholders (LEG 3).  All three legs bind to the REAL committed def bundle
+# (NOT a model) per the fabro-asset fidelity lesson: run the real tool, do not
+# reimplement.
+# ===========================================================================
+import hashlib as _ky63_hashlib
+import json as _ky63_json
+import os as _ky63_os
+import shutil as _ky63_shutil
+import tarfile as _ky63_tarfile
+import urllib.request as _ky63_urlreq
+
+from bc_launcher.controller import (  # noqa: E402
+    _fabro_def_asset_root as _ky63_def_asset_root,
+    _load_fabro_def_files as _ky63_load_def_files,
+)
+
+# fabro is a Rust binary from fabro-sh/fabro; pinned to the version the def
+# targets (workflow.fabro header + bc-base bake).  The CORRECT release asset
+# (bead 0fz) is the versionless target-triple tarball fabro-<triple>.tar.gz.
+_KY63_FABRO_VERSION = "v0.254.0"
+_KY63_FABRO_TRIPLES = {
+    "x86_64": "x86_64-unknown-linux-gnu",
+    "aarch64": "aarch64-unknown-linux-gnu",
+    "arm64": "aarch64-unknown-linux-gnu",
+}
+
+
+def _ky63_cache_dir() -> Path:
+    base = _ky63_os.environ.get("FABRO_CACHE_DIR") or "/tmp/fabro-cache"
+    d = Path(base)
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _ky63_locate_or_fetch_fabro() -> tuple[str | None, str]:
+    """Return (path_to_fabro_binary, note).  Prefer an on-PATH / cached fabro;
+    otherwise DOWNLOAD the correct target-triple release asset (network via
+    HTTPS_PROXY).  Returns (None, reason) ONLY if the binary genuinely cannot
+    be obtained (no network) — the caller then SKIPs honestly."""
+    on_path = _ky63_shutil.which("fabro")
+    if on_path:
+        return on_path, f"fabro resolved on PATH at {on_path}"
+
+    cache = _ky63_cache_dir()
+    cached = cache / "fabro"
+    if cached.is_file() and _ky63_os.access(cached, _ky63_os.X_OK):
+        return str(cached), f"fabro resolved from cache at {cached}"
+
+    machine = platform.machine().lower()
+    triple = _KY63_FABRO_TRIPLES.get(machine)
+    if triple is None:
+        return None, f"no known fabro target-triple for arch {machine!r}"
+
+    asset = f"fabro-{triple}.tar.gz"
+    url = (
+        f"https://github.com/fabro-sh/fabro/releases/download/"
+        f"{_KY63_FABRO_VERSION}/{asset}"
+    )
+    tarball = cache / asset
+    try:
+        proxy = (
+            _ky63_os.environ.get("HTTPS_PROXY")
+            or _ky63_os.environ.get("https_proxy")
+        )
+        if proxy:
+            opener = _ky63_urlreq.build_opener(
+                _ky63_urlreq.ProxyHandler({"https": proxy, "http": proxy})
+            )
+        else:
+            opener = _ky63_urlreq.build_opener()
+        with opener.open(url, timeout=120) as resp, tarball.open("wb") as fh:
+            _ky63_shutil.copyfileobj(resp, fh)
+        with _ky63_tarfile.open(tarball, "r:gz") as tf:
+            # --strip-components=1 equivalent: pull the 'fabro' member to cache root
+            member = None
+            for m in tf.getmembers():
+                if m.isfile() and Path(m.name).name == "fabro":
+                    member = m
+                    break
+            if member is None:
+                return None, f"fabro binary not found inside {asset}"
+            member.name = "fabro"
+            tf.extract(member, path=cache)
+        cached.chmod(0o755)
+        return str(cached), f"fabro downloaded from {url}"
+    except Exception as exc:  # pragma: no cover - network-dependent
+        return None, f"fabro binary could not be obtained (no network?): {exc!r}"
+
+
+def _ky63_materialize_def(dest: Path) -> Path:
+    """Lay out the committed def bundle bytes under ``dest`` exactly as the
+    launcher would place them at /workspace/.fabro/ (runnable FROM THE DEF
+    ALONE), and return the workflow.fabro path.  Binds to the REAL committed
+    asset bytes via the launcher's own loader."""
+    files = _ky63_load_def_files()
+    for rel, data in files.items():
+        p = dest / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(data)
+    return dest / "workflow.fabro"
+
+
+# ---- LEG 2 graph parsing (quote-aware, comment-stripped) -------------------
+_KY63_REAL_NODES = {
+    "start", "done", "reported", "halt", "prime", "health", "arm", "armed",
+    "classify", "suff", "worktree", "plan", "impl", "redgate", "integ",
+    "review", "wdg_r", "emit_r", "impl_f", "wdg_f", "emit_f", "emit_clar",
+    "emit_blk",
+}
+_KY63_FAILSAFE_SINKS = {"halt", "emit_blk"}
+_KY63_TERMINALS = {"start", "done", "reported", "halt"}
+
+
+def _ky63_strip_line_comments(s: str) -> str:
+    """Strip // line-comments, quote-aware (a // inside a "..." string, e.g. a
+    URL, is NOT a comment)."""
+    out = []
+    for line in s.splitlines():
+        res = []
+        i = 0
+        inq = False
+        while i < len(line):
+            c = line[i]
+            if c == '"':
+                inq = not inq
+                res.append(c)
+                i += 1
+                continue
+            if not inq and c == "/" and i + 1 < len(line) and line[i + 1] == "/":
+                break
+            res.append(c)
+            i += 1
+        out.append("".join(res))
+    return "\n".join(out)
+
+
+def _ky63_parse_nodes(graph: str) -> dict[str, str]:
+    """Return {node_name: attr_body} for each ``name [ ... ]`` definition,
+    scanning the matching ] quote-aware so a shell ``[ -z ... ]`` / ``[0-9]``
+    inside a script= string does not close the node early.  Excludes the
+    reserved ``graph [ ... ]`` attribute statement."""
+    nodes: dict[str, str] = {}
+    for m in re.finditer(r"(?m)^\s*([A-Za-z_]\w*)\s*\[", graph):
+        name = m.group(1)
+        if name == "graph":
+            continue
+        i = m.end() - 1
+        depth = 0
+        inq = False
+        j = i
+        while j < len(graph):
+            c = graph[j]
+            if inq:
+                if c == "\\":
+                    j += 2
+                    continue
+                if c == '"':
+                    inq = False
+            else:
+                if c == '"':
+                    inq = True
+                elif c == "[":
+                    depth += 1
+                elif c == "]":
+                    depth -= 1
+                    if depth == 0:
+                        nodes.setdefault(name, graph[i + 1:j])
+                        break
+            j += 1
+    return nodes
+
+
+def _ky63_parse_edges(graph: str) -> list[tuple[str, str, str]]:
+    """Return [(src, dst, attr_block)] for each real-node edge.  Comments are
+    stripped; edge attribute strings (e.g. condition="outcome=failed") are
+    preserved.  Prose arrows inside node bodies are excluded by filtering to
+    known real-node endpoints."""
+    lc = _ky63_strip_line_comments(graph)
+    inner = lc[lc.index("{") + 1:lc.rindex("}")]
+    edges: list[tuple[str, str, str]] = []
+    for m in re.finditer(r"\b([A-Za-z_]\w*)\s*->\s*([A-Za-z_]\w*)", inner):
+        src, dst = m.group(1), m.group(2)
+        k = m.end()
+        while k < len(inner) and inner[k] in " \t\n":
+            k += 1
+        attr = ""
+        if k < len(inner) and inner[k] == "[":
+            depth = 0
+            inq = False
+            j = k
+            while j < len(inner):
+                c = inner[j]
+                if inq:
+                    if c == "\\":
+                        j += 2
+                        continue
+                    if c == '"':
+                        inq = False
+                else:
+                    if c == '"':
+                        inq = True
+                    elif c == "[":
+                        depth += 1
+                    elif c == "]":
+                        depth -= 1
+                        if depth == 0:
+                            attr = inner[k:j + 1]
+                            break
+                j += 1
+        if src in _KY63_REAL_NODES and dst in _KY63_REAL_NODES:
+            edges.append((src, dst, attr))
+    return edges
+
+
+def _ky63_success_reach(edges, start_node):
+    """Nodes reachable from ``start_node`` following ONLY non-failsafe
+    (success-advance) edges."""
+    succ: dict[str, list[str]] = {}
+    for s, d, a in edges:
+        if "outcome=failed" in a:
+            continue
+        succ.setdefault(s, []).append(d)
+    seen: set[str] = set()
+    stack = [start_node]
+    while stack:
+        x = stack.pop()
+        if x in seen:
+            continue
+        seen.add(x)
+        for d in succ.get(x, []):
+            stack.append(d)
+    return seen
+
+
+def _ky63_complete_emitters(nodes: dict[str, str]) -> list[str]:
+    """Node names whose body emits a GATED work_done(complete) via bc-emit."""
+    return [
+        n for n, b in nodes.items()
+        if "bc-emit" in b and "work-done" in b and "--status complete" in b
+    ]
+
+
+# ---- When: run the REAL fabro validate against the committed def -----------
+
+@when(parsers.parse(
+    '"fabro validate" is executed against the fabro def present in that '
+    'running container'))
+def when_fabro_validate_executed(ctx, tmp_path):
+    """LEG 1 (highest fidelity): run the REAL fabro binary `validate` against
+    the committed def's workflow.fabro, materialized exactly as it would be
+    placed at /workspace/.fabro/.  Prefer to actually run it; SKIP only if the
+    binary genuinely cannot be obtained (no network)."""
+    fabro, note = _ky63_locate_or_fetch_fabro()
+    ctx["fabro_note"] = note
+    def_root = tmp_path / "container_fabro_def"
+    workflow = _ky63_materialize_def(def_root)
+    ctx["fabro_def_root"] = def_root
+    if fabro is None:
+        ctx["fabro_validate"] = None
+        return
+    proc = subprocess.run(
+        [fabro, "validate", "--no-upgrade-check", "--json", str(workflow)],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    ctx["fabro_validate"] = proc
+
+
+@then("it exits zero and reports zero diagnostics")
+def then_fabro_validate_zero(ctx):
+    """LEG 1 assertion: real `fabro validate` exits 0 with an EMPTY
+    diagnostics array.  If the binary could not be obtained, SKIP honestly —
+    but a real non-zero / non-empty-diagnostics result is a REAL def defect
+    and FAILS (never papered over)."""
+    proc = ctx.get("fabro_validate")
+    if proc is None:
+        pytest.skip(
+            "fabro binary could not be obtained; LEG 1 (real `fabro validate`) "
+            f"deferred honestly. reason: {ctx.get('fabro_note')!r}"
+        )
+    assert proc.returncode == 0, (
+        "REAL `fabro validate` exited "
+        f"{proc.returncode} against the committed def "
+        f"({ctx.get('fabro_note')}). This is a REAL def defect in the "
+        f"lead-h2bj bundle.\nstdout={proc.stdout!r}\nstderr={proc.stderr!r}"
+    )
+    doc = _ky63_json.loads(proc.stdout)
+    assert doc.get("valid") is True, (
+        f"`fabro validate --json` reported valid={doc.get('valid')!r}; the "
+        f"committed def must validate. full={doc!r}"
+    )
+    diags = doc.get("diagnostics")
+    assert diags == [], (
+        f"`fabro validate` reported {len(diags or [])} diagnostic(s); the "
+        f"scenario pins ZERO diagnostics. diagnostics={diags!r}"
+    )
+
+
+# ---- Then: ADR-051 graph invariants (LEG 2), bound to the REAL graph -------
+
+@then(parsers.parse(
+    "the def is a self-contained bc-shop Implementer->Reviewer loop graph per "
+    "ADR-051: the graph file is present, every node body the graph references "
+    "is present in the def alongside it so the loop is runnable from the def "
+    "alone, the Reviewer node is the sole node that can emit a gated work_done "
+    "on the success path, and every fallible node carries an explicit "
+    "unconditional failsafe edge to a halt or blocked-emit sink so a failed "
+    "node never advances to the SUCCEEDED terminal"))
+def then_adr051_graph_invariants(ctx):
+    root = _ky63_def_asset_root()
+    graph_path = root / "workflow.fabro"
+
+    # (a) the graph file is present.
+    assert graph_path.is_file(), (
+        f"ADR-051 graph file absent: {graph_path}"
+    )
+    graph = graph_path.read_text()
+    nodes = _ky63_parse_nodes(graph)
+    edges = _ky63_parse_edges(graph)
+    assert nodes, "no nodes parsed from workflow.fabro"
+    assert edges, "no edges parsed from workflow.fabro"
+
+    # (b) every node body the graph references (prompt_file=) is present in the
+    #     def alongside it — runnable FROM THE DEF ALONE, nothing fetched.
+    refs = sorted(set(re.findall(r'prompt_file="([^"]+)"', graph)))
+    assert refs, "expected at least one prompt_file= node-body reference"
+    for ref in refs:
+        assert (root / ref).is_file(), (
+            f"workflow.fabro references node body {ref!r} but it is ABSENT "
+            f"from the def — the loop is NOT runnable from the def alone."
+        )
+
+    # (c) the Reviewer node is the SOLE node that can emit a gated work_done on
+    #     the SUCCESS PATH.  The scenario success path begins at 'suff'
+    #     (classify -[scenario]-> suff -> ... -> review -[signoff]-> wdg_r ->
+    #     emit_r).  emit_r is the reviewer emitter; emit_f (implementer) lives
+    #     ONLY on the flat maintenance path, unreachable from the scenario
+    #     path.  TEETH: a second scenario-path complete-emitter makes this RED.
+    emitters = _ky63_complete_emitters(nodes)
+    assert emitters, (
+        "no gated work_done(complete) emitter found in the graph; the loop "
+        "cannot emit a signed-off work_done"
+    )
+    scenario_reach = _ky63_success_reach(edges, "suff")
+    scenario_emitters = [e for e in emitters if e in scenario_reach]
+    assert scenario_emitters == ["emit_r"], (
+        "On the scenario success path the Reviewer node ('emit_r', reached "
+        "only via review->signoff->wdg_r) must be the SOLE gated "
+        "work_done(complete) emitter. "
+        f"Found scenario-path emitters: {scenario_emitters!r} "
+        f"(all complete-emitters: {emitters!r})."
+    )
+    # emit_r must be reached via the reviewer signoff, i.e. review is on the
+    # path to it and it is NOT reachable on the flat path.
+    flat_reach = _ky63_success_reach(edges, "impl_f")
+    assert "emit_r" not in flat_reach, (
+        "the reviewer emitter emit_r must NOT be reachable on the flat "
+        "(implementer/maintenance) success path"
+    )
+    assert "review" in scenario_reach, (
+        "the review (Reviewer) node must sit on the scenario success path "
+        "ahead of the sole emitter"
+    )
+
+    # (d) every FALLIBLE non-terminal node carries an UNCONDITIONAL failsafe
+    #     edge (condition=outcome=failed) to a halt or blocked-emit sink, so a
+    #     FAILED node never advances to the SUCCEEDED terminal.  Documented
+    #     exception: 'armed' routes failed->done as the legitimate idle-empty
+    #     SUCCEEDED (empty inbox), not a defect.  TEETH: drop any node's
+    #     failsafe edge and this REDs.
+    out: dict[str, list[tuple[str, str]]] = {}
+    for s, d, a in edges:
+        out.setdefault(s, []).append((d, a))
+    missing_failsafe = []
+    for n in nodes:
+        if n in _KY63_TERMINALS:
+            continue
+        oe = out.get(n, [])
+        failsafe = [
+            (d, a) for d, a in oe
+            if "outcome=failed" in a and d in _KY63_FAILSAFE_SINKS
+        ]
+        if failsafe:
+            continue
+        failed_edges = [(d, a) for d, a in oe if "outcome=failed" in a]
+        if n == "armed" and any(d == "done" for d, a in failed_edges):
+            # documented idle-empty SUCCEEDED; not a defect
+            continue
+        missing_failsafe.append(n)
+    assert not missing_failsafe, (
+        "ADR-051 HARD RULE violated: these fallible non-terminal node(s) lack "
+        "an unconditional failsafe edge (condition=outcome=failed) to a "
+        f"halt/emit_blk sink, so a FAILED node could advance to SUCCEEDED: "
+        f"{missing_failsafe!r}"
+    )
+
+
+# ---- Then: native vault placeholder-only (LEG 3) ---------------------------
+
+@then(parsers.parse(
+    'the def\'s native fabro vault holds only the value "{placeholder}" for '
+    "each of its provider-key and token slots, with no real credential "
+    "present in the def (ADR-049), so that any real credential the loop uses "
+    "is sourced from the agent-vault surface baked in S1 and never from the "
+    "fabro vault"))
+def then_vault_placeholder_only(placeholder):
+    root = _ky63_def_asset_root()
+    vault_path = root / "vaults/default/secrets.json"
+    assert vault_path.is_file(), f"native fabro vault absent: {vault_path}"
+    text = vault_path.read_text()
+    doc = _ky63_json.loads(text)  # raises on invalid JSON => RED
+    assert doc, "vault must declare at least one provider-key/token slot"
+    for slot, entry in doc.items():
+        assert entry.get("value") == placeholder, (
+            f"vault slot {slot!r} must hold {placeholder!r} (ADR-049); a real "
+            f"credential in the fabro vault is forbidden. got "
+            f"{entry.get('value')!r}"
+        )
+    # TEETH: no provider-token-shaped literal anywhere in the vault bytes.
+    suspicious = re.findall(
+        r"(sk-[A-Za-z0-9_-]{12,}|ghp_[A-Za-z0-9]{12,}|"
+        r"github_pat_[A-Za-z0-9_]{12,})",
+        text,
+    )
+    assert not suspicious, (
+        f"real-credential-shaped literal found in the fabro vault: "
+        f"{suspicious!r} (ADR-049 forbids real creds in the fabro vault)"
     )
