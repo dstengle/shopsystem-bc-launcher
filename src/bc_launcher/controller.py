@@ -290,6 +290,31 @@ AGENT_VAULT_MITM_PROXY_PORT = 14322
 AGENT_VAULT_CONTAINER_CA_PATH = "/home/vscode/.config/agent-vault/ca.pem"
 GIT_SSL_CAINFO_ENV = "GIT_SSL_CAINFO"
 
+# lead-ze4w BUG#3: the fabro shim + `fabro engage` are started via NON-LOGIN
+# `/bin/sh -c`, so they never source the login profile
+# /etc/profile.d/agent-vault-ca.sh that exports SSL_CERT_FILE -> SSL_CERT_FILE
+# is EMPTY -> the shim's urllib does not trust the agent-vault MITM CA ->
+# upstream HTTPS via HTTPS_PROXY fails CERTIFICATE_VERIFY_FAILED (502).  EXACT
+# parallel to the clone-path GIT_SSL_CAINFO export (DEFECT 2 above): the
+# controller sets SSL_CERT_FILE explicitly on the shim + engage exec env,
+# pointing python/urllib at the SAME materialized broker CA path the clone
+# path trusts, so upstream TLS verifies without a login shell.
+SSL_CERT_FILE_ENV = "SSL_CERT_FILE"
+
+
+def _fabro_exec_env() -> dict[str, str]:
+    """The extra exec env the launcher pins on the fabro shim + engage execs.
+
+    lead-ze4w BUG#3: these execs run in a non-login `/bin/sh -c` that never
+    sources /etc/profile.d/agent-vault-ca.sh, so SSL_CERT_FILE (the python /
+    urllib CA-trust var) is empty and the shim's upstream HTTPS through
+    HTTPS_PROXY fails CERTIFICATE_VERIFY_FAILED.  Set SSL_CERT_FILE explicitly
+    to the SAME materialized broker CA path the clone path points git at via
+    GIT_SSL_CAINFO, so the shim + engage trust the agent-vault MITM CA without
+    a login shell.
+    """
+    return {SSL_CERT_FILE_ENV: AGENT_VAULT_CONTAINER_CA_PATH}
+
 # ---------------------------------------------------------------------------
 # Clone-prep CA materialization — write-path == trust-path (lead-z0v2)
 # ---------------------------------------------------------------------------
@@ -514,6 +539,25 @@ FABRO_SHIM_PORT = 8788
 # def root alongside workflow.fabro / project.toml).
 FABRO_SETTINGS_CONTAINER_PATH = f"{FABRO_DEF_CONTAINER_DIR}/settings.toml"
 
+# The placed def's workflow.toml (run/environment config for workflow.fabro).
+# lead-ze4w BUG#2: the packaged asset carries byte-verbatim
+# BC_NAME=fabro-throwaway / WORK_ID=fabro-spike-demo-3 in BOTH [run.inputs]
+# (agent prompts) AND [run.environment.env] (the native script= sandbox
+# overlay).  The native script= nodes (arm/armed/worktree/integ/wdg_r/emit_r)
+# read $BC_NAME / $WORK_ID from the [run.environment.env] overlay, and `fabro
+# run -I` overrides ONLY [run.inputs] (agent prompts), NOT the native command
+# sandbox env — so the placed workflow.toml's overlay must be REWRITTEN to the
+# launch's ACTUAL bc_name / work_id, or every native node runs against the
+# bundle-default identity.  The launcher rewrites the placed workflow.toml the
+# SAME way it (re)writes settings.toml: it generates the corrected file bytes
+# on the host and base64-decode-writes them over the placed path.
+FABRO_WORKFLOW_TOML_CONTAINER_PATH = f"{FABRO_DEF_CONTAINER_DIR}/workflow.toml"
+# The bundle-default identity values the packaged workflow.toml ships (the
+# values the rewrite must REPLACE).  Named so a test can assert the placed
+# file no longer carries them.
+FABRO_WORKFLOW_TOML_DEFAULT_BC_NAME = "fabro-throwaway"
+FABRO_WORKFLOW_TOML_DEFAULT_WORK_ID = "fabro-spike-demo-3"
+
 # The [llm.providers.anthropic] surface the launcher writes into fabro's
 # effective settings on the fabro path.  base_url points the built-in
 # anthropic provider at the local shim; adapter stays "anthropic" (native
@@ -547,6 +591,32 @@ FABRO_BIN = "fabro"
 FABRO_WORKFLOW_FILE = "workflow.fabro"
 
 
+# lead-ze4w BUG#4: `fabro server start` reads a SERVER-level config at
+# ~/.fabro/settings.toml.  The launcher previously wrote ONLY the workflow-level
+# /workspace/.fabro/settings.toml, never the server-level file, so the server
+# aborted `server.auth.methods: field is required` and `fabro run` could not
+# reach it.  Before starting the server, `_fabro_engage` bootstraps the
+# ephemeral server config:
+#   1. `fabro install --non-interactive --skip-llm --overwrite-settings`
+#      writes a valid server-level ~/.fabro/settings.toml (auth.methods etc.).
+#   2. register the built-in anthropic provider pointed at the shim base_url
+#      (http://127.0.0.1:8788/v1) with a DUMMY ANTHROPIC_API_KEY in the server
+#      env — the real credential rides agent-vault on the wire (ADR-049 D1),
+#      NEVER this config, so the key is a fixed placeholder literal.
+FABRO_SERVER_INSTALL_ARGV: tuple[str, ...] = (
+    FABRO_BIN,
+    "install",
+    "--non-interactive",
+    "--skip-llm",
+    "--overwrite-settings",
+)
+# The dummy ANTHROPIC_API_KEY placed in the ephemeral server env so the
+# registered anthropic provider is well-formed.  ADR-049 D1: NO real
+# credential — the real cred rides agent-vault on the wire.  This is the only
+# credential-shaped literal on this path and is deliberately a placeholder.
+FABRO_SERVER_DUMMY_ANTHROPIC_KEY = "sk-ant-dummy-agent-vault-rides-the-wire"
+
+
 def _fabro_server_start_argv() -> list[str]:
     """The argv the launcher uses to START the ephemeral in-container fabro
     server on the fabro engage path (lead-cadr).
@@ -556,6 +626,18 @@ def _fabro_server_start_argv() -> list[str]:
     list so the test can assert the launcher issues exactly this argv.
     """
     return [FABRO_BIN, "server", "start", "--foreground", "--no-web"]
+
+
+def _fabro_server_install_argv() -> list[str]:
+    """The argv the launcher uses to BOOTSTRAP the ephemeral server config
+    before `fabro server start` (lead-ze4w BUG#4).
+
+    `fabro install --non-interactive --skip-llm --overwrite-settings` writes a
+    valid server-level ~/.fabro/settings.toml (carrying the required
+    server.auth.methods surface), so `fabro server start` does not abort
+    `server.auth.methods: field is required`.
+    """
+    return list(FABRO_SERVER_INSTALL_ARGV)
 
 
 def _fabro_run_argv(bc_name: str, work_id: str) -> list[str]:
@@ -581,16 +663,29 @@ def _fabro_run_argv(bc_name: str, work_id: str) -> list[str]:
 
 def _fabro_engage_script(bc_name: str, work_id: str) -> str:
     """Build the ``/bin/sh -c`` script that drives the fabro ENGAGE step in the
-    placed def dir (lead-cadr).
+    placed def dir (lead-cadr + lead-ze4w BUG#4).
 
-    Starts the ephemeral fabro server in the FOREGROUND with no web UI, then
-    runs the loop def against it.  The server's foreground serve loop blocks,
-    so it is backgrounded so the ``fabro run`` engage can attach to it; both
-    execs run FROM the placed def dir so ``workflow.fabro`` resolves and the
-    server picks up the effective settings the launcher wrote alongside it.
+    lead-ze4w BUG#4: BEFORE `fabro server start`, bootstrap the SERVER-level
+    fabro config so the server does not abort
+    ``server.auth.methods: field is required``:
+      1. `fabro install --non-interactive --skip-llm --overwrite-settings`
+         writes a valid server-level ~/.fabro/settings.toml.
+      2. register the anthropic provider pointed at the shim base_url
+         (http://127.0.0.1:8788/v1) with a DUMMY ANTHROPIC_API_KEY in the
+         server env (ADR-049 D1: no real credential — the real cred rides
+         agent-vault on the wire).
+
+    Then start the ephemeral fabro server in the FOREGROUND with no web UI and
+    run the loop def against it.  The server's foreground serve loop blocks, so
+    it is backgrounded so the ``fabro run`` engage can attach to it; both execs
+    run FROM the placed def dir so ``workflow.fabro`` resolves and the server
+    picks up the effective settings the launcher wrote alongside it.
     """
     import shlex
 
+    install_argv = " ".join(
+        shlex.quote(tok) for tok in _fabro_server_install_argv()
+    )
     server_argv = " ".join(
         shlex.quote(tok) for tok in _fabro_server_start_argv()
     )
@@ -599,10 +694,21 @@ def _fabro_engage_script(bc_name: str, work_id: str) -> str:
     )
     def_dir = shlex.quote(FABRO_DEF_CONTAINER_DIR)
     server_log = shlex.quote(f"{FABRO_DEF_CONTAINER_DIR}/fabro-server.log")
+    base_url = shlex.quote(FABRO_ANTHROPIC_BASE_URL)
+    dummy_key = shlex.quote(FABRO_SERVER_DUMMY_ANTHROPIC_KEY)
+    # (BUG#4) Bootstrap the server-level config BEFORE start/run:
+    #   * `fabro install ...` writes a valid ~/.fabro/settings.toml (auth
+    #     methods etc.) so `fabro server start` does not abort;
+    #   * register the built-in anthropic provider at the shim base_url with a
+    #     DUMMY key exported in the server env (ADR-049 D1 — no real cred).
     # cd into the def dir so workflow.fabro + settings.toml resolve; the
     # foreground server is backgrounded so the run can engage against it.
     return (
         f"cd {def_dir} && "
+        f"{install_argv} && "
+        f'export {SSL_CERT_FILE_ENV}={shlex.quote(AGENT_VAULT_CONTAINER_CA_PATH)} && '
+        f"export ANTHROPIC_API_KEY={dummy_key} && "
+        f"export ANTHROPIC_BASE_URL={base_url} && "
         f"nohup {server_argv} >{server_log} 2>&1 &\n"
         f"{run_argv}\n"
     )
@@ -640,7 +746,17 @@ def _fabro_shim_start_script() -> str:
     # its own stderr log line ("[shim] listening on ...") goes to a logfile
     # under the def dir so a launch never blocks on the serving loop.
     log = shlex.quote(f"{FABRO_DEF_CONTAINER_DIR}/anthropic-oauth-shim.log")
-    return f"nohup {argv} >{log} 2>&1 &\n"
+    # lead-ze4w BUG#3: the shim runs in a NON-LOGIN /bin/sh, so it never
+    # sources /etc/profile.d/agent-vault-ca.sh -> SSL_CERT_FILE is empty and
+    # the shim's urllib does not trust the agent-vault MITM CA (upstream HTTPS
+    # via HTTPS_PROXY fails CERTIFICATE_VERIFY_FAILED).  Export SSL_CERT_FILE
+    # explicitly to the materialized broker CA path (parallel to the clone
+    # path's GIT_SSL_CAINFO export) so the shim trusts the MITM CA.
+    ssl_export = (
+        f"export {SSL_CERT_FILE_ENV}="
+        f"{shlex.quote(AGENT_VAULT_CONTAINER_CA_PATH)}"
+    )
+    return f"{ssl_export}\nnohup {argv} >{log} 2>&1 &\n"
 
 
 def _fabro_settings_toml() -> str:
@@ -693,6 +809,75 @@ def _fabro_settings_install_script(
 
     data = _fabro_settings_toml().encode("utf-8")
     b64 = base64.b64encode(data).decode("ascii")
+    q_target = shlex.quote(dest_path)
+    q_parent = shlex.quote(os.path.dirname(dest_path))
+    return (
+        "set -e\n"
+        f"mkdir -p {q_parent}\n"
+        f"printf %s {shlex.quote(b64)} | base64 -d > {q_target}\n"
+    )
+
+
+def _fabro_workflow_toml_rewrite(source: str, bc_name: str, work_id: str) -> str:
+    """Rewrite the packaged workflow.toml's BC_NAME / WORK_ID to the launch's
+    ACTUAL values (lead-ze4w BUG#2).
+
+    The packaged asset ships BC_NAME / WORK_ID in TWO tables:
+      * ``[run.inputs]``          — the agent-prompt inputs (`fabro run -I`
+                                    overrides these, but only for prompts);
+      * ``[run.environment.env]`` — the env overlay that reaches the native
+                                    ``script=`` sandbox as real shell env vars
+                                    ($BC_NAME / $WORK_ID), which `-I` does NOT
+                                    override.
+
+    Both carry the bundle defaults (``fabro-throwaway`` /
+    ``fabro-spike-demo-3``).  This rewrites EVERY ``BC_NAME = "..."`` and
+    ``WORK_ID = "..."`` assignment (in either table) to the launch's actual
+    ``bc_name`` / ``work_id``, so the native nodes run against the real
+    identity rather than the bundle default.  Modeled on the settings.toml
+    (re)write: the corrected bytes are produced on the host and written over
+    the placed file.
+    """
+    def _sub(line: str) -> str:
+        # Match a top-of-line TOML key assignment `KEY = "value"` (optional
+        # trailing comment preserved), for BC_NAME / WORK_ID only.
+        m = re.match(
+            r'^(?P<key>BC_NAME|WORK_ID)(?P<sp>\s*=\s*)"[^"]*"(?P<rest>.*)$',
+            line,
+        )
+        if not m:
+            return line
+        value = bc_name if m.group("key") == "BC_NAME" else work_id
+        # Escape any embedded double-quote / backslash so the emitted TOML
+        # string stays well-formed regardless of the identity value.
+        safe = value.replace("\\", "\\\\").replace('"', '\\"')
+        return f'{m.group("key")}{m.group("sp")}"{safe}"{m.group("rest")}'
+
+    return "\n".join(_sub(line) for line in source.split("\n"))
+
+
+def _fabro_workflow_toml_install_script(
+    bc_name: str,
+    work_id: str,
+    dest_path: str = FABRO_WORKFLOW_TOML_CONTAINER_PATH,
+) -> str:
+    """Build a ``/bin/sh -c`` script that (re)writes the placed workflow.toml
+    with the launch's ACTUAL BC_NAME / WORK_ID (lead-ze4w BUG#2).
+
+    Reads the packaged workflow.toml asset, rewrites the BC_NAME / WORK_ID
+    assignments in ``[run.inputs]`` and ``[run.environment.env]`` to the
+    launch's values, then base64-decode-writes the corrected bytes over the
+    placed ``workflow.toml`` — the SAME byte-safe channel + overwrite
+    mechanism the launcher uses to (re)write settings.toml.
+    """
+    import base64
+    import shlex
+
+    asset = (_fabro_def_asset_root() / "workflow.toml").read_text(
+        encoding="utf-8"
+    )
+    rewritten = _fabro_workflow_toml_rewrite(asset, bc_name, work_id)
+    b64 = base64.b64encode(rewritten.encode("utf-8")).decode("ascii")
     q_target = shlex.quote(dest_path)
     q_parent = shlex.quote(os.path.dirname(dest_path))
     return (
@@ -2202,140 +2387,15 @@ class BcContainerController:
                     f"{CONTAINER_WORKSPACE}/.claude/skills/\n"
                 )
 
-            # Self-contained fabro loop def bundle placement (lead-h2bj —
-            # S2 def-bundle delivery, ADR-051).
-            #
-            # PLACE the 15 packaged def-bundle asset files into the launched
-            # container at FABRO_DEF_CONTAINER_DIR (/workspace/.fabro/) so the
-            # container carries the bc-shop Implementer->Reviewer loop fabro def
-            # runnable FROM THE DEF ALONE — nothing is fetched at run time.  The
-            # def is placed via a single exec_run running a base64-decode script
-            # (the driver exposes no `docker cp` seam), so each file lands
-            # byte-identical to the shipped asset regardless of content.
-            #
-            # NATIVE-VAULT INVARIANT (ADR-049): the placed
-            # vaults/default/secrets.json is the packaged `__PLACEHOLDER__`-only
-            # asset — real credentials ride the agent-vault surface, NEVER the
-            # fabro vault; placement introduces no real secret.
-            #
-            # ADDITIVE: this is purely a new provisioning write under
-            # /workspace; the tmux launch default, the shop-msg mailbox
-            # (ADR-050), and every prior provisioning step are unchanged, and
-            # nothing is retired.  Runs BEFORE the FINAL ownership assertion so
-            # the final chown also hands the freshly-placed .fabro/ tree to the
-            # vscode agent.  Run as vscode so the def is agent-owned.
-            def_files = _load_fabro_def_files()
-            def_place_result = self._driver.exec_run(
-                container,
-                ["/bin/sh", "-c", _fabro_def_install_script(def_files)],
-                user=AGENT_CONTAINER_USER,
-            )
-            if def_place_result.returncode != 0:
-                # A failed def placement is a boot convenience failure, NOT a
-                # precondition for the agent to run (mirrors the lead-k4k7 /
-                # lead-5k8c warn-and-continue disposition for the bd-bootstrap
-                # and skill-refresh provisioning steps): warn and PROCEED to
-                # agent-start rather than stranding a healthy cloned container
-                # with no agent.
-                err_lines.append(
-                    "warning: fabro loop def-bundle placement failed (exit "
-                    f"{def_place_result.returncode}): "
-                    f"{(def_place_result.stderr or def_place_result.stdout).strip()}"
-                    f"; the container may lack {FABRO_DEF_CONTAINER_DIR} but the "
-                    "agent will still be started (lead-h2bj)\n"
-                )
-            else:
-                out_lines.append(
-                    f"Placed the self-contained fabro loop def bundle "
-                    f"({len(FABRO_DEF_FILES)} files) into "
-                    f"{FABRO_DEF_CONTAINER_DIR} (lead-h2bj, ADR-051)\n"
-                )
-
-            # FABRO ORCHESTRATOR launch-path wiring (lead-vwib —
-            # @scenario_hash:8b5a1b9e5499293b).  ADDITIVE + GATED on
-            # launch_path == "fabro": the ADR-050 tmux/engage-tier default
-            # path is UNCHANGED (this block does not run on it).  On the
-            # fabro path, during bring-up (AFTER the def-bundle placement so
-            # settings.toml lands alongside the placed def, and BEFORE the
-            # FINAL ownership chown so the written settings + shim log are
-            # agent-owned), the launcher:
-            #
-            #   (a) STARTS the baked so2h shim (lead-so2h, real stdlib
-            #       ThreadingHTTPServer reverse proxy at
-            #       /usr/local/bin/anthropic-oauth-shim, bc-base v0.3.44) as a
-            #       BACKGROUND listener with its REAL serve args
-            #       `--host 127.0.0.1 --port 8788`, so an in-container agent's
-            #       Anthropic traffic has a local endpoint to send its dummy
-            #       x-api-key to.
-            #
-            #   (b) WRITES fabro's EFFECTIVE settings into the placed def at
-            #       settings.toml with [llm.providers.anthropic]
-            #       base_url = "http://127.0.0.1:8788/v1" pointing the
-            #       built-in anthropic provider at that shim, adapter left as
-            #       "anthropic" (native Anthropic Messages format both
-            #       directions, NO OpenAI<->Anthropic translation — ADR-049
-            #       D2).
-            #
-            # NATIVE-VAULT INVARIANT (ADR-049 D1): the fabro vault stays
-            # `__PLACEHOLDER__`-only (the def-bundle placement above wrote the
-            # placeholder-only asset) and NO real credential is written into
-            # the settings or the shim's own configuration here.  The real
-            # Anthropic credential rides ONLY the agent-vault surface on the
-            # wire via the container HTTPS_PROXY.
-            #
-            # Both steps run as the vscode agent user (like the def
-            # placement) so the written settings + shim log are agent-owned;
-            # a failure of either is a boot-convenience warning, NOT a
-            # precondition for the agent to run (mirrors the def-placement
-            # warn-and-continue disposition).
-            if launch_path == LAUNCH_PATH_FABRO:
-                # (a) Start the baked so2h shim as a background listener.
-                shim_result = self._driver.exec_run(
-                    container,
-                    ["/bin/sh", "-c", _fabro_shim_start_script()],
-                    user=AGENT_CONTAINER_USER,
-                )
-                if shim_result.returncode != 0:
-                    err_lines.append(
-                        "warning: anthropic-oauth-shim start failed (exit "
-                        f"{shim_result.returncode}): "
-                        f"{(shim_result.stderr or shim_result.stdout).strip()}"
-                        f"; fabro's anthropic provider may lack a local "
-                        f"endpoint on {FABRO_SHIM_HOST}:{FABRO_SHIM_PORT} but "
-                        "the agent will still be started (lead-vwib)\n"
-                    )
-                else:
-                    out_lines.append(
-                        "Started the baked anthropic-oauth-shim "
-                        f"({ANTHROPIC_OAUTH_SHIM_BIN}) as a background "
-                        f"listener on {FABRO_SHIM_HOST}:{FABRO_SHIM_PORT} "
-                        "(lead-vwib, lead-so2h)\n"
-                    )
-
-                # (b) Write fabro's effective settings pointing the anthropic
-                #     provider at the shim; no credential written (ADR-049).
-                settings_result = self._driver.exec_run(
-                    container,
-                    ["/bin/sh", "-c", _fabro_settings_install_script()],
-                    user=AGENT_CONTAINER_USER,
-                )
-                if settings_result.returncode != 0:
-                    err_lines.append(
-                        "warning: fabro effective-settings write failed (exit "
-                        f"{settings_result.returncode}): "
-                        f"{(settings_result.stderr or settings_result.stdout).strip()}"
-                        f"; {FABRO_SETTINGS_CONTAINER_PATH} may be missing but "
-                        "the agent will still be started (lead-vwib)\n"
-                    )
-                else:
-                    out_lines.append(
-                        "Wrote fabro effective settings to "
-                        f"{FABRO_SETTINGS_CONTAINER_PATH} "
-                        f"([llm.providers.anthropic] base_url="
-                        f"{FABRO_ANTHROPIC_BASE_URL}, adapter="
-                        f"{FABRO_ANTHROPIC_ADAPTER}; no credential written — "
-                        "ADR-049 D1/D2)\n"
-                    )
+            # Self-contained fabro loop def bundle placement (lead-h2bj — S2
+            # def-bundle delivery, ADR-051).  Placed on EVERY clone launch
+            # (tmux AND fabro) so the cloned container carries the def runnable
+            # FROM THE DEF ALONE.  On the fabro path the ADDITIONAL wiring
+            # (workflow.toml rewrite + shim + settings) runs OUTSIDE this guard
+            # via _place_fabro_def_and_wiring(place_def=False) — see lead-ze4w
+            # BUG#1 below.  Runs BEFORE the FINAL ownership assertion so the
+            # final chown hands the freshly-placed .fabro/ tree to the agent.
+            self._place_fabro_def_bundle(container, out_lines, err_lines)
 
             # FINAL ownership assertion (lead-mf15, scenario
             # @scenario_hash:d9e4ce60e03df361).  TIGHTENS the lead-d64 /
@@ -2371,6 +2431,37 @@ class BcContainerController:
                 f"the last provisioning op, before starting the agent\n"
             )
 
+        # FABRO orchestrator wiring placement (lead-vwib; lead-ze4w BUG#1).
+        #
+        # lead-ze4w BUG#1 ROOT CAUSE + FIX.  The fabro shim/settings wiring (and
+        # on the workspace-mount path the def bundle itself) previously lived
+        # INSIDE the `if repo_url and not workspace_mount:` clone-only guard, so
+        # on a `--workspace-mount --orchestrator fabro` launch it was SKIPPED
+        # entirely — yet `_start_agent_session` still ran `fabro engage`, which
+        # failed because /workspace/.fabro never existed.  This block is HOISTED
+        # OUT of the clone guard so the fabro def + wiring is placed on BOTH the
+        # clone AND the workspace-mount paths (before the engage).  It is GATED
+        # on `launch_path == LAUNCH_PATH_FABRO`, so the tmux default path — on
+        # either clone or workspace-mount — is UNCHANGED (no fabro writes, no
+        # placement, tree presented unchanged).
+        #
+        # place_def: on the CLONE path the def bundle was ALREADY placed inside
+        # the clone guard (lead-h2bj, every clone launch), so we do NOT re-place
+        # it here — only the fabro-specific wiring runs.  On the WORKSPACE-MOUNT
+        # path the clone guard never ran, so the def bundle must be placed here
+        # too.  Placement runs BEFORE the engage in `_start_agent_session`, so
+        # the fabro server + run find the placed def + settings.
+        if launch_path == LAUNCH_PATH_FABRO:
+            already_placed = bool(repo_url and not workspace_mount)
+            self._place_fabro_def_and_wiring(
+                bc_name,
+                container,
+                work_id,
+                out_lines,
+                err_lines,
+                place_def=not already_placed,
+            )
+
         # Agent-start sequence (shared with `start_agent`, lead-k4k7).  This is
         # the EXACT sequence the recovery subcommand drives so a stranded
         # container can be brought to a running agent without re-cloning; the
@@ -2387,6 +2478,194 @@ class BcContainerController:
             err_lines,
             launch_path=launch_path,
             work_id=work_id,
+        )
+
+    # ------------------------------------------------------------------
+    # FABRO def + wiring placement (lead-h2bj / lead-vwib; hoisted out of the
+    # clone-only guard by lead-ze4w BUG#1 so it runs on the workspace-mount
+    # path too)
+    # ------------------------------------------------------------------
+
+    def _place_fabro_def_bundle(
+        self,
+        container: str,
+        out_lines: list[str],
+        err_lines: list[str],
+    ) -> None:
+        """Place the 15 packaged fabro loop def-bundle asset files into the
+        launched container at FABRO_DEF_CONTAINER_DIR (lead-h2bj, ADR-051).
+
+        Placed via a single exec_run running a base64-decode script (the driver
+        exposes no `docker cp` seam), so each file lands byte-identical to the
+        shipped asset regardless of content.  NATIVE-VAULT INVARIANT (ADR-049):
+        the placed vaults/default/secrets.json is the `__PLACEHOLDER__`-only
+        asset; placement introduces no real secret.  Run as vscode so the def
+        is agent-owned; a failed placement is a boot-convenience warning, not a
+        fatal abort that strands a healthy container with no agent.
+        """
+        def_files = _load_fabro_def_files()
+        def_place_result = self._driver.exec_run(
+            container,
+            ["/bin/sh", "-c", _fabro_def_install_script(def_files)],
+            user=AGENT_CONTAINER_USER,
+        )
+        if def_place_result.returncode != 0:
+            err_lines.append(
+                "warning: fabro loop def-bundle placement failed (exit "
+                f"{def_place_result.returncode}): "
+                f"{(def_place_result.stderr or def_place_result.stdout).strip()}"
+                f"; the container may lack {FABRO_DEF_CONTAINER_DIR} but the "
+                "agent will still be started (lead-h2bj)\n"
+            )
+        else:
+            out_lines.append(
+                f"Placed the self-contained fabro loop def bundle "
+                f"({len(FABRO_DEF_FILES)} files) into "
+                f"{FABRO_DEF_CONTAINER_DIR} (lead-h2bj, ADR-051)\n"
+            )
+
+    def _place_fabro_def_and_wiring(
+        self,
+        bc_name: str,
+        container: str,
+        work_id: str | None,
+        out_lines: list[str],
+        err_lines: list[str],
+        place_def: bool = True,
+    ) -> None:
+        """Place the fabro-orchestrator wiring (workflow.toml identity rewrite
+        + shim start + effective settings) — and, when ``place_def`` is True,
+        the def bundle itself — into the launched container.
+
+        lead-ze4w BUG#1: this runs on BOTH the clone and the workspace-mount
+        launch paths (the caller invokes it OUTSIDE the clone-only guard), so a
+        `--workspace-mount --orchestrator fabro` launch actually has
+        /workspace/.fabro before `_start_agent_session` runs `fabro engage`.
+        It is only invoked on the fabro path, so the tmux default is unchanged.
+
+        ``place_def``: on the CLONE path the def bundle is placed inside the
+        clone guard (every clone launch), so the caller passes place_def=False
+        to avoid re-placing it.  On the WORKSPACE-MOUNT path the clone guard
+        never ran, so place_def=True places the def here too.
+
+        Steps (each a boot-convenience warn-and-continue on failure, mirroring
+        the def-placement disposition — never a fatal abort that strands a
+        healthy container with no agent):
+
+          (0) PLACE the def bundle (only when ``place_def``; lead-h2bj).
+          (1) REWRITE the placed workflow.toml BC_NAME / WORK_ID to the
+              launch's ACTUAL bc_name / work_id (lead-ze4w BUG#2).
+          (2) START the baked so2h shim as a background listener, with
+              SSL_CERT_FILE pinned (lead-ze4w BUG#3).
+          (3) WRITE fabro's effective workflow-level settings.toml pointing the
+              anthropic provider at the shim; NO credential (ADR-049 D1/D2).
+          (4) chown the placed .fabro/ tree to the agent user so the placed def
+              + writes are agent-owned (on the workspace-mount path this touches
+              ONLY the launcher-created .fabro/ subtree, never the mounted
+              tree's committed .beads / .claude).
+        """
+        # (0) Place the def bundle when it was not already placed by the clone
+        #     guard (workspace-mount path, lead-ze4w BUG#1).
+        if place_def:
+            self._place_fabro_def_bundle(container, out_lines, err_lines)
+
+        # (1) Rewrite the placed workflow.toml's BC_NAME / WORK_ID to the
+        #     launch's ACTUAL identity (lead-ze4w BUG#2).  The packaged asset
+        #     carries the bundle defaults (fabro-throwaway / fabro-spike-demo-3)
+        #     in BOTH [run.inputs] and [run.environment.env]; the native
+        #     script= nodes read $BC_NAME / $WORK_ID from the [run.environment.
+        #     env] overlay, and `fabro run -I` overrides only [run.inputs] for
+        #     agent prompts — so without this rewrite every native node runs
+        #     against the bundle identity.  Modeled on the settings.toml
+        #     (re)write mechanism (host-side byte generation + base64-decode
+        #     over the placed path).
+        workflow_result = self._driver.exec_run(
+            container,
+            ["/bin/sh", "-c",
+             _fabro_workflow_toml_install_script(bc_name, work_id or "")],
+            user=AGENT_CONTAINER_USER,
+        )
+        if workflow_result.returncode != 0:
+            err_lines.append(
+                "warning: fabro workflow.toml BC_NAME/WORK_ID rewrite failed "
+                f"(exit {workflow_result.returncode}): "
+                f"{(workflow_result.stderr or workflow_result.stdout).strip()}"
+                f"; {FABRO_WORKFLOW_TOML_CONTAINER_PATH} may carry the bundle "
+                "defaults but the agent will still be started (lead-ze4w)\n"
+            )
+        else:
+            out_lines.append(
+                "Rewrote the placed "
+                f"{FABRO_WORKFLOW_TOML_CONTAINER_PATH} [run.environment.env] / "
+                f"[run.inputs] BC_NAME={bc_name} WORK_ID={work_id or ''} "
+                "(lead-ze4w BUG#2)\n"
+            )
+
+        # (2) Start the baked so2h shim as a background listener, with
+        #     SSL_CERT_FILE pinned on the exec env (lead-ze4w BUG#3) so its
+        #     urllib trusts the agent-vault MITM CA without a login shell.
+        shim_result = self._driver.exec_run(
+            container,
+            ["/bin/sh", "-c", _fabro_shim_start_script()],
+            user=AGENT_CONTAINER_USER,
+            env=_fabro_exec_env(),
+        )
+        if shim_result.returncode != 0:
+            err_lines.append(
+                "warning: anthropic-oauth-shim start failed (exit "
+                f"{shim_result.returncode}): "
+                f"{(shim_result.stderr or shim_result.stdout).strip()}"
+                f"; fabro's anthropic provider may lack a local "
+                f"endpoint on {FABRO_SHIM_HOST}:{FABRO_SHIM_PORT} but "
+                "the agent will still be started (lead-vwib)\n"
+            )
+        else:
+            out_lines.append(
+                "Started the baked anthropic-oauth-shim "
+                f"({ANTHROPIC_OAUTH_SHIM_BIN}) as a background "
+                f"listener on {FABRO_SHIM_HOST}:{FABRO_SHIM_PORT} "
+                "(lead-vwib, lead-so2h)\n"
+            )
+
+        # (3) Write fabro's effective workflow-level settings pointing the
+        #     anthropic provider at the shim; no credential written (ADR-049).
+        settings_result = self._driver.exec_run(
+            container,
+            ["/bin/sh", "-c", _fabro_settings_install_script()],
+            user=AGENT_CONTAINER_USER,
+        )
+        if settings_result.returncode != 0:
+            err_lines.append(
+                "warning: fabro effective-settings write failed (exit "
+                f"{settings_result.returncode}): "
+                f"{(settings_result.stderr or settings_result.stdout).strip()}"
+                f"; {FABRO_SETTINGS_CONTAINER_PATH} may be missing but "
+                "the agent will still be started (lead-vwib)\n"
+            )
+        else:
+            out_lines.append(
+                "Wrote fabro effective settings to "
+                f"{FABRO_SETTINGS_CONTAINER_PATH} "
+                f"([llm.providers.anthropic] base_url="
+                f"{FABRO_ANTHROPIC_BASE_URL}, adapter="
+                f"{FABRO_ANTHROPIC_ADAPTER}; no credential written — "
+                "ADR-049 D1/D2)\n"
+            )
+
+        # (4) Hand the placed .fabro/ tree to the agent user.  On the
+        #     workspace-mount path this deliberately scopes the chown to the
+        #     launcher-created .fabro/ subtree ONLY — it does NOT recursively
+        #     chown the mounted host tree's committed .beads / .claude (the
+        #     lead-zxtk byte-unchanged invariant).
+        self._driver.exec_run(
+            container,
+            ["chown", "-R",
+             f"{AGENT_CONTAINER_USER}:{AGENT_CONTAINER_USER}",
+             FABRO_DEF_CONTAINER_DIR],
+        )
+        out_lines.append(
+            f"Chowned the placed {FABRO_DEF_CONTAINER_DIR} tree to "
+            f"{AGENT_CONTAINER_USER} (lead-ze4w BUG#1 workspace-mount parity)\n"
         )
 
     # ------------------------------------------------------------------
@@ -2531,6 +2810,7 @@ class BcContainerController:
             container,
             ["/bin/sh", "-c", _fabro_engage_script(bc_name, work_id or "")],
             user=AGENT_CONTAINER_USER,
+            env=_fabro_exec_env(),
         )
         if engage_result.returncode != 0:
             reason = (
