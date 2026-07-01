@@ -597,24 +597,54 @@ FABRO_WORKFLOW_FILE = "workflow.fabro"
 # aborted `server.auth.methods: field is required` and `fabro run` could not
 # reach it.  Before starting the server, `_fabro_engage` bootstraps the
 # ephemeral server config:
-#   1. `fabro install --non-interactive --skip-llm --overwrite-settings`
+#   1. `fabro install --non-interactive --skip-llm --overwrite-settings
+#      --github-strategy token --github-username <dummy>` (with GH_TOKEN set)
 #      writes a valid server-level ~/.fabro/settings.toml (auth.methods etc.).
 #   2. register the built-in anthropic provider pointed at the shim base_url
 #      (http://127.0.0.1:8788/v1) with a DUMMY ANTHROPIC_API_KEY in the server
 #      env — the real credential rides agent-vault on the wire (ADR-049 D1),
 #      NEVER this config, so the key is a fixed placeholder literal.
+#
+# lead-8q2x Defect A (INSTALL-FLAG DRIFT): on fabro 0.254.0 `fabro install
+# --non-interactive --skip-llm --overwrite-settings` ABORTS with
+# `x non-interactive install requires --github-strategy`.  The empirically-
+# verified minimal recipe that resolves the flag chain (and still writes
+# [server.auth] methods=["dev-token"] + session secret + dev token) adds
+# `--github-strategy token --github-username <any>` with `GH_TOKEN=<any>` in
+# the env.  fabro's github token is NOT exercised on this path — the
+# anthropic-oauth-shim + agent-vault carry the real creds — so GH_TOKEN and
+# --github-username are DUMMY placeholders (ADR-049 D1: no real cred literal).
+FABRO_SERVER_INSTALL_GITHUB_USERNAME = "fabro-throwaway"
+FABRO_SERVER_INSTALL_GH_TOKEN = "gh-dummy-agent-vault-rides-the-wire"
 FABRO_SERVER_INSTALL_ARGV: tuple[str, ...] = (
     FABRO_BIN,
     "install",
     "--non-interactive",
     "--skip-llm",
     "--overwrite-settings",
+    "--github-strategy",
+    "token",
+    "--github-username",
+    FABRO_SERVER_INSTALL_GITHUB_USERNAME,
 )
 # The dummy ANTHROPIC_API_KEY placed in the ephemeral server env so the
 # registered anthropic provider is well-formed.  ADR-049 D1: NO real
 # credential — the real cred rides agent-vault on the wire.  This is the only
 # credential-shaped literal on this path and is deliberately a placeholder.
 FABRO_SERVER_DUMMY_ANTHROPIC_KEY = "sk-ant-dummy-agent-vault-rides-the-wire"
+# lead-8q2x Defect C (PROVIDER NOT REGISTERED AT SERVER): `--skip-llm` skips
+# server-level provider registration, so even with the server up
+# `fabro model test --model haiku` reports "not configured" — only the
+# workflow-level /workspace/.fabro/settings.toml carries
+# [llm.providers.anthropic], which the SERVER does NOT read for fabro
+# model/run resolution.  So the engage bootstrap must register the anthropic
+# provider AT THE SERVER by appending [llm.providers.anthropic] (base_url
+# pointed at the shim + a DUMMY key) to the server-level ~/.fabro/settings.toml
+# AFTER `fabro install`.  The container user is `vscode` (HOME=/home/vscode),
+# so the server-level config lives at /home/vscode/.fabro/settings.toml.
+FABRO_SERVER_SETTINGS_CONTAINER_PATH = (
+    f"/home/{AGENT_CONTAINER_USER}/.fabro/settings.toml"
+)
 
 
 def _fabro_server_start_argv() -> list[str]:
@@ -668,18 +698,47 @@ def _fabro_engage_script(bc_name: str, work_id: str) -> str:
     lead-ze4w BUG#4: BEFORE `fabro server start`, bootstrap the SERVER-level
     fabro config so the server does not abort
     ``server.auth.methods: field is required``:
-      1. `fabro install --non-interactive --skip-llm --overwrite-settings`
+      1. `fabro install --non-interactive --skip-llm --overwrite-settings
+         --github-strategy token --github-username <dummy>` (GH_TOKEN set)
          writes a valid server-level ~/.fabro/settings.toml.
       2. register the anthropic provider pointed at the shim base_url
          (http://127.0.0.1:8788/v1) with a DUMMY ANTHROPIC_API_KEY in the
          server env (ADR-049 D1: no real credential — the real cred rides
          agent-vault on the wire).
 
+    lead-8q2x — the ze4w Fix#4 bootstrap was broken 3 ways at runtime; all
+    three are corrected here:
+
+      A) INSTALL-FLAG DRIFT: on fabro 0.254.0 the bare install aborts
+         ``x non-interactive install requires --github-strategy``.
+         `_fabro_server_install_argv` now emits
+         `--github-strategy token --github-username <dummy>` and the install
+         runs with a DUMMY `GH_TOKEN` inline (github token not exercised on
+         this path).
+      B) `&` CWD-SCOPING: previously the trailing `&` backgrounded the WHOLE
+         `cd && install && ... && nohup server` AND-list, so the `cd` ran
+         inside the backgrounded subshell and the PARENT shell cwd stayed
+         /workspace (the image WORKDIR) — `fabro run workflow.fabro` then
+         resolved /workspace/workflow.fabro -> "x workflow not found".  Now
+         the `cd {def_dir}` + install + provider registration run
+         SYNCHRONOUSLY in the SAME shell as `fabro run`, and ONLY the
+         foreground server is backgrounded (`nohup ... &` on its own line).
+         `fabro run` therefore executes with cwd=/workspace/.fabro and
+         resolves /workspace/.fabro/workflow.fabro.
+      C) PROVIDER NOT REGISTERED AT SERVER: `--skip-llm` skips server-level
+         provider registration, so `fabro model test` reported "not
+         configured" even with the server up — the SERVER does not read the
+         workflow-level settings for model resolution.  The bootstrap now
+         APPENDS a `[llm.providers.anthropic]` block (shim base_url + DUMMY
+         key) to the server-level ~/.fabro/settings.toml AFTER install, so
+         the provider is registered AT THE SERVER.
+
     Then start the ephemeral fabro server in the FOREGROUND with no web UI and
     run the loop def against it.  The server's foreground serve loop blocks, so
-    it is backgrounded so the ``fabro run`` engage can attach to it; both execs
-    run FROM the placed def dir so ``workflow.fabro`` resolves and the server
-    picks up the effective settings the launcher wrote alongside it.
+    ONLY the server is backgrounded; the ``fabro run`` engage runs
+    synchronously in the same shell (cwd=/workspace/.fabro) so
+    ``workflow.fabro`` resolves and the server picks up the effective settings
+    the launcher wrote alongside it.
     """
     import shlex
 
@@ -696,20 +755,50 @@ def _fabro_engage_script(bc_name: str, work_id: str) -> str:
     server_log = shlex.quote(f"{FABRO_DEF_CONTAINER_DIR}/fabro-server.log")
     base_url = shlex.quote(FABRO_ANTHROPIC_BASE_URL)
     dummy_key = shlex.quote(FABRO_SERVER_DUMMY_ANTHROPIC_KEY)
-    # (BUG#4) Bootstrap the server-level config BEFORE start/run:
-    #   * `fabro install ...` writes a valid ~/.fabro/settings.toml (auth
-    #     methods etc.) so `fabro server start` does not abort;
-    #   * register the built-in anthropic provider at the shim base_url with a
-    #     DUMMY key exported in the server env (ADR-049 D1 — no real cred).
-    # cd into the def dir so workflow.fabro + settings.toml resolve; the
-    # foreground server is backgrounded so the run can engage against it.
+    gh_token = shlex.quote(FABRO_SERVER_INSTALL_GH_TOKEN)
+    server_settings = shlex.quote(FABRO_SERVER_SETTINGS_CONTAINER_PATH)
+    # (Defect C) The [llm.providers.anthropic] block appended to the
+    # server-level ~/.fabro/settings.toml so the provider is registered AT THE
+    # SERVER pointed at the shim, with a DUMMY key (ADR-049 D1 — real cred
+    # rides agent-vault on the wire).  Written with printf via a here-doc-free
+    # append so it needs no base64 helper on the container.
+    provider_block = (
+        "\\n[llm.providers.anthropic]\\n"
+        f'base_url = "{FABRO_ANTHROPIC_BASE_URL}"\\n'
+        f'api_key = "{FABRO_SERVER_DUMMY_ANTHROPIC_KEY}"\\n'
+    )
+    provider_register = (
+        f"printf '%b' {shlex.quote(provider_block)} >> {server_settings}"
+    )
+    # (Defect A/B/C) Bootstrap the server-level config SYNCHRONOUSLY, then
+    # background ONLY the foreground server, then run the def in the SAME shell
+    # (cwd=/workspace/.fabro):
+    #   * `cd {def_dir}` first, SYNCHRONOUS — so `fabro run` resolves
+    #     /workspace/.fabro/workflow.fabro (NOT /workspace/workflow.fabro);
+    #   * `GH_TOKEN=<dummy> fabro install ... --github-strategy token
+    #     --github-username <dummy>` writes a valid ~/.fabro/settings.toml and
+    #     no longer aborts on the flag chain;
+    #   * append [llm.providers.anthropic] (shim base_url + DUMMY key) to the
+    #     SERVER-level settings so the provider is registered at the server;
+    #   * export the agent-vault CA + shim base_url in the server env;
+    #   * background ONLY `nohup {server} ... &` (its OWN line) so the run can
+    #     engage against it while the parent shell stays in {def_dir}.
+    # NOTE (Defect B): the server is backgrounded via a brace group
+    # ``{ nohup ... & }`` so ONLY the server subprocess is detached; the
+    # surrounding `&&` chain (cd, install, provider-register, exports) runs
+    # SYNCHRONOUSLY in the CURRENT shell, so the cwd set by `cd {def_dir}`
+    # persists to `fabro run` on the last line.  (If the whole `cd && ... &&
+    # nohup server` list were terminated by a bare trailing `&`, the entire
+    # list — including the `cd` — would run in a backgrounded subshell and the
+    # parent shell cwd would stay at the image WORKDIR; that was the bug.)
     return (
         f"cd {def_dir} && "
-        f"{install_argv} && "
+        f"GH_TOKEN={gh_token} {install_argv} && "
+        f"{provider_register} && "
         f'export {SSL_CERT_FILE_ENV}={shlex.quote(AGENT_VAULT_CONTAINER_CA_PATH)} && '
         f"export ANTHROPIC_API_KEY={dummy_key} && "
         f"export ANTHROPIC_BASE_URL={base_url} && "
-        f"nohup {server_argv} >{server_log} 2>&1 &\n"
+        f"{{ nohup {server_argv} >{server_log} 2>&1 & }} && "
         f"{run_argv}\n"
     )
 

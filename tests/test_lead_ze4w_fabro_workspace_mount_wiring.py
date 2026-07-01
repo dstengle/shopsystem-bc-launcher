@@ -48,6 +48,9 @@ from bc_launcher.controller import (
     BcContainerController,
     FABRO_ANTHROPIC_BASE_URL,
     FABRO_DEF_CONTAINER_DIR,
+    FABRO_SERVER_DUMMY_ANTHROPIC_KEY,
+    FABRO_SERVER_INSTALL_GITHUB_USERNAME,
+    FABRO_SERVER_SETTINGS_CONTAINER_PATH,
     FABRO_SETTINGS_CONTAINER_PATH,
     FABRO_SHIM_PORT,
     FABRO_WORKFLOW_TOML_CONTAINER_PATH,
@@ -479,3 +482,207 @@ def test_tmux_workspace_mount_launch_issues_no_fabro_wiring(tmp_path):
     assert _shim_start_call(driver) is None, "tmux default: no shim start"
     assert _settings_write_call(driver) is None, "tmux default: no settings"
     assert _engage_call(driver) is None, "tmux default: no fabro engage"
+
+
+# ===========================================================================
+# lead-8q2x — the ze4w Fix#4 server-bootstrap was broken 3 ways at runtime
+# (proven at the lead's v0.3.46 clean e2e: engage exited 1 with "x
+# non-interactive install requires --github-strategy" AND "x workflow not
+# found: /workspace/workflow.fabro").  Each fix below is pinned STRUCTURALLY
+# against the REAL launcher-recorded engage script over FakeDockerDriver
+# (test-fidelity-for-image-layer-container-runtime-scenarios), each with
+# TEETH: reverting the fix in controller.py makes it RED.
+# ===========================================================================
+
+def test_8q2x_defect_a_install_carries_github_strategy_and_username(tmp_path):
+    """(i) Defect A — INSTALL-FLAG DRIFT.  `fabro install
+    --non-interactive --skip-llm --overwrite-settings` ABORTS on fabro
+    0.254.0 with "x non-interactive install requires --github-strategy".
+    The engage install must now carry `--github-strategy token` AND
+    `--github-username <dummy>` with a GH_TOKEN provided inline.
+
+    TEETH: drop `--github-strategy token` / `--github-username` from
+    `_fabro_server_install_argv` -> the tokens are absent from the recorded
+    engage script -> RED (and the real install would re-abort on the flag
+    chain).
+    """
+    driver = _launch_workspace_mount_fabro(tmp_path)
+    call = _engage_call(driver)
+    assert call is not None, "engage exec must be present"
+    script = call.command[2]
+
+    # The fabro install must run BEFORE the flag chain aborts: the corrected
+    # recipe carries --github-strategy token + --github-username.
+    assert "--github-strategy token" in script, (
+        "Defect A: engage `fabro install` must carry `--github-strategy "
+        f"token`; script:\n{script}"
+    )
+    assert (
+        f"--github-username {FABRO_SERVER_INSTALL_GITHUB_USERNAME}" in script
+    ), (
+        "Defect A: engage `fabro install` must carry `--github-username "
+        f"<dummy>`; script:\n{script}"
+    )
+    # GH_TOKEN must be provided (inline env) for the token strategy.
+    gh_pos = script.find("GH_TOKEN=")
+    install_pos = script.find("fabro install")
+    assert gh_pos != -1, (
+        "Defect A: a GH_TOKEN must be provided for the token strategy"
+    )
+    assert gh_pos < install_pos, (
+        "Defect A: GH_TOKEN must be provided in the install's env (before "
+        f"`fabro install`); script:\n{script}"
+    )
+    # The prior working flags are preserved.
+    for flag in ("--non-interactive", "--skip-llm", "--overwrite-settings"):
+        assert flag in script, f"Defect A: install must still carry {flag}"
+
+
+def test_8q2x_defect_b_run_resolves_def_dir_workflow_not_workspace_root(
+    tmp_path,
+):
+    """(ii) Defect B — & CWD-SCOPING.  The trailing `&` previously
+    backgrounded the WHOLE `cd /workspace/.fabro && install && ... && nohup
+    server` AND-list, so `cd` ran inside the backgrounded subshell and the
+    PARENT shell cwd stayed /workspace (the image WORKDIR) -> `fabro run
+    workflow.fabro` resolved /workspace/workflow.fabro -> "x workflow not
+    found".  The corrected script runs `cd {def_dir}` + install SYNCHRONOUSLY
+    in the SAME shell as `fabro run`, backgrounding ONLY the server.
+
+    Structural resolution model: the corrected script is ONE synchronous
+    `&&` chain starting with `cd /workspace/.fabro`, with ONLY the foreground
+    server detached inside a brace group `{ nohup ... & }`, and `fabro run`
+    chained via `&&` after it — so the `cd`, install, provider-register and
+    `fabro run` all execute in the SAME shell whose cwd is /workspace/.fabro.
+    Assert (1) the chain begins with a synchronous `cd /workspace/.fabro &&`,
+    (2) ONLY the server is inside the backgrounded brace group — the install
+    and `fabro run` are NOT backgrounded, and (3) the launcher does NOT resolve
+    /workspace/workflow.fabro (the WORKDIR-root path the bug produced).
+
+    TEETH: background the whole AND-list (terminate `cd && install && ... &&
+    nohup server` with a bare trailing `&`, so the `cd` runs in the
+    backgrounded subshell) / drop the `cd` so the relative `workflow.fabro`
+    resolves against the image WORKDIR -> the `fabro run` no longer runs with
+    cwd=/workspace/.fabro -> RED.
+    """
+    driver = _launch_workspace_mount_fabro(tmp_path)
+    call = _engage_call(driver)
+    assert call is not None, "engage exec must be present"
+    script = call.command[2]
+
+    cd_def = f"cd {FABRO_DEF_CONTAINER_DIR}"
+    assert cd_def in script, (
+        f"Defect B: engage must `cd` into the def dir; script:\n{script}"
+    )
+
+    # (1) The chain is SYNCHRONOUS and begins with `cd /workspace/.fabro &&`
+    # so the cwd persists to `fabro run`.
+    assert script.lstrip().startswith(f"{cd_def} &&"), (
+        "Defect B: the engage must `cd /workspace/.fabro` FIRST as a "
+        "synchronous step (chained by `&&`), so the parent shell cwd "
+        f"persists to `fabro run`; script:\n{script}"
+    )
+
+    # (2) ONLY the foreground server is detached, inside a brace group
+    # `{ nohup ... server ... & }`.  The `&` that backgrounds must belong to
+    # that brace group — NOT to a bare trailing `&` on the whole AND-list
+    # (which would background the `cd` too and leave the parent cwd at the
+    # image WORKDIR).
+    m = re.search(r"\{\s*nohup [^}]*fabro server start[^}]*&\s*\}", script)
+    assert m is not None, (
+        "Defect B: ONLY the server must be backgrounded, inside a brace "
+        "group `{ nohup fabro server start ... & }` — so the `cd`+install "
+        f"stay synchronous in the parent shell; script:\n{script}"
+    )
+    server_bg = m.group(0)
+    # The `cd` and the install are NOT inside the backgrounded server group.
+    assert cd_def not in server_bg, (
+        "Defect B: `cd /workspace/.fabro` must NOT be inside the backgrounded "
+        f"server group; script:\n{script}"
+    )
+    assert "fabro install" not in server_bg, (
+        "Defect B: `fabro install` must run SYNCHRONOUSLY, not inside the "
+        f"backgrounded server group; script:\n{script}"
+    )
+    assert "fabro run" not in server_bg, (
+        "Defect B: `fabro run` must NOT be backgrounded; it runs synchronously "
+        f"in the foreground shell; script:\n{script}"
+    )
+    # The whole script must NOT end with a bare trailing `&` (that would
+    # background the entire AND-list including the `cd`).
+    assert not script.rstrip().endswith("&"), (
+        "Defect B: the engage script must NOT terminate the whole AND-list "
+        "with a bare trailing `&` (that backgrounds the `cd` and leaves the "
+        f"parent cwd at the image WORKDIR); script:\n{script}"
+    )
+
+    # (3) `fabro run workflow.fabro` runs AFTER the backgrounded server group,
+    # in the SAME (cwd=/workspace/.fabro) shell -> resolves
+    # /workspace/.fabro/workflow.fabro, NOT /workspace/workflow.fabro.
+    run_pos = script.find("fabro run workflow.fabro")
+    assert run_pos != -1, (
+        f"Defect B: engage must issue `fabro run workflow.fabro`; "
+        f"script:\n{script}"
+    )
+    assert run_pos > m.start(), (
+        "Defect B: `fabro run` must run AFTER the backgrounded server group, "
+        f"in the foreground shell; script:\n{script}"
+    )
+    assert "/workspace/workflow.fabro" not in script, (
+        "Defect B: the engage must NOT resolve /workspace/workflow.fabro "
+        f"(the WORKDIR-root path the bug produced); script:\n{script}"
+    )
+
+
+def test_8q2x_defect_c_provider_registered_at_server_settings(tmp_path):
+    """(iii) Defect C — PROVIDER NOT REGISTERED AT SERVER.  `--skip-llm`
+    skips server-level provider registration, so `fabro model test` reported
+    "not configured" even with the server up — the SERVER does not read the
+    workflow-level settings for model resolution.  The bootstrap must register
+    the anthropic provider AT THE SERVER by appending a
+    `[llm.providers.anthropic]` block (shim base_url + DUMMY key) to the
+    server-level ~/.fabro/settings.toml AFTER install.
+
+    TEETH: drop the server-level provider registration (the append to the
+    server settings) -> the `[llm.providers.anthropic]` block targeting the
+    SERVER settings path is absent -> RED.
+    """
+    driver = _launch_workspace_mount_fabro(tmp_path)
+    call = _engage_call(driver)
+    assert call is not None, "engage exec must be present"
+    script = call.command[2]
+
+    # The provider block is written to the SERVER-level settings path
+    # (~/.fabro/settings.toml), NOT the workflow-level one.
+    assert FABRO_SERVER_SETTINGS_CONTAINER_PATH in script, (
+        "Defect C: the engage must register the provider at the SERVER-level "
+        f"settings ({FABRO_SERVER_SETTINGS_CONTAINER_PATH}); script:\n{script}"
+    )
+    # It is an APPEND (`>>`) to the server settings, AFTER install writes the
+    # base config.
+    assert f">> {FABRO_SERVER_SETTINGS_CONTAINER_PATH}" in script, (
+        "Defect C: the provider block must be APPENDED (>>) to the "
+        f"server-level settings; script:\n{script}"
+    )
+    server_settings_pos = script.find(FABRO_SERVER_SETTINGS_CONTAINER_PATH)
+    install_pos = script.find("fabro install")
+    assert install_pos < server_settings_pos, (
+        "Defect C: the provider registration must run AFTER `fabro install` "
+        f"writes the base ~/.fabro/settings.toml; script:\n{script}"
+    )
+    # The block registers the anthropic provider at the shim base_url with a
+    # DUMMY key (ADR-049 D1 — real cred rides agent-vault on the wire).
+    assert "[llm.providers.anthropic]" in script, (
+        "Defect C: the appended block must register [llm.providers.anthropic]"
+    )
+    assert FABRO_ANTHROPIC_BASE_URL in script, (
+        "Defect C: the server-level provider must point at the shim base_url "
+        f"{FABRO_ANTHROPIC_BASE_URL}"
+    )
+    assert FABRO_SERVER_DUMMY_ANTHROPIC_KEY in script, (
+        "Defect C: the server-level provider must carry the DUMMY key"
+    )
+    assert "dummy" in FABRO_SERVER_DUMMY_ANTHROPIC_KEY.lower(), (
+        "Defect C: the server-level provider key must be an explicit DUMMY "
+        "placeholder (ADR-049 D1 — no real cred literal)"
+    )
