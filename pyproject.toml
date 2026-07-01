@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "shopsystem-bc-launcher"
-version = "0.3.46"
+version = "0.3.47"
 description = "BC container management tool for the shopsystem framework"
 requires-python = ">=3.11"
 dependencies = []
