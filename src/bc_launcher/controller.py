@@ -627,10 +627,14 @@ FABRO_SERVER_INSTALL_ARGV: tuple[str, ...] = (
     "--github-username",
     FABRO_SERVER_INSTALL_GITHUB_USERNAME,
 )
-# The dummy ANTHROPIC_API_KEY placed in the ephemeral server env so the
-# registered anthropic provider is well-formed.  ADR-049 D1: NO real
-# credential — the real cred rides agent-vault on the wire.  This is the only
-# credential-shaped literal on this path and is deliberately a placeholder.
+# The dummy ANTHROPIC_API_KEY placed in the ephemeral server's exec ENV (the
+# `export ANTHROPIC_API_KEY=...` in `_fabro_engage_script`) so the registered
+# anthropic provider is well-formed.  lead-sp2m: this dummy key is supplied
+# ONLY via the server-env export — it is NEVER written into the settings TOML,
+# because fabro 0.254.0 rejects `api_key` under [llm.providers.anthropic].
+# ADR-049 D1: NO real credential — the real cred rides agent-vault on the wire.
+# This is the only credential-shaped literal on this path and is deliberately a
+# placeholder.
 FABRO_SERVER_DUMMY_ANTHROPIC_KEY = "sk-ant-dummy-agent-vault-rides-the-wire"
 # lead-8q2x Defect C (PROVIDER NOT REGISTERED AT SERVER): `--skip-llm` skips
 # server-level provider registration, so even with the server up
@@ -638,9 +642,11 @@ FABRO_SERVER_DUMMY_ANTHROPIC_KEY = "sk-ant-dummy-agent-vault-rides-the-wire"
 # workflow-level /workspace/.fabro/settings.toml carries
 # [llm.providers.anthropic], which the SERVER does NOT read for fabro
 # model/run resolution.  So the engage bootstrap must register the anthropic
-# provider AT THE SERVER by appending [llm.providers.anthropic] (base_url
-# pointed at the shim + a DUMMY key) to the server-level ~/.fabro/settings.toml
-# AFTER `fabro install`.  The container user is `vscode` (HOME=/home/vscode),
+# provider AT THE SERVER by appending [llm.providers.anthropic]
+# (adapter="anthropic" + base_url pointed at the shim, NO api_key — lead-sp2m;
+# the DUMMY key rides the server-env ANTHROPIC_API_KEY export) to the
+# server-level ~/.fabro/settings.toml AFTER `fabro install`.  The container
+# user is `vscode` (HOME=/home/vscode),
 # so the server-level config lives at /home/vscode/.fabro/settings.toml.
 FABRO_SERVER_SETTINGS_CONTAINER_PATH = (
     f"/home/{AGENT_CONTAINER_USER}/.fabro/settings.toml"
@@ -729,9 +735,11 @@ def _fabro_engage_script(bc_name: str, work_id: str) -> str:
          provider registration, so `fabro model test` reported "not
          configured" even with the server up — the SERVER does not read the
          workflow-level settings for model resolution.  The bootstrap now
-         APPENDS a `[llm.providers.anthropic]` block (shim base_url + DUMMY
-         key) to the server-level ~/.fabro/settings.toml AFTER install, so
-         the provider is registered AT THE SERVER.
+         APPENDS a schema-valid `[llm.providers.anthropic]` block
+         (adapter="anthropic" + shim base_url, NO api_key — lead-sp2m) to the
+         server-level ~/.fabro/settings.toml AFTER install, so the provider is
+         registered AT THE SERVER.  The DUMMY key rides the ANTHROPIC_API_KEY
+         server-env export, never the settings file.
 
     Then start the ephemeral fabro server in the FOREGROUND with no web UI and
     run the loop def against it.  The server's foreground serve loop blocks, so
@@ -759,13 +767,22 @@ def _fabro_engage_script(bc_name: str, work_id: str) -> str:
     server_settings = shlex.quote(FABRO_SERVER_SETTINGS_CONTAINER_PATH)
     # (Defect C) The [llm.providers.anthropic] block appended to the
     # server-level ~/.fabro/settings.toml so the provider is registered AT THE
-    # SERVER pointed at the shim, with a DUMMY key (ADR-049 D1 — real cred
-    # rides agent-vault on the wire).  Written with printf via a here-doc-free
+    # SERVER pointed at the shim.  Written with printf via a here-doc-free
     # append so it needs no base64 helper on the container.
+    #
+    # lead-sp2m (Fix C correction): the block writes ONLY schema-valid fields
+    # — `adapter = "anthropic"` + `base_url = "<shim>/v1"`.  It writes NO
+    # `api_key` line: fabro 0.254.0 REJECTS `api_key` under
+    # [llm.providers.anthropic] ("unknown field `api_key`") so `fabro validate`
+    # exits 1 and the server can't start.  The DUMMY key is supplied instead
+    # via the ANTHROPIC_API_KEY ENVIRONMENT VARIABLE in the server's exec env
+    # (the export below), exactly the Slice-0/Slice-3 spike recipe.  ADR-049
+    # D1: no real credential anywhere in fabro's settings/vault — the real
+    # cred rides agent-vault on the wire.
     provider_block = (
         "\\n[llm.providers.anthropic]\\n"
+        f'adapter = "{FABRO_ANTHROPIC_ADAPTER}"\\n'
         f'base_url = "{FABRO_ANTHROPIC_BASE_URL}"\\n'
-        f'api_key = "{FABRO_SERVER_DUMMY_ANTHROPIC_KEY}"\\n'
     )
     provider_register = (
         f"printf '%b' {shlex.quote(provider_block)} >> {server_settings}"
@@ -778,8 +795,9 @@ def _fabro_engage_script(bc_name: str, work_id: str) -> str:
     #   * `GH_TOKEN=<dummy> fabro install ... --github-strategy token
     #     --github-username <dummy>` writes a valid ~/.fabro/settings.toml and
     #     no longer aborts on the flag chain;
-    #   * append [llm.providers.anthropic] (shim base_url + DUMMY key) to the
-    #     SERVER-level settings so the provider is registered at the server;
+    #   * append [llm.providers.anthropic] (adapter="anthropic" + shim
+    #     base_url, NO api_key — schema-valid; lead-sp2m) to the SERVER-level
+    #     settings so the provider is registered at the server;
     #   * export the agent-vault CA + shim base_url in the server env;
     #   * background ONLY `nohup {server} ... &` (its OWN line) so the run can
     #     engage against it while the parent shell stays in {def_dir}.

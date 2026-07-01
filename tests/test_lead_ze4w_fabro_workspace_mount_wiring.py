@@ -46,6 +46,7 @@ from bc_launcher.controller import (
     AGENT_VAULT_CONTAINER_CA_PATH,
     ANTHROPIC_OAUTH_SHIM_BIN,
     BcContainerController,
+    FABRO_ANTHROPIC_ADAPTER,
     FABRO_ANTHROPIC_BASE_URL,
     FABRO_DEF_CONTAINER_DIR,
     FABRO_SERVER_DUMMY_ANTHROPIC_KEY,
@@ -640,12 +641,23 @@ def test_8q2x_defect_c_provider_registered_at_server_settings(tmp_path):
     "not configured" even with the server up — the SERVER does not read the
     workflow-level settings for model resolution.  The bootstrap must register
     the anthropic provider AT THE SERVER by appending a
-    `[llm.providers.anthropic]` block (shim base_url + DUMMY key) to the
-    server-level ~/.fabro/settings.toml AFTER install.
+    `[llm.providers.anthropic]` block to the server-level ~/.fabro/settings.toml
+    AFTER install.
 
-    TEETH: drop the server-level provider registration (the append to the
-    server settings) -> the `[llm.providers.anthropic]` block targeting the
-    SERVER settings path is absent -> RED.
+    lead-sp2m (Fix C correction): the appended block must carry ONLY
+    schema-valid fields — `adapter = "anthropic"` + `base_url = "<shim>/v1"` —
+    and NO `api_key =` line, because fabro 0.254.0 REJECTS `api_key` under
+    [llm.providers.anthropic] ("unknown field `api_key`") so `fabro validate`
+    exits 1.  The DUMMY key is supplied via the ANTHROPIC_API_KEY server-env
+    export instead, NEVER the settings file (ADR-049 D1).
+
+    TEETH:
+      * drop the server-level provider registration (the append to the server
+        settings) -> the [llm.providers.anthropic] block targeting the SERVER
+        settings path is absent -> RED.
+      * re-introduce an `api_key =` line in the settings append -> the
+        no-api_key-in-settings assertion REDs (and real `fabro validate` would
+        exit 1).
     """
     driver = _launch_workspace_mount_fabro(tmp_path)
     call = _engage_call(driver)
@@ -670,8 +682,9 @@ def test_8q2x_defect_c_provider_registered_at_server_settings(tmp_path):
         "Defect C: the provider registration must run AFTER `fabro install` "
         f"writes the base ~/.fabro/settings.toml; script:\n{script}"
     )
-    # The block registers the anthropic provider at the shim base_url with a
-    # DUMMY key (ADR-049 D1 — real cred rides agent-vault on the wire).
+    # The block registers the anthropic provider at the shim base_url with the
+    # SCHEMA-VALID fields adapter + base_url (ADR-049 D1 — no credential in the
+    # settings; real cred rides agent-vault on the wire).
     assert "[llm.providers.anthropic]" in script, (
         "Defect C: the appended block must register [llm.providers.anthropic]"
     )
@@ -679,8 +692,44 @@ def test_8q2x_defect_c_provider_registered_at_server_settings(tmp_path):
         "Defect C: the server-level provider must point at the shim base_url "
         f"{FABRO_ANTHROPIC_BASE_URL}"
     )
-    assert FABRO_SERVER_DUMMY_ANTHROPIC_KEY in script, (
-        "Defect C: the server-level provider must carry the DUMMY key"
+    assert f'adapter = "{FABRO_ANTHROPIC_ADAPTER}"' in script, (
+        "lead-sp2m: the server-level provider block must carry the "
+        f'schema-valid adapter = "{FABRO_ANTHROPIC_ADAPTER}" field; '
+        f"script:\n{script}"
+    )
+
+    # lead-sp2m TEETH: isolate the SETTINGS-APPEND fragment (the printf `%b`
+    # payload appended to the server settings) and assert it carries NO
+    # `api_key` field — fabro 0.254.0 rejects it and `fabro validate` exits 1.
+    m = re.search(
+        r"printf\s+'%b'\s+('(?:[^']|'\\'')*')\s+>> "
+        + re.escape(FABRO_SERVER_SETTINGS_CONTAINER_PATH),
+        script,
+    )
+    assert m, (
+        "lead-sp2m: expected a `printf '%b' <block> >> <settings>` provider "
+        f"append; script:\n{script}"
+    )
+    settings_append = m.group(1)
+    assert "[llm.providers.anthropic]" in settings_append, (
+        "lead-sp2m: the printf payload must be the provider block; "
+        f"got:\n{settings_append}"
+    )
+    assert "api_key" not in settings_append, (
+        "lead-sp2m: the [llm.providers.anthropic] block appended to the "
+        "server settings must NOT contain an `api_key` line — fabro 0.254.0 "
+        "rejects `api_key` under [llm.providers.anthropic] so `fabro validate` "
+        f"exits 1.  Offending append:\n{settings_append}"
+    )
+
+    # The DUMMY key is supplied via the ANTHROPIC_API_KEY server-env EXPORT
+    # (not the settings file).
+    assert f"export ANTHROPIC_API_KEY={FABRO_SERVER_DUMMY_ANTHROPIC_KEY}" in (
+        script
+    ), (
+        "lead-sp2m: the DUMMY ANTHROPIC_API_KEY must be exported in the "
+        "server's exec env (not written into the settings TOML); "
+        f"script:\n{script}"
     )
     assert "dummy" in FABRO_SERVER_DUMMY_ANTHROPIC_KEY.lower(), (
         "Defect C: the server-level provider key must be an explicit DUMMY "
