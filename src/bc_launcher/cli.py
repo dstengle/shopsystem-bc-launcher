@@ -150,6 +150,22 @@ def build_parser() -> argparse.ArgumentParser:
             "docker-socket mount is added."
         ),
     )
+    p_launch.add_argument(
+        "--fabro-path",
+        action="store_true",
+        help=(
+            "Launch on the FABRO ORCHESTRATOR path instead of the default "
+            "ADR-050 tmux/engage-tier path. On the fabro path the launcher "
+            "additionally starts the baked anthropic-oauth-shim as an "
+            "in-container background listener on 127.0.0.1:8788 and writes "
+            "fabro's effective settings ([llm.providers.anthropic] "
+            "base_url=http://127.0.0.1:8788/v1, adapter=anthropic) so fabro's "
+            "built-in anthropic provider routes through the shim. The native "
+            "fabro vault stays __PLACEHOLDER__-only and no real credential is "
+            "written (ADR-049); the credential rides agent-vault on the wire. "
+            "OFF by default — the tmux launch default is unchanged."
+        ),
+    )
     p_launch.add_argument("--shopmsg-dsn", help="SHOPMSG_DSN value for the container")
     p_launch.add_argument(
         "--image",
@@ -415,6 +431,9 @@ def main(argv: list[str] | None = None) -> int:
             agent_vault_vault=env_vals.get("AGENT_VAULT_VAULT"),
             workspace_mount=getattr(args, "workspace_mount", None),
             mount_docker_socket=bool(getattr(args, "mount_docker_socket", False)),
+            launch_path=(
+                "fabro" if bool(getattr(args, "fabro_path", False)) else "tmux"
+            ),
             debug=debug,
         )
         sys.stdout.write(result.stdout)

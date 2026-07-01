@@ -466,6 +466,157 @@ def _fabro_def_install_script(
         lines.append(f"printf %s {shlex.quote(b64)} | base64 -d > {q_target}")
     return "\n".join(lines) + "\n"
 
+
+# ---------------------------------------------------------------------------
+# Fabro orchestrator launch path — anthropic-oauth-shim + fabro provider wiring
+# (lead-vwib — LAUNCHER WIRING ONLY; the shim itself is lead-so2h's owned
+# artifact, a REAL stdlib ThreadingHTTPServer reverse proxy baked into bc-base
+# v0.3.44 at /usr/local/bin/anthropic-oauth-shim)
+# ---------------------------------------------------------------------------
+#
+# The DEFAULT launch path is the ADR-050 tmux/engage-tier path and is
+# UNCHANGED by this wiring.  The FABRO orchestrator launch path is an
+# ADDITIVE mode (``launch_path="fabro"`` / ``--fabro-path``) that, during
+# bring-up, additionally:
+#
+#   (a) STARTS the baked so2h shim in-container as a background listener with
+#       the shim's REAL serve args: ``anthropic-oauth-shim --host 127.0.0.1
+#       --port 8788``.  Once listening, an in-container agent's Anthropic
+#       traffic (its dummy ``x-api-key``) has a local endpoint; the shim
+#       strips ``x-api-key``, adds ``Authorization: Bearer <dummy>`` +
+#       ``anthropic-beta: oauth-2025-04-20``, and forwards via HTTPS_PROXY so
+#       agent-vault injects the real credential on the wire.
+#
+#   (b) WRITES fabro's EFFECTIVE settings into the placed def at
+#       ``/workspace/.fabro/settings.toml`` with ``[llm.providers.anthropic]``
+#       ``base_url = "http://127.0.0.1:8788/v1"`` and ``adapter = "anthropic"``
+#       (ADR-049 D2 — native Anthropic Messages format in both directions, NO
+#       OpenAI<->Anthropic translation adapter).
+#
+# NATIVE-VAULT INVARIANT (ADR-049 D1): the fabro vault stays
+# ``__PLACEHOLDER__``-only and NO real credential is written into the fabro
+# settings or the shim's own configuration on this path.  The real Anthropic
+# credential rides ONLY the agent-vault surface on the wire via the container
+# HTTPS_PROXY (the live dummy-x-api-key -> shim -> HTTPS_PROXY -> agent-vault
+# -> real-OAuth-200 round-trip is the lead's E2E, fabro-orchestration/02
+# @scenario_hash:9c7b4e8280665239 — NOT this launch path's in-container core).
+LAUNCH_PATH_TMUX = "tmux"
+LAUNCH_PATH_FABRO = "fabro"
+
+# The baked so2h shim binary + its REAL serve args (must match the shim's
+# own argparse: --host / --port).  Binding on 127.0.0.1:8788 is the endpoint
+# fabro's anthropic base_url points at.
+ANTHROPIC_OAUTH_SHIM_BIN = "/usr/local/bin/anthropic-oauth-shim"
+FABRO_SHIM_HOST = "127.0.0.1"
+FABRO_SHIM_PORT = 8788
+
+# The placed def's effective fabro settings file (settings.toml lives at the
+# def root alongside workflow.fabro / project.toml).
+FABRO_SETTINGS_CONTAINER_PATH = f"{FABRO_DEF_CONTAINER_DIR}/settings.toml"
+
+# The [llm.providers.anthropic] surface the launcher writes into fabro's
+# effective settings on the fabro path.  base_url points the built-in
+# anthropic provider at the local shim; adapter stays "anthropic" (native
+# format, no translation — ADR-049 D2).  NO credential slot is written here:
+# the credential rides agent-vault, never the fabro settings (ADR-049 D1).
+FABRO_ANTHROPIC_BASE_URL = f"http://{FABRO_SHIM_HOST}:{FABRO_SHIM_PORT}/v1"
+FABRO_ANTHROPIC_ADAPTER = "anthropic"
+
+
+def _fabro_shim_start_argv() -> list[str]:
+    """The argv the launcher uses to START the baked so2h shim in serve mode.
+
+    These are the shim's REAL serve args (``--host`` / ``--port`` per the
+    committed shim's argparse) targeting the fixed 127.0.0.1:8788 endpoint
+    that fabro's anthropic base_url points at.  Returned as a list so the
+    test can assert the launcher starts the shim at that mode + host + port.
+    """
+    return [
+        ANTHROPIC_OAUTH_SHIM_BIN,
+        "--host",
+        FABRO_SHIM_HOST,
+        "--port",
+        str(FABRO_SHIM_PORT),
+    ]
+
+
+def _fabro_shim_start_script() -> str:
+    """Build the ``/bin/sh -c`` script that starts the baked so2h shim as a
+    BACKGROUND listener on 127.0.0.1:8788.
+
+    The shim's ``serve_forever`` blocks, so it is backgrounded (``&``) and
+    disowned via ``nohup`` so the exec returns and the listener survives.
+    The argv is the shim's REAL serve args (``--host 127.0.0.1 --port 8788``).
+    """
+    import shlex
+
+    argv = " ".join(shlex.quote(tok) for tok in _fabro_shim_start_argv())
+    # nohup + background so the exec returns while the shim keeps listening;
+    # its own stderr log line ("[shim] listening on ...") goes to a logfile
+    # under the def dir so a launch never blocks on the serving loop.
+    log = shlex.quote(f"{FABRO_DEF_CONTAINER_DIR}/anthropic-oauth-shim.log")
+    return f"nohup {argv} >{log} 2>&1 &\n"
+
+
+def _fabro_settings_toml() -> str:
+    """The effective fabro settings TOML the launcher writes on the fabro path.
+
+    Carries ``[llm.providers.anthropic]`` with ``base_url`` pointed at the
+    local shim and ``adapter = "anthropic"`` (native format, no translation).
+    Writes NO credential slot — the real Anthropic credential rides
+    agent-vault on the wire, never fabro's settings (ADR-049 D1/D2).
+    """
+    return (
+        "# settings.toml -- EFFECTIVE fabro settings written by the "
+        "shopsystem-bc-launcher\n"
+        "# fabro orchestrator launch path (lead-vwib).  Points fabro's "
+        "built-in\n"
+        "# anthropic provider at the in-container anthropic-oauth-shim "
+        "(lead-so2h)\n"
+        f"# listening on {FABRO_SHIM_HOST}:{FABRO_SHIM_PORT}.  The adapter "
+        'stays "anthropic"\n'
+        "# so the shim speaks native Anthropic Messages format in both "
+        "directions;\n"
+        "# NO OpenAI<->Anthropic translation adapter is introduced "
+        "(ADR-049 D2).\n"
+        "#\n"
+        "# ADR-049 D1: NO real credential is written here.  The real "
+        "Anthropic\n"
+        "# credential rides ONLY the agent-vault surface on the wire via the\n"
+        "# container HTTPS_PROXY; fabro's native vault stays "
+        '"__PLACEHOLDER__"-only.\n'
+        "\n"
+        "[llm.providers.anthropic]\n"
+        f'base_url = "{FABRO_ANTHROPIC_BASE_URL}"\n'
+        f'adapter = "{FABRO_ANTHROPIC_ADAPTER}"\n'
+    )
+
+
+def _fabro_settings_install_script(
+    dest_path: str = FABRO_SETTINGS_CONTAINER_PATH,
+) -> str:
+    """Build a ``/bin/sh -c`` script that writes the effective fabro settings
+    into the placed def at ``dest_path``.
+
+    The TOML bytes are base64-encoded on the HOST and decoded on the
+    CONTAINER (same byte-safe channel the def-bundle placement uses), so the
+    written settings are byte-identical to ``_fabro_settings_toml()``
+    regardless of content.
+    """
+    import base64
+    import shlex
+
+    data = _fabro_settings_toml().encode("utf-8")
+    b64 = base64.b64encode(data).decode("ascii")
+    q_target = shlex.quote(dest_path)
+    q_parent = shlex.quote(os.path.dirname(dest_path))
+    return (
+        "set -e\n"
+        f"mkdir -p {q_parent}\n"
+        f"printf %s {shlex.quote(b64)} | base64 -d > {q_target}\n"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Operator-supplied agent-vault credential + TLS-trust injection
 # (bclaunch-5hi / bclaunch-7pf)
@@ -1154,6 +1305,7 @@ class BcContainerController:
         agent_vault_vault: str | None = None,
         workspace_mount: str | None = None,
         mount_docker_socket: bool = False,
+        launch_path: str = LAUNCH_PATH_TMUX,
         debug: bool = False,
     ) -> CommandResult:
         """
@@ -2012,6 +2164,92 @@ class BcContainerController:
                     f"({len(FABRO_DEF_FILES)} files) into "
                     f"{FABRO_DEF_CONTAINER_DIR} (lead-h2bj, ADR-051)\n"
                 )
+
+            # FABRO ORCHESTRATOR launch-path wiring (lead-vwib —
+            # @scenario_hash:8b5a1b9e5499293b).  ADDITIVE + GATED on
+            # launch_path == "fabro": the ADR-050 tmux/engage-tier default
+            # path is UNCHANGED (this block does not run on it).  On the
+            # fabro path, during bring-up (AFTER the def-bundle placement so
+            # settings.toml lands alongside the placed def, and BEFORE the
+            # FINAL ownership chown so the written settings + shim log are
+            # agent-owned), the launcher:
+            #
+            #   (a) STARTS the baked so2h shim (lead-so2h, real stdlib
+            #       ThreadingHTTPServer reverse proxy at
+            #       /usr/local/bin/anthropic-oauth-shim, bc-base v0.3.44) as a
+            #       BACKGROUND listener with its REAL serve args
+            #       `--host 127.0.0.1 --port 8788`, so an in-container agent's
+            #       Anthropic traffic has a local endpoint to send its dummy
+            #       x-api-key to.
+            #
+            #   (b) WRITES fabro's EFFECTIVE settings into the placed def at
+            #       settings.toml with [llm.providers.anthropic]
+            #       base_url = "http://127.0.0.1:8788/v1" pointing the
+            #       built-in anthropic provider at that shim, adapter left as
+            #       "anthropic" (native Anthropic Messages format both
+            #       directions, NO OpenAI<->Anthropic translation — ADR-049
+            #       D2).
+            #
+            # NATIVE-VAULT INVARIANT (ADR-049 D1): the fabro vault stays
+            # `__PLACEHOLDER__`-only (the def-bundle placement above wrote the
+            # placeholder-only asset) and NO real credential is written into
+            # the settings or the shim's own configuration here.  The real
+            # Anthropic credential rides ONLY the agent-vault surface on the
+            # wire via the container HTTPS_PROXY.
+            #
+            # Both steps run as the vscode agent user (like the def
+            # placement) so the written settings + shim log are agent-owned;
+            # a failure of either is a boot-convenience warning, NOT a
+            # precondition for the agent to run (mirrors the def-placement
+            # warn-and-continue disposition).
+            if launch_path == LAUNCH_PATH_FABRO:
+                # (a) Start the baked so2h shim as a background listener.
+                shim_result = self._driver.exec_run(
+                    container,
+                    ["/bin/sh", "-c", _fabro_shim_start_script()],
+                    user=AGENT_CONTAINER_USER,
+                )
+                if shim_result.returncode != 0:
+                    err_lines.append(
+                        "warning: anthropic-oauth-shim start failed (exit "
+                        f"{shim_result.returncode}): "
+                        f"{(shim_result.stderr or shim_result.stdout).strip()}"
+                        f"; fabro's anthropic provider may lack a local "
+                        f"endpoint on {FABRO_SHIM_HOST}:{FABRO_SHIM_PORT} but "
+                        "the agent will still be started (lead-vwib)\n"
+                    )
+                else:
+                    out_lines.append(
+                        "Started the baked anthropic-oauth-shim "
+                        f"({ANTHROPIC_OAUTH_SHIM_BIN}) as a background "
+                        f"listener on {FABRO_SHIM_HOST}:{FABRO_SHIM_PORT} "
+                        "(lead-vwib, lead-so2h)\n"
+                    )
+
+                # (b) Write fabro's effective settings pointing the anthropic
+                #     provider at the shim; no credential written (ADR-049).
+                settings_result = self._driver.exec_run(
+                    container,
+                    ["/bin/sh", "-c", _fabro_settings_install_script()],
+                    user=AGENT_CONTAINER_USER,
+                )
+                if settings_result.returncode != 0:
+                    err_lines.append(
+                        "warning: fabro effective-settings write failed (exit "
+                        f"{settings_result.returncode}): "
+                        f"{(settings_result.stderr or settings_result.stdout).strip()}"
+                        f"; {FABRO_SETTINGS_CONTAINER_PATH} may be missing but "
+                        "the agent will still be started (lead-vwib)\n"
+                    )
+                else:
+                    out_lines.append(
+                        "Wrote fabro effective settings to "
+                        f"{FABRO_SETTINGS_CONTAINER_PATH} "
+                        f"([llm.providers.anthropic] base_url="
+                        f"{FABRO_ANTHROPIC_BASE_URL}, adapter="
+                        f"{FABRO_ANTHROPIC_ADAPTER}; no credential written — "
+                        "ADR-049 D1/D2)\n"
+                    )
 
             # FINAL ownership assertion (lead-mf15, scenario
             # @scenario_hash:d9e4ce60e03df361).  TIGHTENS the lead-d64 /

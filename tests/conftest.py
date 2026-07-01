@@ -13106,3 +13106,366 @@ def then_vault_placeholder_only(placeholder):
         f"real-credential-shaped literal found in the fabro vault: "
         f"{suspicious!r} (ADR-049 forbids real creds in the fabro vault)"
     )
+
+
+# ===========================================================================
+# lead-vwib — fabro orchestrator launch-path anthropic-oauth-shim wiring PIN
+# (@scenario_hash:8b5a1b9e5499293b)
+#
+# LAUNCHER WIRING ONLY. The anthropic-oauth-shim is lead-so2h's owned artifact
+# — a REAL stdlib ThreadingHTTPServer reverse proxy committed at
+# docker/bc-base/anthropic-oauth-shim (baked into bc-base v0.3.44 at
+# /usr/local/bin/anthropic-oauth-shim). This block pins the LAUNCHER WIRING for
+# the fabro orchestrator launch path only.
+#
+# FIDELITY (test-fidelity-for-image-layer-container-runtime-scenarios: run the
+# REAL artifact, do not model it):
+# * LISTENER leg — EXECUTES the REAL committed so2h shim
+#   (`anthropic-oauth-shim --host 127.0.0.1 --port 8788`) and confirms it
+#   genuinely BINDS + listens on 127.0.0.1:8788 (a TCP connect succeeds), then
+#   stops it; AND asserts the launcher's fabro-path start argv targets that
+#   mode + host + port (the shim binary + --host 127.0.0.1 --port 8788). This
+#   proves BOTH that the real shim listens AND that the launcher starts it
+#   there.
+# * BASE_URL leg — parses the REAL fabro settings the launcher WROTE (recovered
+#   byte-verbatim from the launcher's own settings-write exec) and asserts
+#   [llm.providers.anthropic] base_url == http://127.0.0.1:8788/v1 + adapter ==
+#   anthropic.
+# * VAULT leg — the committed def's vaults/default/secrets.json stays
+#   __PLACEHOLDER__-only + no real cred in the written fabro settings/shim
+#   config on this path.
+#
+# The launch is driven against the REAL launcher (controller.launch with
+# launch_path="fabro") over the FakeDockerDriver, so every assertion binds to
+# the launcher's actual output (its recorded exec_calls), never to a model.
+# ===========================================================================
+
+import base64 as _vwib_base64
+import json as _vwib_json
+import socket as _vwib_socket
+import subprocess as _vwib_subprocess
+import sys as _vwib_sys
+import time as _vwib_time
+import tomllib as _vwib_tomllib
+
+from bc_launcher.controller import (
+    ANTHROPIC_OAUTH_SHIM_BIN as _VWIB_SHIM_BIN,
+    FABRO_ANTHROPIC_ADAPTER as _VWIB_ADAPTER,
+    FABRO_ANTHROPIC_BASE_URL as _VWIB_BASE_URL,
+    FABRO_SETTINGS_CONTAINER_PATH as _VWIB_SETTINGS_PATH,
+    FABRO_SHIM_HOST as _VWIB_SHIM_HOST,
+    FABRO_SHIM_PORT as _VWIB_SHIM_PORT,
+    _fabro_def_asset_root as _vwib_def_asset_root,
+    _fabro_shim_start_argv as _vwib_shim_start_argv,
+)
+
+# The REAL committed so2h shim source (the artifact baked into bc-base). The
+# listener leg EXECUTES this exact file to confirm it genuinely binds.
+_VWIB_REPO_ROOT = Path(__file__).resolve().parent.parent
+_VWIB_COMMITTED_SHIM = _VWIB_REPO_ROOT / "docker" / "bc-base" / "anthropic-oauth-shim"
+
+
+def _vwib_fabro_launch_exec_calls(ctx):
+    """The recorded exec_calls from the fabro-path launch under test."""
+    return ctx["fabro_launch_driver"].exec_calls
+
+
+def _vwib_shim_start_call(ctx):
+    """Locate the launcher exec that STARTS the baked shim on the fabro path.
+
+    Matches the `/bin/sh -c` script that invokes the shim binary with its serve
+    args. Returns the ExecCall or None.
+    """
+    for c in _vwib_fabro_launch_exec_calls(ctx):
+        if (
+            c.command[:2] == ["/bin/sh", "-c"]
+            and len(c.command) >= 3
+            and _VWIB_SHIM_BIN in c.command[2]
+            and f"--port {_VWIB_SHIM_PORT}" in c.command[2]
+        ):
+            return c
+    return None
+
+
+def _vwib_settings_write_call(ctx):
+    """Locate the launcher exec that WRITES fabro's effective settings.toml."""
+    for c in _vwib_fabro_launch_exec_calls(ctx):
+        if (
+            c.command[:2] == ["/bin/sh", "-c"]
+            and len(c.command) >= 3
+            and _VWIB_SETTINGS_PATH in c.command[2]
+            and "base64 -d" in c.command[2]
+        ):
+            return c
+    return None
+
+
+def _vwib_recover_written_settings(ctx) -> str:
+    """Recover the settings.toml bytes the launcher WROTE, byte-verbatim.
+
+    The launcher's settings-write exec base64-encodes the file bytes on the
+    host and base64-decodes them in the container. We recover the exact bytes
+    the launcher wrote by extracting the base64 payload from the recorded
+    script (binding to the launcher's REAL output, not a re-derivation).
+    """
+    call = _vwib_settings_write_call(ctx)
+    assert call is not None, (
+        "The fabro-path launcher did not emit a settings.toml write exec "
+        f"targeting {_VWIB_SETTINGS_PATH}. exec_calls: "
+        f"{[c.command[:3] for c in _vwib_fabro_launch_exec_calls(ctx)]!r}"
+    )
+    script = call.command[2]
+    # shlex.quote leaves a pure-base64 token UNQUOTED (no shell-special chars),
+    # so tolerate an optional surrounding single-quote.
+    m = re.search(
+        r"printf %s '?([A-Za-z0-9+/=]+)'? \| base64 -d", script
+    )
+    assert m, f"could not recover base64 settings payload from script: {script!r}"
+    return _vwib_base64.b64decode(m.group(1)).decode("utf-8")
+
+
+# --- Given: fabro-path launch ----------------------------------------------
+# ("the shopsystem-bc-launcher BC is installed" reuses the shared given at the
+# top of this file, which seeds ctx["credential_home"].)
+
+@given(parsers.parse(
+    'bc-container launch is run for BC name "{bc_name}" on the fabro '
+    'orchestrator launch path'))
+def vwib_launch_on_fabro_path(bc_name, ctx, fake_driver, controller, tmp_path):
+    """Drive the REAL launcher on the FABRO orchestrator path.
+
+    controller.launch(launch_path="fabro") over the FakeDockerDriver, so the
+    recorded exec_calls are the launcher's ACTUAL output: the shim-start exec
+    and the settings-write exec are exactly what the launcher issued.
+    """
+    manifest_path = tmp_path / "bc-manifest.yaml"
+    manifest_path.write_text(
+        "product: shopsystem product\n"
+        "bcs:\n"
+        f"  - name: {bc_name}\n"
+        f"    remote: https://github.com/shopsystem/{bc_name}.git\n"
+        "    role: bc\n"
+    )
+    result = controller.launch(
+        bc_name=bc_name,
+        repo_url=f"https://github.com/shopsystem/{bc_name}.git",
+        manifest_path=manifest_path,
+        credential_home=ctx.get("credential_home"),
+        launch_path="fabro",
+    )
+    assert result.exit_code == 0, (
+        f"fabro-path launch failed: stdout={result.stdout!r} "
+        f"stderr={result.stderr!r}"
+    )
+    ctx["fabro_launch_result"] = result
+    ctx["fabro_launch_driver"] = fake_driver
+    ctx["container_name"] = f"bc-{bc_name}"
+    ctx["bc_name"] = bc_name
+
+
+@given(parsers.parse(
+    'the container "{container_name}" is running on the pinned bc-base image '
+    'that carries the baked anthropic-oauth-shim at "{shim_path}" (scenario 73, '
+    '@scenario_hash:{h73}) and the self-contained fabro def whose native vault '
+    'holds only "{placeholder}" (scenario 75, @scenario_hash:{h75})'))
+def vwib_container_running_bc_base(
+    container_name, shim_path, h73, placeholder, h75, ctx, fake_driver
+):
+    assert fake_driver.is_running(container_name), (
+        f"Expected {container_name!r} to be running after the fabro-path launch."
+    )
+    ctx["container_name"] = container_name
+    ctx["vwib_shim_path"] = shim_path
+    ctx["vwib_placeholder"] = placeholder
+
+
+# --- When: structural inspection (no live agent-vault / LLM) ----------------
+
+@when(
+    "the fabro credential wiring the launcher established in that running "
+    "container is inspected structurally, without requiring a reachable "
+    "agent-vault or any live LLM call")
+def vwib_inspect_wiring(ctx):
+    # Purely structural: assertions read the launcher's recorded execs and the
+    # committed def/shim on disk. Nothing here reaches agent-vault or an LLM.
+    ctx["vwib_inspected"] = True
+
+
+# --- Then: listener leg (REAL shim binds + launcher starts it there) --------
+
+@then(parsers.parse(
+    'the baked anthropic-oauth-shim has been started in-container by the '
+    'launcher and is listening on "{host}:{port:d}", so an in-container '
+    "agent's Anthropic traffic has a local endpoint to send its dummy "
+    "x-api-key to"))
+def vwib_shim_started_and_listens(host, port, ctx):
+    # (1) The launcher STARTED the shim on the fabro path with the shim's REAL
+    #     serve args targeting host:port. Bind to the launcher's actual argv.
+    argv = _vwib_shim_start_argv()
+    assert argv[0] == _VWIB_SHIM_BIN
+    assert "--host" in argv and argv[argv.index("--host") + 1] == host
+    assert "--port" in argv and argv[argv.index("--port") + 1] == str(port), (
+        f"launcher shim-start argv must target port {port}; got {argv!r}"
+    )
+    start_call = _vwib_shim_start_call(ctx)
+    assert start_call is not None, (
+        "The fabro-path launcher did not emit a shim-start exec targeting "
+        f"{_VWIB_SHIM_BIN} --host {host} --port {port}. exec_calls: "
+        f"{[c.command[:3] for c in _vwib_fabro_launch_exec_calls(ctx)]!r}"
+    )
+    script = start_call.command[2]
+    assert _VWIB_SHIM_BIN in script
+    assert f"--host {host}" in script and f"--port {port}" in script, (
+        f"launcher shim-start script must serve --host {host} --port {port}; "
+        f"got {script!r}"
+    )
+
+    # (2) The REAL committed so2h shim GENUINELY binds + listens on host:port.
+    #     EXECUTE the actual committed shim file and confirm a TCP connect
+    #     succeeds, then stop it (fidelity: run the real artifact).
+    assert _VWIB_COMMITTED_SHIM.is_file(), (
+        f"committed shim missing at {_VWIB_COMMITTED_SHIM}"
+    )
+    proc = _vwib_subprocess.Popen(
+        [_vwib_sys.executable, str(_VWIB_COMMITTED_SHIM),
+         "--host", host, "--port", str(port)],
+        stdout=_vwib_subprocess.PIPE,
+        stderr=_vwib_subprocess.PIPE,
+    )
+    try:
+        listening = False
+        deadline = _vwib_time.time() + 10.0
+        while _vwib_time.time() < deadline:
+            if proc.poll() is not None:
+                out, err = proc.communicate()
+                raise AssertionError(
+                    "the REAL committed anthropic-oauth-shim exited before "
+                    f"binding {host}:{port} (rc={proc.returncode}): "
+                    f"stderr={err.decode(errors='replace')!r}"
+                )
+            try:
+                with _vwib_socket.create_connection((host, port), timeout=0.5):
+                    listening = True
+                    break
+            except OSError:
+                _vwib_time.sleep(0.1)
+        assert listening, (
+            "the REAL committed anthropic-oauth-shim did not accept a TCP "
+            f"connection on {host}:{port} within the deadline — it did not "
+            "bind/listen"
+        )
+    finally:
+        proc.terminate()
+        try:
+            proc.communicate(timeout=5)
+        except _vwib_subprocess.TimeoutExpired:
+            proc.kill()
+            proc.communicate()
+
+
+# --- Then: base_url leg (parse the REAL written settings) -------------------
+
+@then(parsers.parse(
+    'fabro\'s effective settings carry "{table}" with "base_url" set to '
+    '"{base_url}" pointing the built-in anthropic provider at that shim, with '
+    'the adapter left as "{adapter}" so the shim speaks native Anthropic '
+    "Messages format in both directions and no OpenAI-to-Anthropic format "
+    "translation is introduced (ADR-049 D2)"))
+def vwib_settings_base_url(table, base_url, adapter, ctx):
+    written = _vwib_recover_written_settings(ctx)
+    doc = _vwib_tomllib.loads(written)  # raises on invalid TOML
+    prov = doc.get("llm", {}).get("providers", {}).get("anthropic")
+    assert prov is not None, (
+        f"written fabro settings lack {table}; parsed: {doc!r}"
+    )
+    assert prov.get("base_url") == base_url == _VWIB_BASE_URL, (
+        f"{table} base_url must be {base_url!r}; got {prov.get('base_url')!r}"
+    )
+    # adapter stays "anthropic" — native format, NO translation adapter (teeth).
+    assert prov.get("adapter") == adapter == _VWIB_ADAPTER, (
+        f"{table} adapter must be {adapter!r} (native format, no "
+        f"OpenAI<->Anthropic translation); got {prov.get('adapter')!r}"
+    )
+    assert adapter == "anthropic", (
+        "teeth: a translation adapter (e.g. openai) REDs this scenario"
+    )
+
+
+# --- Then: vault leg (def vault placeholder-only; no cred in settings) ------
+
+@then(parsers.parse(
+    'the def\'s native fabro vault still holds only the literal value '
+    '"{placeholder}" for every provider-key and token slot it declares, with '
+    "no real credential written into fabro's native secret store on this "
+    "launch path (ADR-049 D1)"))
+def vwib_vault_placeholder_only(placeholder, ctx):
+    vault = _vwib_def_asset_root() / "vaults" / "default" / "secrets.json"
+    text = vault.read_text()
+    doc = _vwib_json.loads(text)
+    assert doc, "the fabro vault must declare at least one slot"
+    for slot, entry in doc.items():
+        assert entry.get("value") == placeholder, (
+            f"fabro vault slot {slot!r} must hold {placeholder!r} (ADR-049 D1); "
+            f"got {entry.get('value')!r}"
+        )
+    suspicious = re.findall(
+        r"(sk-[A-Za-z0-9_-]{12,}|ghp_[A-Za-z0-9]{12,}|"
+        r"github_pat_[A-Za-z0-9_]{12,})",
+        text,
+    )
+    assert not suspicious, (
+        f"real-credential-shaped literal found in the fabro vault: {suspicious!r}"
+    )
+
+
+# --- Then: real credential rides ONLY agent-vault; nowhere in vault/settings -
+
+@then(parsers.parse(
+    "the real Anthropic credential is nowhere in fabro's native vault or the "
+    "shim's own configuration on this launch path: it rides only the "
+    "agent-vault surface on the wire via the container HTTPS_PROXY (the dummy "
+    "x-api-key to in-container shim to HTTPS_PROXY to agent-vault to real OAuth "
+    "200 round-trip that fabro-orchestration/02, @scenario_hash:{h02}, pins is "
+    "exercised live at the lead end-to-end and is not part of this scenario's "
+    "in-container checkable core)"))
+def vwib_no_real_cred_on_path(h02, ctx):
+    # The written fabro settings carry NO credential slot and no cred-shaped
+    # literal (the credential rides agent-vault on the wire, not the settings).
+    written = _vwib_recover_written_settings(ctx)
+    suspicious = re.findall(
+        r"(sk-ant-[A-Za-z0-9_-]{12,}|sk-[A-Za-z0-9_-]{20,}|"
+        r"ghp_[A-Za-z0-9]{12,})",
+        written,
+    )
+    assert not suspicious, (
+        f"real-credential-shaped literal found in the WRITTEN fabro settings: "
+        f"{suspicious!r} (ADR-049 D1: the credential rides agent-vault, never "
+        f"fabro's settings)"
+    )
+    doc = _vwib_tomllib.loads(written)
+    prov = doc.get("llm", {}).get("providers", {}).get("anthropic", {})
+    # No api_key / token slot is written into the settings on this path.
+    for forbidden in ("api_key", "apiKey", "token", "x_api_key", "x-api-key",
+                      "secret", "credential"):
+        assert forbidden not in prov, (
+            f"fabro settings anthropic provider must NOT carry a {forbidden!r} "
+            f"slot on this path (ADR-049 D1); got {prov!r}"
+        )
+    # The shim's own configuration carries no baked REAL credential: the
+    # committed shim sources its dummy bearer from the env (SHIM_DUMMY_BEARER),
+    # defaulting to the self-evidently-dummy literal
+    # "sk-ant-oauth-dummy-proxy-injects-real" (the proxy injects the real cred),
+    # and never bakes a real secret. Confirm no real-cred-shaped literal in the
+    # committed shim source, tolerating the explicit dummy default.
+    shim_src = _VWIB_COMMITTED_SHIM.read_text()
+    shim_suspicious = [
+        tok
+        for tok in re.findall(
+            r"(sk-ant-[A-Za-z0-9_-]{20,}|ghp_[A-Za-z0-9]{20,})", shim_src
+        )
+        if "dummy" not in tok.lower() and "placeholder" not in tok.lower()
+    ]
+    assert not shim_suspicious, (
+        f"real-credential-shaped literal baked in the shim config/source: "
+        f"{shim_suspicious!r}"
+    )
