@@ -105,12 +105,22 @@ RUN set -e && \
     rm -f "/tmp/${AV_TARBALL}" /tmp/agent-vault-checksums.txt /tmp/agent-vault && \
     agent-vault --version
 
-# fabro — third-party Go binary from the fabro-sh/fabro releases (NOT
+# fabro — third-party RUST binary from the fabro-sh/fabro releases (NOT
 # pip-installable), baked onto PATH exactly like the bd / agent-vault binaries:
-# uname -m → ARCH case, download the pinned release, install onto /usr/local/bin,
-# and a build-time `fabro --version` self-check (like the agent-vault / dolt
-# self-checks) so a broken install FAILS the build rather than shipping a
-# non-launchable fabro.
+# uname -m → ARCH case, download the pinned release, verify its .sha256 sidecar,
+# install onto /usr/local/bin, and a build-time `fabro --version` self-check
+# (like the agent-vault / dolt self-checks) so a broken install FAILS the build
+# rather than shipping a non-launchable fabro.
+#
+# ASSET NAMING: fabro is a Rust project publishing TARGET-TRIPLE release assets
+# with NO version in the filename (verified via
+# `gh api repos/fabro-sh/fabro/releases/tags/v0.254.0 --jq '.assets[].name'`):
+#   x86_64 (amd64):  fabro-x86_64-unknown-linux-gnu.tar.gz  (+ .sha256)
+#   aarch64 (arm64): fabro-aarch64-unknown-linux-gnu.tar.gz (+ .sha256)
+# The tarball nests the binary one level under a fabro-<triple>/ directory
+# (fabro-<triple>/fabro), so it is extracted with --strip-components=1. This
+# replaces the earlier goreleaser-style guess (fabro_${VER}_linux_${ARCH}.tar.gz)
+# which 404'd against fabro's real Rust release assets (bead 0fz).
 #
 # The pin is PARAMETERIZED through a build ARG (FABRO_VERSION) so the
 # centralized scheduled poll (.github/workflows/poll-bc-base-deps.yml) can
@@ -122,15 +132,18 @@ ARG FABRO_VERSION=v0.254.0
 RUN set -e && \
     ARCH=$(uname -m) && \
     case "$ARCH" in \
-        x86_64)  FABRO_ARCH="amd64" ;; \
-        aarch64) FABRO_ARCH="arm64" ;; \
+        x86_64)  FABRO_TRIPLE="x86_64-unknown-linux-gnu" ;; \
+        aarch64) FABRO_TRIPLE="aarch64-unknown-linux-gnu" ;; \
         *)       echo "Unsupported architecture: $ARCH" && exit 1 ;; \
     esac && \
-    FABRO_TARBALL="fabro_${FABRO_VERSION#v}_linux_${FABRO_ARCH}.tar.gz" && \
-    FABRO_URL="https://github.com/fabro-sh/fabro/releases/download/${FABRO_VERSION}/${FABRO_TARBALL}" && \
-    curl -fsSL "${FABRO_URL}" | tar -xz -C /tmp && \
+    FABRO_TARBALL="fabro-${FABRO_TRIPLE}.tar.gz" && \
+    FABRO_BASE="https://github.com/fabro-sh/fabro/releases/download/${FABRO_VERSION}" && \
+    curl -fsSL "${FABRO_BASE}/${FABRO_TARBALL}" -o "/tmp/${FABRO_TARBALL}" && \
+    curl -fsSL "${FABRO_BASE}/${FABRO_TARBALL}.sha256" -o "/tmp/${FABRO_TARBALL}.sha256" && \
+    (cd /tmp && sha256sum -c "${FABRO_TARBALL}.sha256") && \
+    tar -xzf "/tmp/${FABRO_TARBALL}" -C /tmp --strip-components=1 && \
     install -m 0755 /tmp/fabro /usr/local/bin/fabro && \
-    rm -f /tmp/fabro && \
+    rm -f "/tmp/${FABRO_TARBALL}" "/tmp/${FABRO_TARBALL}.sha256" /tmp/fabro && \
     fabro --version
 
 # The anthropic-oauth-shim — a REAL baked launcher for the brokered Anthropic

@@ -12316,6 +12316,26 @@ def then_fabro_version_reports(ctx, version):
         "(/usr/local/bin/fabro); the baked binary must be resolvable at "
         "runtime."
     )
+    # The install RUN must derive fabro's REAL release-asset name: fabro is a
+    # Rust project publishing target-triple assets with NO version in the
+    # filename (fabro-<triple>.tar.gz). The earlier goreleaser-style guess
+    # (fabro_${VER}_linux_${ARCH}.tar.gz) 404'd against the real assets (0fz),
+    # so the Dockerfile must map the arch to the Rust triple and compose the
+    # versionless fabro-<triple>.tar.gz asset name — assert the REAL install
+    # shape so a regression back to the wrong (404'ing) pattern fails here.
+    assert "x86_64-unknown-linux-gnu" in stripped and \
+        "aarch64-unknown-linux-gnu" in stripped, (
+        "The bc-base Dockerfile fabro install does not map the arch to fabro's "
+        "Rust target triples (x86_64-unknown-linux-gnu / "
+        "aarch64-unknown-linux-gnu); fabro publishes target-triple release "
+        "assets, and the versionless goreleaser-style name 404s (bead 0fz)."
+    )
+    assert re.search(r"fabro-\$\{?FABRO_TRIPLE\}?\.tar\.gz", stripped), (
+        "The bc-base Dockerfile fabro install does not compose the real "
+        "versionless target-triple asset name (fabro-${FABRO_TRIPLE}.tar.gz); "
+        "the goreleaser-style fabro_${VER}_linux_${ARCH}.tar.gz name 404s "
+        "against fabro-sh/fabro's Rust release assets (bead 0fz)."
+    )
     # The build-time self-check (like the agent-vault/dolt self-checks) so a
     # broken install fails the build.
     assert re.search(r"fabro\s+--version", stripped), (
