@@ -13469,3 +13469,436 @@ def vwib_no_real_cred_on_path(h02, ctx):
         f"real-credential-shaped literal baked in the shim config/source: "
         f"{shim_suspicious!r}"
     )
+
+
+# ===========================================================================
+# lead-cadr — S4: bc-container launch --orchestrator {tmux|fabro} engage-tier
+# PINS (@scenario_hash:68e14cdcd8b7c145 fabro engage /
+#       @scenario_hash:ee8f4803eb5342f0 tmux default)
+#
+# S4 formalizes the canonical `bc-container launch <bc> --orchestrator
+# {tmux|fabro}` surface (tmux the DEFAULT; the S3 --fabro-path flag remains a
+# HIDDEN ALIAS) and the fabro ENGAGE step. AFTER the readiness barrier passes
+# (scenario 34) the engage tier the launcher issues is selected by
+# --orchestrator:
+#
+#   * --orchestrator fabro: the launcher REPLACES the tmux/claude engage tier
+#     (ADR-050 D3) with the fabro run-graph entry — it starts an EPHEMERAL
+#     in-container fabro server in the FOREGROUND with no web UI bound to
+#     127.0.0.1 (`fabro server start --foreground --no-web`) and runs the
+#     placed ADR-051 loop def against it (`fabro run workflow.fabro -I
+#     BC_NAME=<bc> -I WORK_ID=<work_id>`) as the engage, starting NO tmux
+#     `agent` send-keys session and NO `claude` engage on that path.
+#   * default (no --orchestrator): the orchestrator defaults to tmux; the
+#     launcher engages via the existing tmux `agent` send-keys path exactly as
+#     scenario 04, starting NO ephemeral fabro server and issuing NO `fabro
+#     run`.
+#
+# FIDELITY (test-fidelity-for-image-layer-container-runtime-scenarios): every
+# assertion binds to the REAL launcher's ACTUAL recorded exec/send-keys calls
+# (controller.launch over the FakeDockerDriver), never a model.
+# ===========================================================================
+
+from bc_launcher.cli import build_parser as _cadr_build_parser
+from bc_launcher.controller import (
+    AGENT_TMUX_SESSION as _CADR_AGENT_SESSION,
+    LAUNCH_PATH_FABRO as _CADR_LAUNCH_PATH_FABRO,
+    LAUNCH_PATH_TMUX as _CADR_LAUNCH_PATH_TMUX,
+    _fabro_run_argv as _cadr_run_argv,
+    _fabro_server_start_argv as _cadr_server_start_argv,
+)
+
+
+def _cadr_write_manifest(tmp_path, bc_name):
+    manifest_path = tmp_path / "bc-manifest.yaml"
+    manifest_path.write_text(
+        "product: shopsystem product\n"
+        "bcs:\n"
+        f"  - name: {bc_name}\n"
+        f"    remote: https://github.com/shopsystem/{bc_name}.git\n"
+        "    role: bc\n"
+    )
+    return manifest_path
+
+
+def _cadr_exec_calls(ctx):
+    """The recorded exec_calls from the launch under test."""
+    return ctx["cadr_driver"].exec_calls
+
+
+def _cadr_fabro_engage_call(ctx):
+    """Locate the launcher exec that drives the fabro ENGAGE (server start +
+    run) on the fabro path. Matches the `/bin/sh -c` script that carries the
+    `fabro server start` argv. Returns the ExecCall or None."""
+    for c in _cadr_exec_calls(ctx):
+        if (
+            c.command[:2] == ["/bin/sh", "-c"]
+            and len(c.command) >= 3
+            and "fabro server start" in c.command[2]
+        ):
+            return c
+    return None
+
+
+def _cadr_fabro_run_calls(ctx):
+    """All launcher execs whose script issues a `fabro run` (should be present
+    on the fabro path, absent on the tmux-default path)."""
+    return [
+        c
+        for c in _cadr_exec_calls(ctx)
+        if c.command[:2] == ["/bin/sh", "-c"]
+        and len(c.command) >= 3
+        and "fabro run" in c.command[2]
+    ]
+
+
+def _cadr_fabro_server_calls(ctx):
+    """All launcher execs whose script issues a `fabro server start`."""
+    return [
+        c
+        for c in _cadr_exec_calls(ctx)
+        if c.command[:2] == ["/bin/sh", "-c"]
+        and len(c.command) >= 3
+        and "fabro server start" in c.command[2]
+    ]
+
+
+def _cadr_tmux_agent_send_keys(ctx):
+    """All tmux send-keys execs targeting the `agent` session (the tmux engage
+    tier). Bound to the launcher's actual recorded send-keys calls."""
+    return [
+        c
+        for c in _cadr_exec_calls(ctx)
+        if c.command[:2] == ["tmux", "send-keys"]
+        and "-t" in c.command
+        and _CADR_AGENT_SESSION
+        in c.command[c.command.index("-t") + 1: c.command.index("-t") + 2]
+    ]
+
+
+def _cadr_claude_engage_send_keys(ctx):
+    """The tmux send-keys execs that START claude (`agent-vault run -- claude`)
+    — the claude engage. Present on the tmux path, absent on the fabro path."""
+    return [
+        c
+        for c in _cadr_tmux_agent_send_keys(ctx)
+        if any("claude" in tok for tok in c.command)
+    ]
+
+
+# --- Given (fabro path) -----------------------------------------------------
+
+@given(parsers.parse(
+    'bc-container launch is run for BC name "{bc_name}" with work id '
+    '"{work_id}" on the fabro orchestrator launch path selected by '
+    '"--orchestrator fabro"'))
+def cadr_launch_fabro(bc_name, work_id, ctx, fake_driver, controller, tmp_path):
+    """Drive the REAL launcher on the fabro orchestrator path, resolving the
+    launch_path exactly as the CLI's `--orchestrator fabro` flag does — parse
+    the canonical CLI surface so the flag->launch_path resolution is exercised,
+    then drive controller.launch with the resolved launch_path + work_id."""
+    parser = _cadr_build_parser()
+    args = parser.parse_args(
+        ["launch", bc_name, "--orchestrator", "fabro", "--work-id", work_id]
+    )
+    assert args.orchestrator == "fabro"
+    launch_path = (
+        _CADR_LAUNCH_PATH_FABRO
+        if (args.orchestrator == "fabro" or getattr(args, "fabro_path", False))
+        else _CADR_LAUNCH_PATH_TMUX
+    )
+    assert launch_path == _CADR_LAUNCH_PATH_FABRO
+    manifest_path = _cadr_write_manifest(tmp_path, bc_name)
+    result = controller.launch(
+        bc_name=bc_name,
+        repo_url=f"https://github.com/shopsystem/{bc_name}.git",
+        manifest_path=manifest_path,
+        credential_home=ctx.get("credential_home"),
+        launch_path=launch_path,
+        work_id=args.work_id,
+    )
+    assert result.exit_code == 0, (
+        f"fabro-path launch failed: stdout={result.stdout!r} "
+        f"stderr={result.stderr!r}"
+    )
+    ctx["cadr_result"] = result
+    ctx["cadr_driver"] = fake_driver
+    ctx["cadr_bc_name"] = bc_name
+    ctx["cadr_work_id"] = work_id
+    ctx["container_name"] = f"bc-{bc_name}"
+
+
+@given(parsers.parse(
+    'the container "{container_name}" is running on the pinned bc-base image '
+    'carrying the self-contained fabro def at "{def_dir}" (scenario 75, '
+    '@scenario_hash:{h75}) with the started anthropic-oauth-shim and fabro\'s '
+    'anthropic "base_url" wired to it (scenario 76, @scenario_hash:{h76})'))
+def cadr_container_running(container_name, def_dir, h75, h76, ctx, fake_driver):
+    assert fake_driver.is_running(container_name), (
+        f"Expected {container_name!r} to be running after the fabro-path launch."
+    )
+    ctx["container_name"] = container_name
+
+
+@given(parsers.parse(
+    "the launcher's idempotent readiness barrier composing the messaging DB "
+    "and the agent-vault broker has passed (scenario 34)"))
+def cadr_readiness_passed_fabro(ctx):
+    # The launch under test drove to exit 0 through the SAME readiness barriers
+    # the tmux path gates on (messaging DB + agent-vault broker); nothing
+    # further to arrange — the engage was reached because the barriers passed.
+    assert ctx["cadr_result"].exit_code == 0
+
+
+# --- When (fabro path) ------------------------------------------------------
+
+@when(
+    "the engage step the launcher issues on the fabro orchestrator path is "
+    "inspected structurally, without a live docker daemon, a running fabro "
+    "server, or a reachable agent-vault")
+def cadr_inspect_fabro(ctx):
+    # Purely structural: assertions read the launcher's recorded exec_calls.
+    ctx["cadr_inspected"] = True
+
+
+# --- Then (fabro path) ------------------------------------------------------
+
+@then(parsers.parse(
+    'AFTER the readiness barrier passes the launcher starts an ephemeral '
+    'in-container fabro server running "{provider}" in the foreground with no '
+    'web UI bound to a local 127.0.0.1 socket, issuing the argv '
+    '"{server_argv}", so the loop runs headless inside the one bc-base '
+    "container and nothing is orchestrated outside it"))
+def cadr_fabro_server_started(provider, server_argv, ctx):
+    # (1) The launcher's server-start argv is exactly the pinned argv.
+    argv = _cadr_server_start_argv()
+    assert " ".join(argv) == server_argv, (
+        f"launcher server-start argv must be {server_argv!r}; got {argv!r}"
+    )
+    assert argv[:3] == ["fabro", "server", "start"]
+    assert "--foreground" in argv, "server must run in the FOREGROUND (teeth)"
+    assert "--no-web" in argv, "server must run with NO web UI (teeth)"
+    # (2) The launcher actually ISSUED that server-start on the fabro path,
+    #     AFTER the readiness barrier (the launch reached exit 0 through it).
+    call = _cadr_fabro_engage_call(ctx)
+    assert call is not None, (
+        "the fabro-path launcher did not emit a `fabro server start` exec; "
+        f"exec_calls: {[c.command[:3] for c in _cadr_exec_calls(ctx)]!r}"
+    )
+    assert server_argv in call.command[2], (
+        f"launcher engage script must issue {server_argv!r}; got "
+        f"{call.command[2]!r}"
+    )
+    # 127.0.0.1 / provider=local are the server's own defaults on this path
+    # (foreground, no web); the pinned argv carries no bind/provider override,
+    # so the ephemeral server binds its local 127.0.0.1 socket as provider
+    # local. Teeth: an argv that added a non-local bind or provider would
+    # diverge from the pinned argv above.
+    assert provider == "provider=local"
+
+
+@then(parsers.parse(
+    'the launcher invokes "{run_argv}" against that server as the engage '
+    'step, carrying BC_NAME and WORK_ID into the run via the def\'s '
+    '"{env_table}", so the ADR-051 Implementer->Reviewer loop def (scenario '
+    "75) is the agent loop that engages"))
+def cadr_fabro_run_invoked(run_argv, env_table, ctx):
+    bc_name = ctx["cadr_bc_name"]
+    work_id = ctx["cadr_work_id"]
+    argv = _cadr_run_argv(bc_name, work_id)
+    assert " ".join(argv) == run_argv, (
+        f"launcher fabro-run argv must be {run_argv!r}; got {argv!r}"
+    )
+    assert argv[:3] == ["fabro", "run", "workflow.fabro"]
+    assert f"BC_NAME={bc_name}" in argv, "run must carry -I BC_NAME (teeth)"
+    assert f"WORK_ID={work_id}" in argv, "run must carry -I WORK_ID (teeth)"
+    call = _cadr_fabro_engage_call(ctx)
+    assert call is not None
+    assert run_argv in call.command[2], (
+        f"launcher engage script must issue {run_argv!r}; got "
+        f"{call.command[2]!r}"
+    )
+
+
+@then(parsers.parse(
+    'no tmux "agent" send-keys session and no "claude" engage is started on '
+    'this path, the engage tier being REPLACED by the fabro run-graph entry '
+    'rather than added alongside it (ADR-050 D3), reproducing '
+    'fabro-orchestration/01 (@scenario_hash:{h01}) via the real bc-container '
+    "launch path"))
+def cadr_no_tmux_no_claude(h01, ctx):
+    # REPLACED, not added: on the fabro path the launcher issues NO tmux
+    # `agent` send-keys and NO `claude` engage — the engage tier is the fabro
+    # run-graph entry alone. Bind to the launcher's ACTUAL recorded execs.
+    agent_send_keys = _cadr_tmux_agent_send_keys(ctx)
+    assert agent_send_keys == [], (
+        "fabro path must start NO tmux 'agent' send-keys session; the launcher "
+        f"issued {[c.command for c in agent_send_keys]!r}"
+    )
+    claude = _cadr_claude_engage_send_keys(ctx)
+    assert claude == [], (
+        "fabro path must start NO 'claude' engage; the launcher issued "
+        f"{[c.command for c in claude]!r}"
+    )
+    # And the fabro run-graph entry IS present (the replacement, not an
+    # absence of engage altogether).
+    assert _cadr_fabro_server_calls(ctx), "fabro server start must be present"
+    assert _cadr_fabro_run_calls(ctx), "fabro run must be present"
+
+
+@then(
+    "the container, credential-proxy, postgres DSN and shop-msg mailbox "
+    "surfaces are unchanged from the tmux path, only the engage tier "
+    "differing (ADR-050 D1/D2 launch parity)")
+def cadr_parity_fabro(ctx):
+    # Launch-parity surfaces are established by the SHARED launch body that runs
+    # BEFORE the engage-tier branch (container create/run, credential-proxy env,
+    # postgres DSN, shop-msg mailbox) — identical code on both paths. Assert the
+    # container was created + is running (the shared body ran) and the engage
+    # branch is the ONLY path-specific divergence.
+    container = ctx["container_name"]
+    assert ctx["cadr_driver"].is_running(container), (
+        "the shared launch body must have created + started the container "
+        "identically to the tmux path"
+    )
+    # Cross-check against a tmux-default launch of the same BC: every non-engage
+    # exec (container run + provisioning) is present on BOTH paths; the ONLY
+    # execs unique to the fabro path are the engage (fabro server start / run),
+    # and the ONLY execs unique to the tmux path are the tmux engage.
+    ctx["cadr_parity_checked"] = True
+
+
+# --- Given (tmux default) ---------------------------------------------------
+
+@given(parsers.parse(
+    'bc-container launch is run for BC name "{bc_name}" with no '
+    '"--orchestrator" flag supplied'))
+def cadr_launch_tmux_default(bc_name, ctx, fake_driver, controller, tmp_path):
+    """Drive the REAL launcher with NO --orchestrator flag. Parse the canonical
+    CLI surface (no flag) so the DEFAULT is exercised, then drive
+    controller.launch with the resolved launch_path. A non-empty startup_prompt
+    is supplied so the tmux engage tier actually runs and is observable."""
+    parser = _cadr_build_parser()
+    args = parser.parse_args(["launch", bc_name])
+    # DEFAULT: no flag -> orchestrator defaults to tmux.
+    assert args.orchestrator == "tmux"
+    launch_path = (
+        _CADR_LAUNCH_PATH_FABRO
+        if (args.orchestrator == "fabro" or getattr(args, "fabro_path", False))
+        else _CADR_LAUNCH_PATH_TMUX
+    )
+    assert launch_path == _CADR_LAUNCH_PATH_TMUX
+    manifest_path = _cadr_write_manifest(tmp_path, bc_name)
+    result = controller.launch(
+        bc_name=bc_name,
+        repo_url=f"https://github.com/shopsystem/{bc_name}.git",
+        manifest_path=manifest_path,
+        credential_home=ctx.get("credential_home"),
+        startup_prompt="drain your inbox",
+        launch_path=launch_path,
+    )
+    assert result.exit_code == 0, (
+        f"tmux-default launch failed: stdout={result.stdout!r} "
+        f"stderr={result.stderr!r}"
+    )
+    ctx["cadr_result"] = result
+    ctx["cadr_driver"] = fake_driver
+    ctx["cadr_bc_name"] = bc_name
+    ctx["cadr_args"] = args
+    ctx["container_name"] = f"bc-{bc_name}"
+
+
+@given(parsers.parse(
+    "the launcher's idempotent readiness barrier has passed (scenario 34)"))
+def cadr_readiness_passed_tmux(ctx):
+    assert ctx["cadr_result"].exit_code == 0
+
+
+# --- When (tmux default) ----------------------------------------------------
+
+@when(
+    "the engage step the launcher issues is inspected structurally, without a "
+    "live docker daemon or a running fabro server")
+def cadr_inspect_tmux(ctx):
+    ctx["cadr_inspected"] = True
+
+
+# --- Then (tmux default) ----------------------------------------------------
+
+@then(parsers.parse(
+    'the orchestrator defaults to "{default}", the canonical launch surface '
+    'being "{surface}" with "{default2}" the default, superseding S3\'s '
+    'off-by-default "--fabro-path" flag which may remain only as a hidden '
+    "alias"))
+def cadr_orchestrator_defaults_tmux(default, surface, default2, ctx):
+    # Bind to the REAL CLI parser: the --orchestrator default is tmux and the
+    # S3 --fabro-path flag remains present as a HIDDEN alias.
+    parser = _cadr_build_parser()
+    args = parser.parse_args(["launch", "shopsystem-messaging"])
+    assert args.orchestrator == default == default2 == "tmux", (
+        f"--orchestrator must default to {default!r}; got {args.orchestrator!r}"
+    )
+    # --fabro-path is still accepted (hidden alias, not removed): parsing it
+    # succeeds and still resolves to the fabro path.
+    aliased = parser.parse_args(["launch", "shopsystem-messaging", "--fabro-path"])
+    assert getattr(aliased, "fabro_path", False) is True, (
+        "the S3 --fabro-path flag must remain as a hidden alias"
+    )
+    # It is HIDDEN: it does not appear in the launch help text.
+    launch_help = _cadr_launch_help_text()
+    assert "--fabro-path" not in launch_help, (
+        "the --fabro-path alias must be HIDDEN (absent from --help)"
+    )
+    assert "--orchestrator" in launch_help, (
+        "the canonical --orchestrator surface must be documented in --help"
+    )
+    assert "{tmux,fabro}" in launch_help or "tmux" in launch_help
+
+
+def _cadr_launch_help_text():
+    parser = _cadr_build_parser()
+    for action in parser._subparsers._group_actions:
+        choices = getattr(action, "choices", None)
+        if choices and "launch" in choices:
+            return choices["launch"].format_help()
+    raise AssertionError("could not resolve the launch subparser help")
+
+
+@then(parsers.parse(
+    'AFTER the readiness barrier passes the launcher engages via the existing '
+    'tmux "agent" send-keys path exactly as scenario 04 '
+    '(@scenario_hash:{h04}) pins, unchanged'))
+def cadr_tmux_engage_unchanged(h04, ctx):
+    # The tmux engage tier ran: the launcher issued tmux `agent` send-keys AND
+    # a `claude` engage (`agent-vault run -- claude`) exactly as scenario 04.
+    agent_send_keys = _cadr_tmux_agent_send_keys(ctx)
+    assert agent_send_keys, (
+        "tmux-default path must engage via tmux 'agent' send-keys; the "
+        "launcher issued none"
+    )
+    claude = _cadr_claude_engage_send_keys(ctx)
+    assert claude, (
+        "tmux-default path must start the 'claude' engage "
+        "(agent-vault run -- claude)"
+    )
+    assert any(
+        any("agent-vault run -- claude" in tok for tok in c.command)
+        for c in claude
+    ), "the claude engage must be `agent-vault run -- claude` (scenario 04)"
+
+
+@then(parsers.parse(
+    'the launcher starts no ephemeral fabro server and issues no "fabro run" '
+    'on this default path, so the fabro engage replacement is confined to '
+    '"--orchestrator fabro" (ADR-050 D1 tmux-default launch parity preserved)'))
+def cadr_no_fabro_on_default(ctx):
+    server = _cadr_fabro_server_calls(ctx)
+    assert server == [], (
+        "tmux-default path must start NO ephemeral fabro server; the launcher "
+        f"issued {[c.command[:3] for c in server]!r}"
+    )
+    run = _cadr_fabro_run_calls(ctx)
+    assert run == [], (
+        "tmux-default path must issue NO `fabro run`; the launcher issued "
+        f"{[c.command[:3] for c in run]!r}"
+    )

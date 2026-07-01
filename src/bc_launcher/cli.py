@@ -151,19 +151,45 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     p_launch.add_argument(
+        "--orchestrator",
+        choices=["tmux", "fabro"],
+        default="tmux",
+        help=(
+            "Which orchestrator engages the BC agent AFTER the readiness "
+            "barrier passes (lead-cadr, ADR-050). 'tmux' (DEFAULT) engages via "
+            "the existing tmux 'agent' send-keys / agent-vault run -- claude "
+            "path (scenario 04), unchanged. 'fabro' REPLACES that engage tier "
+            "with the fabro run-graph entry: the launcher starts the baked "
+            "anthropic-oauth-shim on 127.0.0.1:8788 and writes fabro's "
+            "effective settings ([llm.providers.anthropic] "
+            "base_url=http://127.0.0.1:8788/v1, adapter=anthropic), then starts "
+            "an ephemeral in-container fabro server "
+            "(fabro server start --foreground --no-web) and runs the ADR-051 "
+            "loop def against it (fabro run workflow.fabro -I BC_NAME=<bc> -I "
+            "WORK_ID=<work_id>) as the engage — starting NO tmux 'agent' "
+            "send-keys session and NO 'claude' on that path. The native fabro "
+            "vault stays __PLACEHOLDER__-only and no real credential is written "
+            "(ADR-049); the credential rides agent-vault on the wire. Container "
+            "/ credential-proxy / postgres DSN / shop-msg mailbox surfaces are "
+            "unchanged on both paths — only the engage tier differs "
+            "(ADR-050 D1/D2)."
+        ),
+    )
+    p_launch.add_argument(
         "--fabro-path",
         action="store_true",
+        # HIDDEN ALIAS for --orchestrator fabro (lead-vwib S3 flag, superseded
+        # by the canonical --orchestrator surface in lead-cadr S4; kept working
+        # so vwib's scenario 76 fabro-path launch is not broken).
+        help=argparse.SUPPRESS,
+    )
+    p_launch.add_argument(
+        "--work-id",
+        default=None,
         help=(
-            "Launch on the FABRO ORCHESTRATOR path instead of the default "
-            "ADR-050 tmux/engage-tier path. On the fabro path the launcher "
-            "additionally starts the baked anthropic-oauth-shim as an "
-            "in-container background listener on 127.0.0.1:8788 and writes "
-            "fabro's effective settings ([llm.providers.anthropic] "
-            "base_url=http://127.0.0.1:8788/v1, adapter=anthropic) so fabro's "
-            "built-in anthropic provider routes through the shim. The native "
-            "fabro vault stays __PLACEHOLDER__-only and no real credential is "
-            "written (ADR-049); the credential rides agent-vault on the wire. "
-            "OFF by default — the tmux launch default is unchanged."
+            "WORK_ID carried into the fabro run's -I input on the "
+            "--orchestrator fabro engage path (fabro run workflow.fabro "
+            "-I BC_NAME=<bc> -I WORK_ID=<work_id>). Unused on the tmux path."
         ),
     )
     p_launch.add_argument("--shopmsg-dsn", help="SHOPMSG_DSN value for the container")
@@ -431,9 +457,19 @@ def main(argv: list[str] | None = None) -> int:
             agent_vault_vault=env_vals.get("AGENT_VAULT_VAULT"),
             workspace_mount=getattr(args, "workspace_mount", None),
             mount_docker_socket=bool(getattr(args, "mount_docker_socket", False)),
+            # Orchestrator selects the engage tier (lead-cadr).  The canonical
+            # surface is --orchestrator {tmux|fabro} (default tmux); the S3
+            # --fabro-path flag remains a HIDDEN ALIAS forcing fabro (lead-vwib
+            # scenario 76 stays green).
             launch_path=(
-                "fabro" if bool(getattr(args, "fabro_path", False)) else "tmux"
+                "fabro"
+                if (
+                    getattr(args, "orchestrator", "tmux") == "fabro"
+                    or bool(getattr(args, "fabro_path", False))
+                )
+                else "tmux"
             ),
+            work_id=getattr(args, "work_id", None),
             debug=debug,
         )
         sys.stdout.write(result.stdout)

@@ -522,6 +522,91 @@ FABRO_SETTINGS_CONTAINER_PATH = f"{FABRO_DEF_CONTAINER_DIR}/settings.toml"
 FABRO_ANTHROPIC_BASE_URL = f"http://{FABRO_SHIM_HOST}:{FABRO_SHIM_PORT}/v1"
 FABRO_ANTHROPIC_ADAPTER = "anthropic"
 
+# Fabro orchestrator ENGAGE step (lead-cadr — S4).  On the fabro launch path,
+# AFTER the readiness barrier passes, the launcher REPLACES the tmux/claude
+# engage tier (ADR-050 D3) with two execs:
+#
+#   1. Start an EPHEMERAL, in-container fabro server running provider=local in
+#      the FOREGROUND with NO web UI, bound to a local 127.0.0.1 socket, via
+#      the argv `fabro server start --foreground --no-web` — the loop runs
+#      headless inside the ONE bc-base container; nothing is orchestrated
+#      outside it.
+#   2. Run the placed ADR-051 Implementer->Reviewer loop def against that
+#      server as the engage: `fabro run workflow.fabro -I BC_NAME=<bc> -I
+#      WORK_ID=<work_id>`, carrying BC_NAME + WORK_ID into the run via the
+#      def's [run.environment.env].
+#
+# The engage tier is REPLACED, not added alongside: on the fabro path the
+# launcher starts NO tmux `agent` send-keys session and NO `claude` engage
+# (reproduces fabro-orchestration/01 @scenario_hash:1aeace4c593ab14f via the
+# real bc-container launch path).  Container / credential-proxy / postgres DSN
+# / shop-msg mailbox surfaces are UNCHANGED from the tmux path (ADR-050 D1/D2
+# launch parity) — only the engage tier differs.
+FABRO_BIN = "fabro"
+# The placed def's workflow file (relative to the def dir the engage runs in).
+FABRO_WORKFLOW_FILE = "workflow.fabro"
+
+
+def _fabro_server_start_argv() -> list[str]:
+    """The argv the launcher uses to START the ephemeral in-container fabro
+    server on the fabro engage path (lead-cadr).
+
+    provider=local, FOREGROUND, NO web UI, bound to a local 127.0.0.1 socket:
+    the loop runs headless inside the one bc-base container.  Returned as a
+    list so the test can assert the launcher issues exactly this argv.
+    """
+    return [FABRO_BIN, "server", "start", "--foreground", "--no-web"]
+
+
+def _fabro_run_argv(bc_name: str, work_id: str) -> list[str]:
+    """The argv the launcher uses to RUN the placed loop def against the
+    ephemeral fabro server as the ENGAGE step (lead-cadr).
+
+    `fabro run workflow.fabro -I BC_NAME=<bc_name> -I WORK_ID=<work_id>` — the
+    ADR-051 Implementer->Reviewer loop def (scenario 75) is the agent loop that
+    engages; BC_NAME + WORK_ID ride into the run via the def's
+    [run.environment.env].  Returned as a list so the test can assert the
+    launcher issues exactly this argv with the scenario's BC_NAME / WORK_ID.
+    """
+    return [
+        FABRO_BIN,
+        "run",
+        FABRO_WORKFLOW_FILE,
+        "-I",
+        f"BC_NAME={bc_name}",
+        "-I",
+        f"WORK_ID={work_id}",
+    ]
+
+
+def _fabro_engage_script(bc_name: str, work_id: str) -> str:
+    """Build the ``/bin/sh -c`` script that drives the fabro ENGAGE step in the
+    placed def dir (lead-cadr).
+
+    Starts the ephemeral fabro server in the FOREGROUND with no web UI, then
+    runs the loop def against it.  The server's foreground serve loop blocks,
+    so it is backgrounded so the ``fabro run`` engage can attach to it; both
+    execs run FROM the placed def dir so ``workflow.fabro`` resolves and the
+    server picks up the effective settings the launcher wrote alongside it.
+    """
+    import shlex
+
+    server_argv = " ".join(
+        shlex.quote(tok) for tok in _fabro_server_start_argv()
+    )
+    run_argv = " ".join(
+        shlex.quote(tok) for tok in _fabro_run_argv(bc_name, work_id)
+    )
+    def_dir = shlex.quote(FABRO_DEF_CONTAINER_DIR)
+    server_log = shlex.quote(f"{FABRO_DEF_CONTAINER_DIR}/fabro-server.log")
+    # cd into the def dir so workflow.fabro + settings.toml resolve; the
+    # foreground server is backgrounded so the run can engage against it.
+    return (
+        f"cd {def_dir} && "
+        f"nohup {server_argv} >{server_log} 2>&1 &\n"
+        f"{run_argv}\n"
+    )
+
 
 def _fabro_shim_start_argv() -> list[str]:
     """The argv the launcher uses to START the baked so2h shim in serve mode.
@@ -1306,6 +1391,7 @@ class BcContainerController:
         workspace_mount: str | None = None,
         mount_docker_socket: bool = False,
         launch_path: str = LAUNCH_PATH_TMUX,
+        work_id: str | None = None,
         debug: bool = False,
     ) -> CommandResult:
         """
@@ -2299,6 +2385,8 @@ class BcContainerController:
             probe_broker_address,
             out_lines,
             err_lines,
+            launch_path=launch_path,
+            work_id=work_id,
         )
 
     # ------------------------------------------------------------------
@@ -2363,6 +2451,112 @@ class BcContainerController:
         err_lines.append(f"launch diagnostic persisted to {path}\n")
         return path
 
+    def _fabro_engage(
+        self,
+        bc_name: str,
+        container: str,
+        dsn: str | None,
+        probe_broker_address: str,
+        work_id: str | None,
+        out_lines: list[str],
+        err_lines: list[str],
+    ) -> CommandResult:
+        """Drive the FABRO orchestrator ENGAGE step (lead-cadr — S4).
+
+        REPLACES the tmux/claude engage tier on the fabro launch path (ADR-050
+        D3): AFTER the SAME readiness barriers the tmux path gates on
+        (messaging DB + agent-vault broker — ADR-050 D1/D2 launch parity), the
+        launcher engages by
+
+          1. starting the EPHEMERAL in-container fabro server in the
+             FOREGROUND with no web UI, bound to a local 127.0.0.1 socket
+             (``fabro server start --foreground --no-web``), so the loop runs
+             headless inside the one bc-base container; and
+          2. running the placed ADR-051 Implementer->Reviewer loop def against
+             that server (``fabro run workflow.fabro -I BC_NAME=<bc> -I
+             WORK_ID=<work_id>``) as the engage.
+
+        It starts NO tmux ``agent`` send-keys session and NO ``claude`` engage
+        — the engage tier is REPLACED by the fabro run-graph entry, not added
+        alongside it (reproduces fabro-orchestration/01
+        @scenario_hash:1aeace4c593ab14f via the real bc-container launch path).
+        """
+        # Readiness barrier — messaging database reachability (IDENTICAL to the
+        # tmux path — ADR-050 D1/D2 launch parity).  On failure engage NOTHING.
+        if dsn and not self._driver.messaging_db_reachable(
+            dsn, container=container
+        ):
+            reason = (
+                f"messaging readiness failure: messaging database at "
+                f"{SHOPMSG_DSN_ENV}={dsn} is not reachable; fabro engage NOT "
+                f"started"
+            )
+            err_lines.append(reason + "\n")
+            self._write_launch_diagnostic(
+                bc_name, CAUSE_MARKER_MESSAGING_DB, reason, err_lines
+            )
+            return CommandResult(
+                exit_code=1,
+                stdout="".join(out_lines),
+                stderr="".join(err_lines),
+            )
+
+        # Readiness barrier — agent-vault broker reachability (IDENTICAL to the
+        # tmux path — ADR-026 / ADR-050 D1/D2 launch parity).
+        if not self._driver.agent_vault_reachable(
+            probe_broker_address, container=container
+        ):
+            reason = (
+                f"agent-vault readiness failure: agent-vault broker at "
+                f"{probe_broker_address} is not reachable; fabro engage NOT "
+                f"started"
+            )
+            err_lines.append(reason + "\n")
+            self._write_launch_diagnostic(
+                bc_name, CAUSE_MARKER_AGENT_VAULT, reason, err_lines
+            )
+            return CommandResult(
+                exit_code=1,
+                stdout="".join(out_lines),
+                stderr="".join(err_lines),
+            )
+
+        # ENGAGE (REPLACES the tmux/claude engage — ADR-050 D3).  One `/bin/sh
+        # -c` script cd's into the placed def dir, starts the ephemeral fabro
+        # server (foreground, no web, provider=local, 127.0.0.1), then runs the
+        # loop def against it carrying BC_NAME + WORK_ID.  Runs as the vscode
+        # agent user (the def + settings were placed agent-owned).  NO tmux
+        # session is created and NO `claude` is started on this path.
+        engage_result = self._driver.exec_run(
+            container,
+            ["/bin/sh", "-c", _fabro_engage_script(bc_name, work_id or "")],
+            user=AGENT_CONTAINER_USER,
+        )
+        if engage_result.returncode != 0:
+            reason = (
+                f"fabro engage failure: `fabro server start` / `fabro run "
+                f"{FABRO_WORKFLOW_FILE}` exited {engage_result.returncode}: "
+                f"{(engage_result.stderr or engage_result.stdout).strip()}"
+            )
+            err_lines.append("warning: " + reason + "\n")
+            return CommandResult(
+                exit_code=1,
+                stdout="".join(out_lines),
+                stderr="".join(err_lines),
+            )
+        out_lines.append(
+            "Fabro orchestrator engage (lead-cadr): started the ephemeral "
+            f"in-container fabro server ({' '.join(_fabro_server_start_argv())}"
+            ") and ran the ADR-051 loop def as the engage ("
+            f"{' '.join(_fabro_run_argv(bc_name, work_id or ''))}); no tmux "
+            "'agent' send-keys session and no 'claude' engage started on this "
+            "path — the engage tier is REPLACED by the fabro run-graph entry "
+            "(ADR-050 D3)\n"
+        )
+        return CommandResult(
+            exit_code=0, stdout="".join(out_lines), stderr="".join(err_lines)
+        )
+
     def _start_agent_session(
         self,
         bc_name: str,
@@ -2372,6 +2566,8 @@ class BcContainerController:
         probe_broker_address: str,
         out_lines: list[str],
         err_lines: list[str],
+        launch_path: str = LAUNCH_PATH_TMUX,
+        work_id: str | None = None,
     ) -> CommandResult:
         """Drive the agent-start sequence against an already-provisioned
         container: start the agent tmux session, gate on the two readiness
@@ -2384,7 +2580,44 @@ class BcContainerController:
         entry points (lead-k4k7).  ``out_lines`` / ``err_lines`` accumulate the
         result's stdout / stderr; the caller passes whatever preamble it has
         already logged.
+
+        ENGAGE TIER (lead-cadr — S4).  ``launch_path`` selects the engage tier
+        AFTER the readiness barriers pass; the barriers themselves and every
+        launch-parity surface (container / credential-proxy / postgres DSN /
+        shop-msg mailbox) are IDENTICAL on both paths (ADR-050 D1/D2):
+
+          * ``launch_path == "tmux"`` (DEFAULT): the EXISTING tmux ``agent``
+            send-keys / ``agent-vault run -- claude`` engage, UNCHANGED
+            (scenario 04, @scenario_hash:04236074a60ffcd7).  NO fabro server,
+            NO fabro run.
+          * ``launch_path == "fabro"``: the engage tier is REPLACED (ADR-050
+            D3) by the fabro run-graph entry — the launcher starts the
+            ephemeral in-container fabro server
+            (``fabro server start --foreground --no-web``) and runs the placed
+            ADR-051 loop def against it
+            (``fabro run workflow.fabro -I BC_NAME=<bc> -I WORK_ID=<work_id>``)
+            as the engage, and starts NO tmux ``agent`` send-keys session and
+            NO ``claude`` engage on this path.
+
+        ``work_id`` carries the WORK_ID into the fabro run's ``-I`` input; it
+        is unused on the tmux path.
         """
+        # FABRO ORCHESTRATOR ENGAGE (lead-cadr).  On the fabro path the engage
+        # tier is REPLACED, not added alongside (ADR-050 D3): the launcher
+        # starts NO tmux `agent` send-keys session and NO `claude` engage.
+        # The readiness barriers still gate the engage (identical to the tmux
+        # path — ADR-050 D1/D2 launch parity): on failure, engage NOTHING.
+        if launch_path == LAUNCH_PATH_FABRO:
+            return self._fabro_engage(
+                bc_name,
+                container,
+                dsn,
+                probe_broker_address,
+                work_id,
+                out_lines,
+                err_lines,
+            )
+
         # Start tmux session as vscode.  Claude Code refuses
         # --dangerously-skip-permissions when EUID==0 ("cannot be used with
         # root/sudo privileges for security reasons"), so the agent must
