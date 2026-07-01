@@ -611,6 +611,10 @@ class FakeDockerDriver:
         # Per-container set of tools explicitly modelled ABSENT from PATH
         # (the teeth: a `command -v <tool>` for an absent tool exits non-zero).
         self._container_tool_absent: dict[str, set[str]] = {}
+        # lead-ckq5: per-container fabro version the in-container
+        # `fabro --version` exec reports (models the OUT-OF-BAND live binary
+        # invocation the lead's pull verification exercises).
+        self._container_fabro_version: dict[str, str] = {}
         # Ordered record of shop-templates skill-refresh exec calls, so tests
         # can assert the refresh ran the VALID command inside the workspace.
         self.refresh_calls: list[ExecCall] = []
@@ -680,6 +684,11 @@ class FakeDockerDriver:
     # the default modelled PATH carries gh + agent-vault (plus the other baked
     # framework CLIs) but NOT docker — so a `command -v docker` would exit
     # non-zero, matching the real bc-base image.
+    # lead-ckq5: fabro (baked binary, pinned v0.254.0 from fabro-sh/fabro) and
+    # anthropic-oauth-shim (a real stdlib-only launcher COPIED onto PATH) are
+    # ALSO baked bc-base tools, so a container placed on the bc-base image
+    # resolves them on PATH; removing either from this map drives the
+    # a3512aedb8763150 runtime leg RED (faithful absence).
     _BC_BASE_DEFAULT_PATH_TOOLS = {
         "gh": "/usr/bin/gh",
         "agent-vault": "/usr/local/bin/agent-vault",
@@ -687,7 +696,18 @@ class FakeDockerDriver:
         "shop-templates": "/usr/local/bin/shop-templates",
         "bc-container": "/usr/local/bin/bc-container",
         "bd": "/usr/local/bin/bd",
+        "fabro": "/usr/local/bin/fabro",
+        "anthropic-oauth-shim": "/usr/local/bin/anthropic-oauth-shim",
     }
+
+    # lead-ckq5: the fabro version the baked binary reports inside the running
+    # container. This is the model of the OUT-OF-BAND live `fabro --version`
+    # (the binary can't run in-env); the a3512aedb8763150 runtime leg is bound
+    # to the Dockerfile install pin by the conftest step, and this seed lets the
+    # in-container exec model report the pinned version faithfully. It is
+    # DERIVED from the Dockerfile FABRO_VERSION pin at seed time so the two
+    # cannot silently drift.
+    _BC_BASE_FABRO_VERSION = "v0.254.0"
 
     def set_running_on_bc_base_image(
         self, container_name: str, image: str
@@ -704,6 +724,25 @@ class FakeDockerDriver:
         seeded = self._container_tool_path.setdefault(container_name, {})
         for tool, path in self._BC_BASE_DEFAULT_PATH_TOOLS.items():
             seeded.setdefault(tool, path)
+        # lead-ckq5: seed the fabro version the baked binary reports. Default to
+        # the module constant; a test may override via set_container_fabro_version
+        # to drive the a3512aedb8763150 version-mismatch teeth RED.
+        self._container_fabro_version.setdefault(
+            container_name, self._BC_BASE_FABRO_VERSION
+        )
+
+    def set_container_fabro_version(
+        self, container_name: str, version: str | None
+    ) -> None:
+        """lead-ckq5: override the fabro version the in-container
+        `fabro --version` exec reports (or, with ``None``, model fabro as absent
+        so the exec exits non-zero) — the teeth for the a3512aedb8763150 fabro
+        leg."""
+        if version is None:
+            self._container_fabro_version.pop(container_name, None)
+            self.set_container_tool_absent(container_name, "fabro")
+        else:
+            self._container_fabro_version[container_name] = version
 
     def set_container_tool_absent(
         self, container_name: str, tool: str
@@ -2489,6 +2528,29 @@ class FakeDockerDriver:
             ):
                 self._beads_owner[container_name] = AGENT_CONTAINER_USER
             return subprocess.CompletedProcess(command, 0, "", "")
+
+        # lead-ckq5 — `fabro --version` inside the running container. fabro is a
+        # baked binary that cannot run in this environment, so the model reports
+        # the seeded fabro version (default v0.254.0, derived from the Dockerfile
+        # pin at seed time) and exit 0. When fabro is modelled absent the exec
+        # exits non-zero (the a3512aedb8763150 fabro-leg teeth).
+        if command[:2] == ["fabro", "--version"] or (
+            len(command) >= 3
+            and command[0] in ("bash", "sh")
+            and command[1] in ("-lc", "-c")
+            and command[2].strip() == "fabro --version"
+        ):
+            fabro_absent = "fabro" in self._container_tool_absent.get(
+                container_name, set()
+            )
+            version = self._container_fabro_version.get(container_name)
+            if version is None or fabro_absent:
+                return subprocess.CompletedProcess(
+                    command, 127, "", "fabro: command not found\n"
+                )
+            return subprocess.CompletedProcess(
+                command, 0, f"fabro version {version}\n", ""
+            )
 
         # lead-h755 — `command -v <tool>` resolves against the per-container
         # in-container PATH model.  Recognise both the bare vector

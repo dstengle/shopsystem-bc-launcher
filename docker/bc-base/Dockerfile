@@ -105,6 +105,44 @@ RUN set -e && \
     rm -f "/tmp/${AV_TARBALL}" /tmp/agent-vault-checksums.txt /tmp/agent-vault && \
     agent-vault --version
 
+# fabro — third-party Go binary from the fabro-sh/fabro releases (NOT
+# pip-installable), baked onto PATH exactly like the bd / agent-vault binaries:
+# uname -m → ARCH case, download the pinned release, install onto /usr/local/bin,
+# and a build-time `fabro --version` self-check (like the agent-vault / dolt
+# self-checks) so a broken install FAILS the build rather than shipping a
+# non-launchable fabro.
+#
+# The pin is PARAMETERIZED through a build ARG (FABRO_VERSION) so the
+# centralized scheduled poll (.github/workflows/poll-bc-base-deps.yml) can
+# resolve fabro's latest canonical release from fabro-sh/fabro with the
+# workflow's OWN GITHUB_TOKEN, bump THIS ARG default in place when newer, commit
+# the bump, then rebuild + republish :latest carrying the resolved version. The
+# default below records the currently-pinned version (lead-ckq5).
+ARG FABRO_VERSION=v0.254.0
+RUN set -e && \
+    ARCH=$(uname -m) && \
+    case "$ARCH" in \
+        x86_64)  FABRO_ARCH="amd64" ;; \
+        aarch64) FABRO_ARCH="arm64" ;; \
+        *)       echo "Unsupported architecture: $ARCH" && exit 1 ;; \
+    esac && \
+    FABRO_TARBALL="fabro_${FABRO_VERSION#v}_linux_${FABRO_ARCH}.tar.gz" && \
+    FABRO_URL="https://github.com/fabro-sh/fabro/releases/download/${FABRO_VERSION}/${FABRO_TARBALL}" && \
+    curl -fsSL "${FABRO_URL}" | tar -xz -C /tmp && \
+    install -m 0755 /tmp/fabro /usr/local/bin/fabro && \
+    rm -f /tmp/fabro && \
+    fabro --version
+
+# The anthropic-oauth-shim — a REAL baked launcher for the brokered Anthropic
+# OAuth path (lead-ckq5). It is a committed stdlib-ONLY python3 launcher (no
+# third-party import required to run it), COPIED onto PATH and made executable
+# so it is resolvable inside the running container as `anthropic-oauth-shim` and
+# invoking it with its usage/help flag (`--help`) exits zero. It is a real
+# artifact, not a placeholder/stub.
+COPY anthropic-oauth-shim /usr/local/bin/anthropic-oauth-shim
+RUN chmod 0755 /usr/local/bin/anthropic-oauth-shim \
+    && anthropic-oauth-shim --help >/dev/null
+
 # beads (bd) — third-party Go binary from steveyegge/beads releases (NOT pip-installable)
 RUN set -e && \
     ARCH=$(uname -m) && \

@@ -71,6 +71,7 @@ jobs:
           #   shop-msg             -> dstengle/shopsystem-messaging
           #   scenarios            -> dstengle/shopsystem-scenarios
           #   beads                -> steveyegge/beads
+          #   fabro                -> fabro-sh/fabro
           #   shopsystem-bc-launcher -> dstengle/shopsystem-bc-launcher
           # The shopsystem-bc-launcher entry is the bc-base SELF-PIN
           # (493bbbb7dcb61d7e/e28886c34b0d4c65): the bc-base Dockerfile pins
@@ -85,6 +86,7 @@ jobs:
             "shop-msg|dstengle/shopsystem-messaging"
             "scenarios|dstengle/shopsystem-scenarios"
             "beads|steveyegge/beads"
+            "fabro|fabro-sh/fabro"
             "shopsystem-bc-launcher|dstengle/shopsystem-bc-launcher"
           )
 
@@ -114,6 +116,12 @@ jobs:
                 ;;
               beads)
                 current="$(grep -oP 'BD_VERSION=\K[0-9]+\.[0-9]+\.[0-9]+' "${DOCKERFILE}" || true)"
+                ;;
+              fabro)
+                # fabro is baked as a binary from fabro-sh/fabro pinned through
+                # the ARG FABRO_VERSION default; the poll bumps that ARG in
+                # place (lead-ckq5).
+                current="$(grep -oP 'ARG FABRO_VERSION=\Kv[0-9]+\.[0-9]+\.[0-9]+' "${DOCKERFILE}" || true)"
                 ;;
               shopsystem-bc-launcher)
                 # The bc-base SELF-PIN: bc-launcher pins its OWN code via a VCS
@@ -150,6 +158,11 @@ jobs:
                 ;;
               beads)
                 sed -i -E "s|(BD_VERSION=)[0-9]+\.[0-9]+\.[0-9]+|\1${latest_norm}|" "${DOCKERFILE}"
+                ;;
+              fabro)
+                # Bump the FABRO_VERSION ARG default in place to the resolved
+                # latest fabro-sh/fabro tag (lead-ckq5).
+                sed -i -E "s|(ARG FABRO_VERSION=)v[0-9]+\.[0-9]+\.[0-9]+|\1${latest}|" "${DOCKERFILE}"
                 ;;
               shopsystem-bc-launcher)
                 # Bump the bc-base SELF-PIN VCS line in place

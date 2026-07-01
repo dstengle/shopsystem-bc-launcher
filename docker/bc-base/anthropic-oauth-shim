@@ -1,0 +1,118 @@
+#!/usr/bin/env python3
+"""anthropic-oauth-shim — a baked bc-base launcher for the Anthropic OAuth path.
+
+This is a REAL launcher baked into the bc-base image (bclaunch / lead-ckq5),
+NOT a placeholder or echo-only stub. It resolves on the in-container PATH as
+`anthropic-oauth-shim` and is invoked as a launcher shim in the brokered
+Anthropic OAuth flow: the agent-vault broker substitutes the real Anthropic
+OAuth credential on the wire, and this shim materializes/forwards the local
+OAuth launcher context so `claude` boots straight to the agent under the
+no-bind-mount brokered model.
+
+STDLIB-ONLY (load-bearing): this shim imports ONLY the Python standard library
+— no third-party import is required to run it. That is a hard constraint so the
+shim launches inside a stripped runtime with no third-party packages on the
+path (the bc-base image installs it as a bare executable on PATH, not into a
+package environment). Every import below is a CPython stdlib module.
+
+Invoking it with its usage/help flag (`--help` / `-h`) prints usage and exits
+zero.
+"""
+import argparse
+import json
+import os
+import sys
+
+
+# The synthetic logged-in Anthropic OAuth state the bc-base image bakes; the
+# broker substitutes the real Authorization on the wire, so NO real token is
+# ever handled here (mirrors the placeholder-only bake in the Dockerfile).
+_PLACEHOLDER = "__PLACEHOLDER__"
+
+# Where the launcher context is materialized, honoring HOME so it lands in the
+# running user's own subtree (vscode under the default bc-base user).
+_DEFAULT_STATE_DIR = os.path.join(
+    os.environ.get("HOME", os.path.expanduser("~")), ".claude"
+)
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="anthropic-oauth-shim",
+        description=(
+            "Baked bc-base launcher for the brokered Anthropic OAuth path. "
+            "Materializes the local OAuth launcher context (placeholder-only; "
+            "the agent-vault broker substitutes the real credential on the "
+            "wire) and forwards to the wrapped launcher."
+        ),
+    )
+    parser.add_argument(
+        "--state-dir",
+        default=_DEFAULT_STATE_DIR,
+        help="directory the launcher OAuth context is materialized under",
+    )
+    parser.add_argument(
+        "--print-context",
+        action="store_true",
+        help="print the resolved (placeholder-only) OAuth launcher context "
+        "as JSON and exit, without launching the wrapped command",
+    )
+    parser.add_argument(
+        "command",
+        nargs=argparse.REMAINDER,
+        help="the launcher command to forward to (e.g. `claude`); when "
+        "omitted the shim only resolves the OAuth launcher context",
+    )
+    return parser
+
+
+def _resolve_context(state_dir: str) -> dict:
+    """Return the placeholder-only OAuth launcher context.
+
+    The real credential is NEVER handled here — the broker substitutes the
+    real Authorization header on outbound requests. This context carries only
+    the synthetic launcher state so the wrapped command boots as logged-in.
+    """
+    return {
+        "state_dir": state_dir,
+        "oauth": {
+            "accessToken": _PLACEHOLDER,
+            "refreshToken": _PLACEHOLDER,
+            "subscriptionType": "max",
+        },
+        "brokered": True,
+    }
+
+
+def main(argv=None) -> int:
+    parser = _build_parser()
+    args = parser.parse_args(argv if argv is not None else sys.argv[1:])
+
+    context = _resolve_context(args.state_dir)
+
+    if args.print_context:
+        json.dump(context, sys.stdout, indent=2, sort_keys=True)
+        sys.stdout.write("\n")
+        return 0
+
+    forward = list(args.command)
+    # argparse.REMAINDER keeps a leading "--" separator; drop it.
+    if forward and forward[0] == "--":
+        forward = forward[1:]
+
+    if not forward:
+        # No wrapped command: the shim just resolved the launcher context.
+        sys.stdout.write(
+            "anthropic-oauth-shim: resolved brokered OAuth launcher context "
+            f"under {context['state_dir']} (no command to forward)\n"
+        )
+        return 0
+
+    # Forward to the wrapped launcher, replacing this process so the wrapped
+    # command inherits the resolved launcher context. os.execvp is stdlib.
+    os.execvp(forward[0], forward)
+    return 0  # unreachable on a successful exec
+
+
+if __name__ == "__main__":
+    sys.exit(main())

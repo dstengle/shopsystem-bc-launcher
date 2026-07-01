@@ -12208,3 +12208,441 @@ def then_container_version_overrides_upstream(rel_ver, base_ver, ctx):
         f"overridden to {rel_ver!r}."
     )
     assert "ref_name" in val or val == rel_ver
+
+
+# ===========================================================================
+# lead-ckq5 — bc-base bakes fabro v0.254.0 + the anthropic-oauth-shim, and the
+# centralized poll enrolls fabro as a 6th baked dependency.
+#
+# Scenario a3512aedb8763150 (runtime present + launchable):
+#   * fabro is a baked BINARY that cannot run in-env; its runtime leg is bound
+#     to the docker/bc-base/Dockerfile install (pinned v0.254.0 from
+#     fabro-sh/fabro onto PATH, a real download RUN — comment-stripped
+#     detection). The live `fabro --version` is modelled through the
+#     FakeDockerDriver in-container exec seam (seeded from the Dockerfile pin),
+#     which is also the lead's pull verification and is build-time self-checked.
+#   * the anthropic-oauth-shim is a REAL COMMITTED FILE, so its leg EXECUTES the
+#     actual committed shim (`python3 -I <shim> --help`) and asserts exit 0 AND
+#     stdlib-only (isolated interpreter + import scan). This is eqao-style
+#     real-artifact execution, not a model. "Not a placeholder": the shim must
+#     have real launcher content (not empty / echo-only).
+#
+# Scenario 4fc67c610cba6227 (poll enrollment): bound to the REAL committed
+# poll-bc-base-deps.yml executable body via _strip_yaml_comments (a comment-only
+# fabro mapping must NOT satisfy — the 5vyb pattern).
+# ===========================================================================
+
+_FABRO_PIN = "v0.254.0"
+_FABRO_CANONICAL_REPO = "fabro-sh/fabro"
+_ANTHROPIC_OAUTH_SHIM_NAME = "anthropic-oauth-shim"
+
+
+def _committed_oauth_shim_path() -> Path | None:
+    """Return the committed anthropic-oauth-shim file the bc-base Dockerfile
+    COPYs onto PATH, or None. Discovered by scanning the bc-base Dockerfile's
+    build context for the file COPYd as anthropic-oauth-shim."""
+    dockerfile = _find_bc_base_dockerfile()
+    if dockerfile is None:
+        return None
+    ctx_dir = dockerfile.parent
+    # The Dockerfile COPYs "<src> /usr/local/bin/anthropic-oauth-shim"; find the
+    # committed source in the build context.
+    dtext = dockerfile.read_text()
+    m = re.search(
+        r"(?im)^\s*COPY\s+(\S+)\s+\S*/anthropic-oauth-shim\b", dtext
+    )
+    if m:
+        candidate = ctx_dir / m.group(1)
+        if candidate.is_file():
+            return candidate
+    # Fallback: a file literally named anthropic-oauth-shim in the context.
+    candidate = ctx_dir / _ANTHROPIC_OAUTH_SHIM_NAME
+    if candidate.is_file():
+        return candidate
+    return None
+
+
+# --- Scenario a3512aedb8763150 --------------------------------------------
+
+@when(parsers.parse(
+    '"fabro --version" is executed inside that running container'))
+def when_fabro_version_executed(ctx, fake_driver):
+    container_name = ctx["container_name"]
+    ctx["fabro_version_result"] = fake_driver.exec_run(
+        container_name, ["fabro", "--version"]
+    )
+
+
+@then(parsers.parse(
+    'it exits zero and reports the fabro version "{version}"'))
+def then_fabro_version_reports(ctx, version):
+    result = ctx["fabro_version_result"]
+    assert result.returncode == 0, (
+        f"`fabro --version` exited {result.returncode} inside the running "
+        "bc-base container; fabro must be a baked, launchable binary (exit 0). "
+        f"stderr: {result.stderr!r}"
+    )
+    assert version in result.stdout, (
+        f"`fabro --version` reported {result.stdout!r}, which does not carry "
+        f"the pinned fabro version {version!r}."
+    )
+
+    # BIND the runtime leg to the Dockerfile install (fabro is a binary that
+    # cannot run in-env): the docker/bc-base/Dockerfile must install fabro
+    # PINNED to this version from fabro-sh/fabro onto PATH via a REAL download
+    # RUN — a comment or placeholder must NOT satisfy. Detect against the
+    # comment-stripped Dockerfile so a commented-out install cannot pass.
+    dockerfile = _find_bc_base_dockerfile()
+    assert dockerfile is not None, "No bc-base Dockerfile found."
+    stripped = _strip_dockerfile_comments(dockerfile.read_text())
+    # The pin is parameterized through an ARG default so the poll can bump it.
+    assert re.search(
+        r"ARG\s+FABRO_VERSION=" + re.escape(version) + r"\b", stripped
+    ), (
+        "The bc-base Dockerfile does not pin fabro at "
+        f"{version!r} via an ARG FABRO_VERSION default (comment-stripped body); "
+        "a comment-only or absent pin does not satisfy the baked-fabro leg."
+    )
+    # A REAL install RUN downloading fabro from fabro-sh/fabro onto PATH.
+    assert _FABRO_CANONICAL_REPO in stripped, (
+        "The bc-base Dockerfile executable body does not download fabro from "
+        f"{_FABRO_CANONICAL_REPO!r}; the fabro leg requires a real install RUN, "
+        "not a comment/placeholder."
+    )
+    assert re.search(
+        r"install\b[^\n]*/usr/local/bin/fabro", stripped
+    ) or re.search(r"/usr/local/bin/fabro", stripped), (
+        "The bc-base Dockerfile does not install fabro onto PATH "
+        "(/usr/local/bin/fabro); the baked binary must be resolvable at "
+        "runtime."
+    )
+    # The build-time self-check (like the agent-vault/dolt self-checks) so a
+    # broken install fails the build.
+    assert re.search(r"fabro\s+--version", stripped), (
+        "The bc-base Dockerfile has no build-time `fabro --version` self-check; "
+        "a broken fabro install would ship instead of failing the build."
+    )
+
+
+@then(
+    "the anthropic-oauth-shim is resolvable inside the container as a baked "
+    "launcher, and invoking that launcher with its usage/help flag exits zero "
+    "using the python standard library alone with no third-party import "
+    "required")
+def then_oauth_shim_launchable_stdlib_only(ctx, fake_driver):
+    container_name = ctx["container_name"]
+    # (1) RESOLVABLE inside the container as a baked launcher (in-container PATH
+    # model): `command -v anthropic-oauth-shim` exits zero + prints a path.
+    resolve = fake_driver.exec_run(
+        container_name, ["command", "-v", _ANTHROPIC_OAUTH_SHIM_NAME]
+    )
+    assert resolve.returncode == 0 and resolve.stdout.strip(), (
+        "anthropic-oauth-shim is NOT resolvable on the in-container PATH; the "
+        "baked launcher must be present + on PATH inside the running container."
+    )
+
+    # (2) EXECUTE the REAL COMMITTED shim (eqao-style real-artifact execution,
+    # NOT a model): invoke `python3 -I <committed shim> --help` and assert exit
+    # 0. `-I` runs in ISOLATED mode (ignores PYTHONPATH and the user site dir),
+    # so a passing run proves the shim launches with NO third-party package on
+    # the path — the stdlib-only constraint, executed.
+    shim = _committed_oauth_shim_path()
+    assert shim is not None, (
+        "No committed anthropic-oauth-shim file found in the bc-base build "
+        "context; the launcher must be a REAL committed artifact the Dockerfile "
+        "COPYs onto PATH, not merely declared."
+    )
+    ctx["oauth_shim_path"] = shim
+    help_run = subprocess.run(
+        [sys.executable, "-I", str(shim), "--help"],
+        capture_output=True, text=True,
+    )
+    assert help_run.returncode == 0, (
+        f"Executing the committed shim `python3 -I {shim} --help` exited "
+        f"{help_run.returncode}; the usage/help flag must exit zero. "
+        f"stderr: {help_run.stderr!r}"
+    )
+    assert help_run.stdout.strip(), (
+        "The committed shim's --help produced no usage output; a real launcher "
+        "must print usage on --help."
+    )
+
+    # (3) STDLIB-ONLY, proven by import scan in addition to the isolated
+    # execution above: every top-level `import X` / `from X import` module the
+    # shim references must be a standard-library module. A third-party import
+    # would be absent from sys.stdlib_module_names.
+    src = shim.read_text()
+    imported = _top_level_imported_modules(src)
+    stdlib = set(sys.stdlib_module_names)
+    # Builtins like __future__ are stdlib too; sys.stdlib_module_names covers
+    # them. Anything not in stdlib is a third-party import.
+    third_party = sorted(m for m in imported if m not in stdlib)
+    assert not third_party, (
+        "The anthropic-oauth-shim imports non-stdlib module(s) "
+        f"{third_party!r}; it must use the python standard library ALONE with "
+        "no third-party import required."
+    )
+
+
+@then(
+    "both fabro and the anthropic-oauth-shim are real baked artifacts present "
+    "in the running container, not placeholders and not merely declared in the "
+    "image manifest")
+def then_both_real_baked_artifacts(ctx, fake_driver):
+    container_name = ctx["container_name"]
+    # fabro: resolvable on PATH AND its --version already exited zero reporting
+    # the pinned version (asserted above); re-confirm PATH resolution here so
+    # this Then stands on its own.
+    fabro_resolve = fake_driver.exec_run(
+        container_name, ["command", "-v", "fabro"]
+    )
+    assert fabro_resolve.returncode == 0 and fabro_resolve.stdout.strip(), (
+        "fabro is NOT resolvable on the in-container PATH; it must be a real "
+        "baked binary, not merely declared."
+    )
+
+    # anthropic-oauth-shim: NOT a placeholder / echo-only stub. The committed
+    # file must have real launcher content — a python launcher that parses args
+    # and does real work, not a bare `echo`/empty stub.
+    shim = ctx.get("oauth_shim_path") or _committed_oauth_shim_path()
+    assert shim is not None, "No committed anthropic-oauth-shim file found."
+    src = shim.read_text()
+    non_comment = "\n".join(
+        ln for ln in src.splitlines()
+        if ln.strip() and not ln.lstrip().startswith("#")
+    )
+    assert len(non_comment) > 100, (
+        "The committed anthropic-oauth-shim has essentially no executable "
+        "content; it looks like a placeholder/stub, not a real launcher."
+    )
+    stub_signatures = (
+        non_comment.strip() in ("", "true", ":", "exit 0")
+        or re.fullmatch(r"\s*echo\b.*", non_comment.strip()) is not None
+    )
+    assert not stub_signatures, (
+        "The committed anthropic-oauth-shim is an echo-only / trivial stub, not "
+        "a real launcher artifact."
+    )
+    # Real launcher content: it defines a main entrypoint and parses arguments.
+    assert "argparse" in src or "sys.argv" in src, (
+        "The anthropic-oauth-shim does not parse arguments; a real launcher "
+        "handling a usage/help flag must, so this looks like a placeholder."
+    )
+    assert "def main" in src, (
+        "The anthropic-oauth-shim defines no main entrypoint; it looks like a "
+        "placeholder rather than a real launcher."
+    )
+
+
+def _strip_dockerfile_comments(text: str) -> str:
+    """Return the Dockerfile text with full-line "# ..." comment lines removed
+    (so a commented-out install/pin cannot masquerade as executable)."""
+    out = []
+    for line in text.splitlines():
+        if line.lstrip().startswith("#"):
+            continue
+        out.append(line)
+    return "\n".join(out)
+
+
+def _top_level_imported_modules(src: str) -> set[str]:
+    """Return the set of top-level module names imported by the python source,
+    via AST (robust against import ordering / aliasing)."""
+    import ast
+
+    tree = ast.parse(src)
+    modules: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                modules.add(alias.name.split(".")[0])
+        elif isinstance(node, ast.ImportFrom):
+            if node.level == 0 and node.module:
+                modules.add(node.module.split(".")[0])
+    return modules
+
+
+# --- Scenario 4fc67c610cba6227 (poll enrollment) --------------------------
+
+@given(parsers.parse(
+    "the bc-base Dockerfile in shopsystem-bc-launcher bakes fabro at pin "
+    '"{pin}" as a baked dependency alongside shop-templates, shop-msg, '
+    "scenarios, and beads"))
+def given_dockerfile_bakes_fabro(pin, ctx):
+    ctx["fabro_pin"] = pin
+    dockerfile = _find_bc_base_dockerfile()
+    assert dockerfile is not None, "No bc-base Dockerfile found."
+    ctx["bc_base_dockerfile"] = dockerfile
+    stripped = _strip_dockerfile_comments(dockerfile.read_text())
+    assert re.search(
+        r"ARG\s+FABRO_VERSION=" + re.escape(pin) + r"\b", stripped
+    ), (
+        f"The bc-base Dockerfile does not bake fabro pinned at {pin!r} via an "
+        "ARG FABRO_VERSION default (comment-stripped body)."
+    )
+    ctx["poll_workflow"] = _centralized_poll_workflow()
+    assert ctx["poll_workflow"] is not None and not isinstance(
+        ctx["poll_workflow"], list
+    ), "No single centralized scheduled check-bump-rebuild workflow found."
+    ctx["poll_workflow_text"] = ctx["poll_workflow"][0].read_text()
+
+
+@given("the single centralized scheduled bc-launcher workflow is the one poll "
+       "that check-bump-rebuilds bc-base for its baked dependencies")
+def given_single_centralized_poll(ctx):
+    wf = _centralized_poll_workflow()
+    assert wf is not None and not isinstance(wf, list), (
+        "Expected exactly one centralized scheduled bc-base check-bump-rebuild "
+        "workflow."
+    )
+    ctx["poll_workflow"] = wf
+    ctx["poll_workflow_text"] = wf[0].read_text()
+
+
+@when("the workflow's dependency check runs and its executable body, with YAML "
+      "comment lines excluded, is inspected")
+def when_poll_exec_body_inspected(ctx):
+    ctx.setdefault("poll_workflow", _centralized_poll_workflow())
+    ctx.setdefault(
+        "poll_workflow_text", ctx["poll_workflow"][0].read_text()
+    )
+    ctx["poll_exec_body"] = _strip_yaml_comments(ctx["poll_workflow_text"])
+
+
+@then(parsers.parse(
+    'the executable body enumerates "{dep}" mapped to its canonical public '
+    'release source "{canonical_repo}"'))
+def then_exec_body_enumerates_fabro(dep, canonical_repo, ctx):
+    text = ctx.get("poll_exec_body") or _strip_yaml_comments(
+        ctx["poll_workflow_text"]
+    )
+    pairing = f"{dep}|{canonical_repo}"
+    assert pairing in text, (
+        "The centralized poll executable body (comments stripped) does not "
+        f"enumerate the DEPS mapping {pairing!r}; fabro must be an executable "
+        "DEPS entry, not a comment."
+    )
+    # Additive: the existing baked deps must remain enumerated.
+    missing = [
+        repo for repo in _BAKED_DEP_CANONICAL_REPOS.values()
+        if repo not in text
+    ]
+    assert not missing, (
+        "Enrolling fabro must not drop the existing baked dependencies; "
+        f"missing canonical repos from the executable body: {missing!r}."
+    )
+
+
+@then(parsers.parse(
+    'a "{dep}" to "{canonical_repo}" mapping present only in a descriptive '
+    "YAML comment, absent from the executable body, does not satisfy this "
+    "enrollment"))
+def then_fabro_comment_only_does_not_satisfy(dep, canonical_repo, ctx):
+    # TEETH (5vyb pattern): redact the real executable pairing, re-introduce it
+    # ONLY in a comment, strip comments, and confirm the pairing is absent.
+    raw = ctx["poll_workflow_text"]
+    pairing = f"{dep}|{canonical_repo}"
+    without_exec = raw.replace(pairing, f"{dep}|REDACTED-FOR-TEST")
+    assert pairing not in without_exec, (
+        "Failed to redact the executable fabro pairing for the teeth check; the "
+        "DEPS array must carry the fabro pairing exactly in a redactable form."
+    )
+    comment_only = without_exec + f"\n# descriptive: {pairing}\n"
+    stripped = _strip_yaml_comments(comment_only)
+    assert pairing not in stripped, (
+        f"A fabro mapping present only in a descriptive YAML comment survived "
+        "comment-stripping; a comment-only enrollment would falsely satisfy the "
+        "lookup. Enrollment must be proven against the comment-stripped body."
+    )
+    real_stripped = _strip_yaml_comments(raw)
+    assert pairing in real_stripped, (
+        f"The executable fabro mapping {pairing!r} is absent from the poll's "
+        "comment-stripped executable body."
+    )
+
+
+@then(parsers.parse(
+    'the fabro latest-release lookup reads the public "{canonical_repo}" '
+    'releases using the workflow\'s own "{token}" and references no '
+    '"{dispatch_token}" or any other cross-repo dispatch credential'))
+def then_fabro_lookup_token(canonical_repo, token, dispatch_token, ctx):
+    text = _strip_yaml_comments(ctx["poll_workflow_text"])
+    assert canonical_repo in text, (
+        f"The poll executable body does not reference {canonical_repo!r}, so it "
+        "cannot resolve fabro's latest release."
+    )
+    assert token in text, (
+        f"The poll does not use its own {token!r} to read the fabro releases."
+    )
+    forbidden = [dispatch_token, "DISPATCH_TOKEN", "PAT_DISPATCH"]
+    hits = [tok for tok in forbidden if tok in text]
+    assert not hits, (
+        "The poll references a cross-repo dispatch credential it must not for "
+        f"the fabro lookup: {hits!r}. It must resolve fabro's latest release "
+        f"with the workflow's own {token!r}."
+    )
+
+
+@then(parsers.parse(
+    'when the resolved latest fabro release tag differs from the baked '
+    '"{pin}" pin, the workflow first mutates the Dockerfile fabro pin to the '
+    "resolved tag, then rebuilds bc-base and republishes "
+    '"{image}" at the new digest'))
+def then_fabro_bump_then_rebuild(pin, image, ctx):
+    text = ctx["poll_workflow_text"]
+    stripped = _strip_yaml_comments(text)
+    # A compare that skips when equal (continue) and bumps when different.
+    assert "continue" in stripped, (
+        "The poll has no equal->skip branch, so it cannot distinguish a stale "
+        "fabro pin from an up-to-date one."
+    )
+    # The bump mutates the Dockerfile FABRO_VERSION pin in place BEFORE the
+    # build (sed -i targeting FABRO_VERSION).
+    m = re.search(r"sed -i[^\n]*FABRO_VERSION", stripped)
+    assert m is not None, (
+        "The poll has no in-place mutation (sed -i) targeting the Dockerfile "
+        "FABRO_VERSION pin; a stale fabro pin would not be bumped."
+    )
+    bump_idx = stripped.find(m.group(0))
+    build_idx = stripped.find("build-push-action")
+    if build_idx == -1:
+        build_idx = stripped.find("docker build")
+    assert build_idx != -1, "No bc-base image build step found."
+    assert bump_idx < build_idx, (
+        "The bc-base build is declared BEFORE the fabro pin bump; the bump must "
+        "come first so the rebuilt image carries the resolved fabro tag."
+    )
+    # Republishes :latest at the new digest.
+    assert image in stripped, (
+        f"The poll does not republish {image!r}; the rebuilt bc-base must be "
+        "republished at the new digest."
+    )
+    # Commit-before-build so the republished image is built from the committed
+    # bumped pin (not a working-tree-only edit).
+    commit_idx = text.find("git commit")
+    assert commit_idx != -1 and commit_idx < text.find("build-push-action"), (
+        "The bc-base build runs BEFORE the bumped Dockerfile is committed, so "
+        "the republished image would be built from an uncommitted fabro pin."
+    )
+
+
+@then(parsers.parse(
+    'a bare rebuild that left the Dockerfile fabro pin at "{pin}" would not '
+    "satisfy this behavior"))
+def then_fabro_bare_rebuild_not_satisfy(pin, ctx):
+    # TEETH: the FABRO_VERSION bump must be load-bearing. Prove that a workflow
+    # which rebuilt WITHOUT the FABRO_VERSION sed would leave the pin stale: the
+    # executable body must carry BOTH the fabro DEPS entry AND a
+    # FABRO_VERSION-targeting sed -i. Removing the sed (a bare rebuild) leaves
+    # the pin at its current value, which does not satisfy the bump behavior.
+    stripped = _strip_yaml_comments(ctx["poll_workflow_text"])
+    assert re.search(r"sed -i[^\n]*FABRO_VERSION", stripped), (
+        "The poll has no FABRO_VERSION-targeting sed -i; a bare rebuild would "
+        f"leave the Dockerfile fabro pin at {pin!r} — which does not satisfy "
+        "the bump-before-rebuild behavior."
+    )
+    # And the fabro DEPS entry must exist so the bump is actually reached.
+    assert f"fabro|{_FABRO_CANONICAL_REPO}" in stripped, (
+        "The fabro DEPS entry is absent from the executable body, so the bump "
+        "branch is never reached and a bare rebuild would leave the pin stale."
+    )
