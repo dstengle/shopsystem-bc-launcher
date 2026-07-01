@@ -41,7 +41,7 @@ ARG SHOP_TEMPLATES_VERSION=v0.48.0
 # ${{ github.ref_name }}). The default below records a known-good value for a
 # plain (non-CI) build; the workflow overrides it with the pushed tag. Promoted
 # to a persisted ENV below so it surfaces in `docker inspect` (lead-5xnd).
-ARG SHOPSYSTEM_BC_LAUNCHER_VERSION=v0.3.43
+ARG SHOPSYSTEM_BC_LAUNCHER_VERSION=v0.3.44
 
 # Promote both version ARGs to PERSISTED ENV so the published image (and any
 # container started from it) surfaces the baked bc-launcher release version and
@@ -71,7 +71,7 @@ RUN pip install --no-cache-dir \
     "shopsystem-messaging @ git+https://github.com/dstengle/shopsystem-messaging.git@v0.4.4" \
     "scenarios @ git+https://github.com/dstengle/shopsystem-scenarios@v0.2.0" \
     "shop-templates @ git+https://github.com/dstengle/shopsystem-templates.git@${SHOP_TEMPLATES_VERSION}" \
-    "shopsystem-bc-launcher @ git+https://github.com/dstengle/shopsystem-bc-launcher.git@v0.3.43"
+    "shopsystem-bc-launcher @ git+https://github.com/dstengle/shopsystem-bc-launcher.git@v0.3.44"
 
 # agent-vault — the in-container broker client (bclaunch-9rr). The agent runs
 # wrapped as `agent-vault run -- claude`; agent-vault establishes the proxy
@@ -146,12 +146,19 @@ RUN set -e && \
     rm -f "/tmp/${FABRO_TARBALL}" "/tmp/${FABRO_TARBALL}.sha256" /tmp/fabro && \
     fabro --version
 
-# The anthropic-oauth-shim — a REAL baked launcher for the brokered Anthropic
-# OAuth path (lead-ckq5). It is a committed stdlib-ONLY python3 launcher (no
-# third-party import required to run it), COPIED onto PATH and made executable
-# so it is resolvable inside the running container as `anthropic-oauth-shim` and
-# invoking it with its usage/help flag (`--help`) exits zero. It is a real
-# artifact, not a placeholder/stub.
+# The anthropic-oauth-shim — the REAL listening reverse-proxy shim for the
+# brokered Anthropic OAuth path (lead-so2h, replacing the earlier exec-wrapper
+# baked under lead-ckq5). It is a committed stdlib-ONLY python3 ThreadingHTTPServer
+# reverse proxy (no third-party import required to run it): it BINDS + LISTENS on
+# 127.0.0.1:8788 (fabro's ADR-049 D2 base_url http://127.0.0.1:8788/v1), and per
+# request STRIPS the incoming x-api-key + authorization, ADDS
+# `Authorization: Bearer <dummy>` + `anthropic-beta: oauth-2025-04-20`, and
+# forwards upstream to https://api.anthropic.com via the env HTTPS_PROXY so
+# agent-vault injects the real OAuth credential on the wire (NO real secret is
+# baked — DUMMY_BEARER is a placeholder). COPIED onto PATH and made executable so
+# it is resolvable inside the running container as `anthropic-oauth-shim`, with a
+# build-time `--help` self-check (argparse exits zero) so a broken install FAILS
+# the build. It is a real artifact, not a placeholder/stub.
 COPY anthropic-oauth-shim /usr/local/bin/anthropic-oauth-shim
 RUN chmod 0755 /usr/local/bin/anthropic-oauth-shim \
     && anthropic-oauth-shim --help >/dev/null
