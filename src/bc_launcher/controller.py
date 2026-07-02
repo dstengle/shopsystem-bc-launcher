@@ -787,23 +787,51 @@ def _fabro_engage_script(bc_name: str, work_id: str) -> str:
     provider_register = (
         f"printf '%b' {shlex.quote(provider_block)} >> {server_settings}"
     )
-    # (Defect A/B/C) Bootstrap the server-level config SYNCHRONOUSLY, then
-    # background ONLY the foreground server, then run the def in the SAME shell
-    # (cwd=/workspace/.fabro):
+    # (Defect A/B/C + lead-esy4 Defect D) Bootstrap the server-level config
+    # SYNCHRONOUSLY, then background ONLY the foreground server, then run the
+    # def in the SAME shell (cwd=/workspace/.fabro):
     #   * `cd {def_dir}` first, SYNCHRONOUS — so `fabro run` resolves
     #     /workspace/.fabro/workflow.fabro (NOT /workspace/workflow.fabro);
+    #   * export the DUMMY ANTHROPIC_API_KEY + agent-vault CA (SSL_CERT_FILE) +
+    #     shim base_url (ANTHROPIC_BASE_URL) BEFORE `fabro install` — see the
+    #     lead-esy4 Defect D note below;
     #   * `GH_TOKEN=<dummy> fabro install ... --github-strategy token
     #     --github-username <dummy>` writes a valid ~/.fabro/settings.toml and
     #     no longer aborts on the flag chain;
     #   * append [llm.providers.anthropic] (adapter="anthropic" + shim
     #     base_url, NO api_key — schema-valid; lead-sp2m) to the SERVER-level
     #     settings so the provider is registered at the server;
-    #   * export the agent-vault CA + shim base_url in the server env;
     #   * background ONLY `nohup {server} ... &` (its OWN line) so the run can
     #     engage against it while the parent shell stays in {def_dir}.
+    #
+    # lead-esy4 Defect D (the FINAL fabro engage bug): `fabro install
+    # --non-interactive ...` STARTS the fabro serving daemon.  Previously the
+    # `export ANTHROPIC_API_KEY=<dummy>` (+ SSL_CERT_FILE + ANTHROPIC_BASE_URL)
+    # exports came AFTER `fabro install`, so the daemon `fabro install` spawned
+    # had NO LLM key in its env; the subsequent `fabro server start` could not
+    # bind ("× Server already running", a no-op) and `fabro run` then targeted
+    # the keyless install-daemon whose preflight FAILED "No LLM providers
+    # configured. Set ANTHROPIC_API_KEY or OPENAI_API_KEY".  FIX: move the three
+    # exports to BEFORE `fabro install`, so the install-spawned daemon inherits
+    # ANTHROPIC_API_KEY (+ the shim base_url + the broker CA) and `fabro run`
+    # preflight passes.  ADR-049 D1 invariant intact: the key is a DUMMY
+    # placeholder; the real credential rides agent-vault on the wire, and the
+    # fabro settings/vault stay __PLACEHOLDER__ (no api_key in the TOML).
+    #
+    # The now-redundant `fabro server start` (its serving daemon is already the
+    # install-daemon that inherited the key) is KEPT but backgrounded inside the
+    # brace group so its "× Server already running" no-op returns 0 immediately
+    # and does not break the `&&` chain before `fabro run`.  It is retained
+    # because scenario 77 (@scenario_hash:68e14cdcd8b7c145) structurally pins
+    # the `fabro server start --foreground --no-web` argv in the rendered engage
+    # script (both `_fabro_server_start_argv()` and `assert server_argv in
+    # call.command[2]`); dropping it would RED that signed-off lead pin, which
+    # lead-esy4 acceptance (iv) requires green.  The FUNCTIONAL fix is the
+    # env-before-install reordering; the retained server-start is harmless.
+    #
     # NOTE (Defect B): the server is backgrounded via a brace group
     # ``{ nohup ... & }`` so ONLY the server subprocess is detached; the
-    # surrounding `&&` chain (cd, install, provider-register, exports) runs
+    # surrounding `&&` chain (cd, exports, install, provider-register) runs
     # SYNCHRONOUSLY in the CURRENT shell, so the cwd set by `cd {def_dir}`
     # persists to `fabro run` on the last line.  (If the whole `cd && ... &&
     # nohup server` list were terminated by a bare trailing `&`, the entire
@@ -811,11 +839,11 @@ def _fabro_engage_script(bc_name: str, work_id: str) -> str:
     # parent shell cwd would stay at the image WORKDIR; that was the bug.)
     return (
         f"cd {def_dir} && "
-        f"GH_TOKEN={gh_token} {install_argv} && "
-        f"{provider_register} && "
         f'export {SSL_CERT_FILE_ENV}={shlex.quote(AGENT_VAULT_CONTAINER_CA_PATH)} && '
         f"export ANTHROPIC_API_KEY={dummy_key} && "
         f"export ANTHROPIC_BASE_URL={base_url} && "
+        f"GH_TOKEN={gh_token} {install_argv} && "
+        f"{provider_register} && "
         f"{{ nohup {server_argv} >{server_log} 2>&1 & }} && "
         f"{run_argv}\n"
     )
