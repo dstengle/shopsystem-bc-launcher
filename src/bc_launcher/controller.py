@@ -761,6 +761,9 @@ def _fabro_engage_script(bc_name: str, work_id: str) -> str:
     )
     def_dir = shlex.quote(FABRO_DEF_CONTAINER_DIR)
     server_log = shlex.quote(f"{FABRO_DEF_CONTAINER_DIR}/fabro-server.log")
+    # lead-i0wi F3: the backgrounded (detached) `fabro run` engage's stdout/stderr
+    # is captured to a run log so detaching does not discard the run's output.
+    run_log = shlex.quote(f"{FABRO_DEF_CONTAINER_DIR}/fabro-run.log")
     base_url = shlex.quote(FABRO_ANTHROPIC_BASE_URL)
     dummy_key = shlex.quote(FABRO_SERVER_DUMMY_ANTHROPIC_KEY)
     gh_token = shlex.quote(FABRO_SERVER_INSTALL_GH_TOKEN)
@@ -837,6 +840,30 @@ def _fabro_engage_script(bc_name: str, work_id: str) -> str:
     # nohup server` list were terminated by a bare trailing `&`, the entire
     # list — including the `cd` — would run in a backgrounded subshell and the
     # parent shell cwd would stay at the image WORKDIR; that was the bug.)
+    # lead-i0wi F3 (LAUNCH RETURNS AFTER ENGAGE): `_fabro_engage` issues this
+    # script through `driver.exec_run`, which is a BLOCKING `subprocess.run`
+    # (docker exec).  Previously the script ENDED with a FOREGROUND `fabro run`
+    # (the loop engage), so `docker exec` blocked for the entire lifetime of the
+    # fabro run/server and `launch()` never returned — the operator had to
+    # background the launch by hand.  FIX (mirror the tmux path, which issues a
+    # DETACHED `tmux new-session -d` that daemonizes and returns immediately):
+    # BACKGROUND the `fabro run` engage itself in a nohup'd brace group — exactly
+    # as the foreground server is already backgrounded — so the exec's foreground
+    # shell finishes issuing the engage and EXITS PROMPTLY, and `docker exec`
+    # (hence `launch()`) RETURNS after the run is engaged rather than blocking on
+    # it.  The engaged loop + server keep running detached inside the container.
+    # INVARIANTS PRESERVED:
+    #   * esy4 Defect D: the three exports still PRECEDE `fabro install`, and the
+    #     `cd {def_dir}` + install + provider-register still run SYNCHRONOUSLY in
+    #     the current shell BEFORE the run is engaged, so the run inherits
+    #     cwd=/workspace/.fabro (workflow.fabro resolves) and the LLM key.
+    #   * esy4 (ii) + scn 77 (@scenario_hash:68e14cdcd8b7c145): the
+    #     `fabro server start --foreground --no-web` argv stays RETAINED inside its
+    #     `{ nohup ... & }` brace group, and the `fabro run workflow.fabro -I
+    #     BC_NAME=... -I WORK_ID=...` argv is still ISSUED (now backgrounded, not
+    #     foreground) — detaching changes HOW the argv is issued, not WHETHER.
+    #   Teeth: make the `fabro run` engage synchronous/foreground-blocking again
+    #   -> the F3 test REDs.
     return (
         f"cd {def_dir} && "
         f'export {SSL_CERT_FILE_ENV}={shlex.quote(AGENT_VAULT_CONTAINER_CA_PATH)} && '
@@ -845,7 +872,7 @@ def _fabro_engage_script(bc_name: str, work_id: str) -> str:
         f"GH_TOKEN={gh_token} {install_argv} && "
         f"{provider_register} && "
         f"{{ nohup {server_argv} >{server_log} 2>&1 & }} && "
-        f"{run_argv}\n"
+        f"{{ nohup {run_argv} >{run_log} 2>&1 & }}\n"
     )
 
 
