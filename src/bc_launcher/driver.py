@@ -484,8 +484,20 @@ class RealDockerDriver:
         command: list[str],
         user: str | None = None,
         env: dict[str, str] | None = None,
+        detach: bool = False,
     ) -> subprocess.CompletedProcess:
+        # lead-lwk4 R7: ``detach=True`` issues ``docker exec -d`` so the docker
+        # daemon runs the command in the BACKGROUND and the exec RETURNS
+        # IMMEDIATELY without attaching to (or reading) the command's
+        # stdout/stderr.  This is how the fabro ENGAGE returns after starting the
+        # foreground fabro server: without ``-d`` the synchronous
+        # ``subprocess.run`` reads the exec's pipes to EOF and BLOCKS for the
+        # server's lifetime (nohup-inside-the-script does not detach the child
+        # stdio from the exec pipes).  ``docker exec -d`` prints nothing and
+        # returns at once.
         cmd = ["docker", "exec"]
+        if detach:
+            cmd.append("-d")
         if user is not None:
             cmd += ["-u", user]
         if env:

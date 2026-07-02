@@ -115,7 +115,9 @@ def _make_manifest(tmp_path: Path) -> Path:
     return manifest
 
 
-def _engage_script(tmp_path: Path) -> str:
+def _engage_call(tmp_path: Path):
+    """Drive the REAL launcher on the fabro path and return the recorded
+    ExecCall that carries the fabro engage (server start + run)."""
     driver = FakeDockerDriver()
     driver.set_host_tree_snapshot(
         HOST_TREE,
@@ -142,8 +144,12 @@ def _engage_script(tmp_path: Path) -> str:
             and "fabro server start" in c.command[2]
             and "fabro run" in c.command[2]
         ):
-            return c.command[2]
+            return c
     raise AssertionError("the fabro engage exec (server start + run) must exist")
+
+
+def _engage_script(tmp_path: Path) -> str:
+    return _engage_call(tmp_path).command[2]
 
 
 # ===========================================================================
@@ -302,40 +308,51 @@ def test_f2_reviewer_stays_sole_scenario_path_complete_emitter():
 # ===========================================================================
 
 def test_f3_fabro_run_engage_is_detached_so_launch_returns(tmp_path):
-    """The engage's `fabro run` must be issued DETACHED/backgrounded so the
-    BLOCKING `docker exec` (driver.exec_run is a synchronous subprocess.run)
-    returns after the run is ENGAGED — mirroring the tmux path, which issues a
-    detached `tmux new-session -d` that returns immediately.  Previously the
-    engage script ENDED with a FOREGROUND `fabro run`, so `docker exec` (hence
-    `launch()`) never returned.
+    """The engage must be issued DETACHED AT THE DOCKER LEVEL so the BLOCKING
+    `docker exec` (driver.exec_run is a synchronous subprocess.run that reads
+    the exec's stdout/stderr pipes to EOF) returns after the run is ENGAGED —
+    mirroring the tmux path's detached-session return.
 
-    Structural pin: `fabro run` is inside a backgrounded brace group
-    `{ nohup ... & }` and the script does NOT end with a foreground `fabro run`.
+    lead-lwk4 R7 SUPERSEDES the ineffective v0.3.49 mechanism: the prior fix
+    backgrounded `fabro run` INSIDE the script (`{ nohup ... & }`), but the
+    backgrounded children INHERIT the exec's stdout/stderr pipes, so
+    subprocess.run never sees EOF and `launch()` blocked anyway.  The real fix
+    issues the engage exec via `docker exec -d` (detach=True): the docker daemon
+    backgrounds the engage and the exec returns IMMEDIATELY without reading the
+    exec's pipes, so the foreground fabro server's stdio never rides the
+    launcher's pipes and `launch()` RETURNS.
 
-    TEETH: make the `fabro run` engage synchronous/foreground-blocking (drop the
-    `nohup ... &` around it) -> RED.
+    Structural pin: the recorded engage ExecCall carries detach=True, so the
+    launcher cannot block on the foreground fabro server.  The engage SCRIPT is
+    unchanged (docker-level detach), so scn 77 / esy4 pins stay green verbatim.
+
+    TEETH: issue the engage exec synchronously (detach=False) -> RED.
     """
-    script = _engage_script(tmp_path)
-    # `fabro run` is present (scn 77 pin) ...
+    call = _engage_call(tmp_path)
+    script = call.command[2]
+    # The engage still ISSUES `fabro run` (scn 77 pin) ...
     assert "fabro run" in script, (
         f"the engage must still ISSUE `fabro run`; script:\n{script}"
     )
-    # ... and it is DETACHED inside a `{ nohup ... fabro run ... & }` group so
-    # the exec returns promptly after engaging.
-    m = re.search(r"\{\s*nohup [^}]*fabro run[^}]*&\s*\}", script)
-    assert m is not None, (
-        "the `fabro run` engage must be BACKGROUNDED inside a `{ nohup ... & }` "
-        "group so the blocking `docker exec` returns after the run is engaged "
-        f"(mirroring the tmux detached-session return); script:\n{script}"
+    # ... and the engage exec is DETACHED at the docker level (`docker exec -d`),
+    # so the blocking `docker exec` returns after engaging and `launch()` does
+    # not hang on the foreground fabro server.
+    assert call.detach is True, (
+        "the fabro engage must be issued DETACHED (docker exec -d) so the "
+        "blocking `docker exec` (which reads the exec pipes to EOF) returns "
+        "after engaging — nohup-inside-the-script does NOT detach the child "
+        f"stdio from the exec pipes (the v0.3.49 residual). call={call!r}"
     )
-    # The script must NOT end with a FOREGROUND `fabro run` (the residual bug):
-    # after stripping a trailing newline, the last non-space token sequence is
-    # the backgrounded group's closing `}`, not a bare `fabro run ...`.
-    tail = script.rstrip()
-    assert tail.endswith("}"), (
-        "the engage script must END with the backgrounded run group's `}` (the "
-        "run is detached), NOT a foreground `fabro run` that blocks the exec; "
-        f"script tail:\n{tail[-120:]!r}"
+    # The engage exec stays a `/bin/sh -c` payload (scn 77 / esy4 matchers read
+    # command[2] as a substring), unchanged by the docker-level detach.
+    assert call.command[:2] == ["/bin/sh", "-c"], (
+        f"the engage must stay a `/bin/sh -c` exec; got {call.command[:2]!r}"
+    )
+    # The foreground fabro server keeps running headless: it is backgrounded in
+    # its own brace group WITHIN the (detached) engage script.
+    assert re.search(r"\{\s*nohup [^}]*fabro server start[^}]*&\s*\}", script), (
+        "the foreground `fabro server start` must be backgrounded inside the "
+        f"engage so it keeps running headless; script:\n{script}"
     )
 
 

@@ -840,30 +840,50 @@ def _fabro_engage_script(bc_name: str, work_id: str) -> str:
     # nohup server` list were terminated by a bare trailing `&`, the entire
     # list — including the `cd` — would run in a backgrounded subshell and the
     # parent shell cwd would stay at the image WORKDIR; that was the bug.)
-    # lead-i0wi F3 (LAUNCH RETURNS AFTER ENGAGE): `_fabro_engage` issues this
-    # script through `driver.exec_run`, which is a BLOCKING `subprocess.run`
-    # (docker exec).  Previously the script ENDED with a FOREGROUND `fabro run`
-    # (the loop engage), so `docker exec` blocked for the entire lifetime of the
-    # fabro run/server and `launch()` never returned — the operator had to
-    # background the launch by hand.  FIX (mirror the tmux path, which issues a
-    # DETACHED `tmux new-session -d` that daemonizes and returns immediately):
-    # BACKGROUND the `fabro run` engage itself in a nohup'd brace group — exactly
-    # as the foreground server is already backgrounded — so the exec's foreground
-    # shell finishes issuing the engage and EXITS PROMPTLY, and `docker exec`
-    # (hence `launch()`) RETURNS after the run is engaged rather than blocking on
-    # it.  The engaged loop + server keep running detached inside the container.
+    # lead-lwk4 R7 (LAUNCH ACTUALLY RETURNS AFTER ENGAGE — DOCKER-LEVEL DETACH):
+    # `_fabro_engage` issues this script through `driver.exec_run`.  The v0.3.49
+    # lead-i0wi F3 fix backgrounded the `fabro run` engage INSIDE the script
+    # (`{ nohup ... & }`), but that was INEFFECTIVE: a synchronous `docker exec`
+    # captures the exec's stdout/stderr via pipes and reads them to EOF, and the
+    # backgrounded `{ nohup server & }` / `{ nohup run & }` children INHERIT
+    # those pipes, so `subprocess.run` never sees EOF and `docker exec` (hence
+    # `launch()`) BLOCKS for the lifetime of the foreground fabro server —
+    # nohup-inside-the-script does NOT detach the child stdio from the exec.
+    #
+    # FIX: detach at the DOCKER level.  `_fabro_engage` now issues this SAME
+    # script via `driver.exec_run(..., detach=True)` (docker `exec -d`), so the
+    # docker daemon runs the engage in the background and `docker exec -d`
+    # RETURNS IMMEDIATELY without attaching to (or reading) the exec's
+    # stdout/stderr — the child stdio never rides the launcher's pipes, so the
+    # blocking `subprocess.run` returns at once and `launch()` RETURNS after the
+    # engage is issued.  This mirrors the tmux path (a detached `tmux
+    # new-session -d` that daemonizes and returns), but detaches at the EXEC
+    # level so the ENGAGE SCRIPT itself is UNCHANGED — the `command[2]` payload
+    # the launcher records is byte-for-byte the same `cd {def_dir} && ... &&
+    # fabro run ...` chain, so every structural pin that reads command[2] as a
+    # prefix/substring (scn 77 @scenario_hash:68e14cdcd8b7c145, the esy4
+    # Defect-D ordering, the 8q2x Defect B/C shape) stays green verbatim.  The
+    # fabro server + run keep running headless in the container after `exec -d`
+    # returns.
+    #
+    # The script keeps the foreground `fabro server start` backgrounded (its OWN
+    # brace group, log-redirected) so ONLY the server is detached WITHIN the
+    # script, and `fabro run` runs synchronously in the engage shell AFTER it —
+    # exactly the 8q2x Defect-B shape.  The engage exec being `exec -d`, the
+    # launcher does not block on that synchronous `fabro run` either.
+    #
     # INVARIANTS PRESERVED:
     #   * esy4 Defect D: the three exports still PRECEDE `fabro install`, and the
     #     `cd {def_dir}` + install + provider-register still run SYNCHRONOUSLY in
-    #     the current shell BEFORE the run is engaged, so the run inherits
+    #     the engage shell BEFORE the run is engaged, so the run inherits
     #     cwd=/workspace/.fabro (workflow.fabro resolves) and the LLM key.
     #   * esy4 (ii) + scn 77 (@scenario_hash:68e14cdcd8b7c145): the
     #     `fabro server start --foreground --no-web` argv stays RETAINED inside its
     #     `{ nohup ... & }` brace group, and the `fabro run workflow.fabro -I
-    #     BC_NAME=... -I WORK_ID=...` argv is still ISSUED (now backgrounded, not
-    #     foreground) — detaching changes HOW the argv is issued, not WHETHER.
-    #   Teeth: make the `fabro run` engage synchronous/foreground-blocking again
-    #   -> the F3 test REDs.
+    #     BC_NAME=... -I WORK_ID=...` argv is still ISSUED — detaching at the
+    #     DOCKER (`exec -d`) level changes HOW the exec is issued, not WHAT.
+    #   Teeth (lead-lwk4 R7): issue the engage exec WITHOUT detach (synchronous
+    #   `exec_run(detach=False)`) -> the R7 detach test REDs.
     return (
         f"cd {def_dir} && "
         f'export {SSL_CERT_FILE_ENV}={shlex.quote(AGENT_VAULT_CONTAINER_CA_PATH)} && '
@@ -872,7 +892,7 @@ def _fabro_engage_script(bc_name: str, work_id: str) -> str:
         f"GH_TOKEN={gh_token} {install_argv} && "
         f"{provider_register} && "
         f"{{ nohup {server_argv} >{server_log} 2>&1 & }} && "
-        f"{{ nohup {run_argv} >{run_log} 2>&1 & }}\n"
+        f"{run_argv} >{run_log} 2>&1\n"
     )
 
 
@@ -2968,11 +2988,22 @@ class BcContainerController:
         # loop def against it carrying BC_NAME + WORK_ID.  Runs as the vscode
         # agent user (the def + settings were placed agent-owned).  NO tmux
         # session is created and NO `claude` is started on this path.
+        #
+        # lead-lwk4 R7 (LAUNCH ACTUALLY RETURNS AFTER ENGAGE): issued DETACHED
+        # (`docker exec -d`) so the docker daemon backgrounds the engage and this
+        # call RETURNS IMMEDIATELY without reading the exec's stdout/stderr — the
+        # foreground fabro server's stdio never rides the launcher's pipes, so
+        # `launch()` returns after the engage is issued instead of blocking for
+        # the server's lifetime.  The v0.3.49 nohup-inside-the-script fix could
+        # not achieve this: backgrounded children inherit the (attached) exec
+        # pipes, so a synchronous `docker exec` never sees EOF.  The fabro server
+        # + run keep running headless in the container after this returns.
         engage_result = self._driver.exec_run(
             container,
             ["/bin/sh", "-c", _fabro_engage_script(bc_name, work_id or "")],
             user=AGENT_CONTAINER_USER,
             env=_fabro_exec_env(),
+            detach=True,
         )
         if engage_result.returncode != 0:
             reason = (

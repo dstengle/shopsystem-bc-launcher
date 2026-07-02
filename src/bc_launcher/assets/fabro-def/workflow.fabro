@@ -81,7 +81,7 @@
 digraph BcShopLoop {
     graph [
         goal="Recreate the bc-shop Implementer->Reviewer loop for BC {{ inputs.BC_NAME }} / work {{ inputs.WORK_ID }} and emit a GATED work_done via shop-msg/bc-emit. Reviewer is the SOLE work_done emitter on the scenario path. HARD RULE: a FAILED node must never advance to the SUCCEEDED terminal; every fallible node carries an explicit unconditional failsafe edge to halt (infra) or emit_blk (deliverable). STRUCTURAL RULE: every state-changing action (inbox drain, integrate, work-done gate, bc-emit) is a NATIVE non-LLM script node; agents may ONLY judge and route."
-        model_stylesheet="* { model: claude-haiku-4-5 } .classify { model: claude-haiku-4-5 } .coding { model: claude-sonnet-4-5 } .review { model: claude-sonnet-4-5 }"
+        model_stylesheet="* { model: claude-haiku-4-5 } .classify { model: claude-haiku-4-5 } .coding { model: claude-haiku-4-5 } .review { model: claude-haiku-4-5 }"
         rankdir=TB
         fallback_retry_target="halt"
     ]

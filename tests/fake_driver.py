@@ -91,6 +91,11 @@ class ExecCall:
     # when the exec carries no extra env).  bclaunch-5fji uses this to pin the
     # launch-time clone's brokered HTTPS_PROXY + GIT_SSL_CAINFO trust env.
     env: dict[str, str] | None = None
+    # lead-lwk4 R7: True when the exec was issued DETACHED (``docker exec -d``),
+    # so `subprocess.run` returns immediately without reading the exec's pipes.
+    # The fabro ENGAGE is issued detached so `launch()` returns after starting
+    # the foreground fabro server.
+    detach: bool = False
 
 
 class FakeRegistryDriver:
@@ -1884,6 +1889,7 @@ class FakeDockerDriver:
         command: list[str],
         user: str | None = None,
         env: dict[str, str] | None = None,
+        detach: bool = False,
     ) -> subprocess.CompletedProcess:
         self._op_seq += 1
         self.exec_calls.append(
@@ -1892,6 +1898,7 @@ class FakeDockerDriver:
                 command=command,
                 user=user,
                 env=dict(env) if env else None,
+                detach=detach,
             )
         )
         # lead-j351: record the op index of any send-keys carrying a non-empty
