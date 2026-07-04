@@ -1,3 +1,4 @@
+@bc_internal
 Feature: bc-base Dockerfile pins the four dstengle framework CLIs to their owner/repo and installs bd as the steveyegge/beads binary (shopsystem-bc-launcher-tuk, scoped by lead-6rm4)
 
   This is a BC-INTERNAL test-rigor hardening (bead shopsystem-bc-launcher-tuk,

@@ -67,7 +67,7 @@ Feature: centralized scheduled bc-base dependency check-bump-rebuild (lead-czwo)
     And the run bumps the stale Dockerfile pin then rebuilds and republishes "ghcr.io/dstengle/shopsystem-bc-base:latest"
     And starting the workflow this way requires no source-code change and no raw "gh api .../dispatches" call
 
-  @scenario_hash:2b69c3b682f7871d
+  @scenario_hash:f8a8b52a2a22bb66
   Scenario: when the workflow bumps a pin and rebuilds, it commits the bumped Dockerfile recording the triggering dependency version
     Given the centralized scheduled workflow bumps a baked dependency pin in "docker/bc-base/Dockerfile" from "@v1.0.0" to "@v1.1.0"
     When the workflow rebuilds bc-base and republishes "ghcr.io/dstengle/shopsystem-bc-base:latest" from that bumped Dockerfile

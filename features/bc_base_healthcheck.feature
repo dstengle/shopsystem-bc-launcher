@@ -1,3 +1,4 @@
+@bc_internal
 Feature: bc-base image carries a real HEALTHCHECK probing broker + messaging-db reachability (bclaunch-wuo)
 
   This is a BC-INTERNAL structural hardening (bead bclaunch-wuo). It is NOT a

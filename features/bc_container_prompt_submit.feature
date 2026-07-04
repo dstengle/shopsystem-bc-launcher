@@ -9,7 +9,7 @@ Feature: bc-container --startup-prompt and inject commit prompts to the agent (l
   # features/bc_container_prompt_submit_two_call.feature, which pin the
   # two-discrete-invocation shape that actually commits.
 
-  @scenario_hash:861efc9ea1fe981d
+  @scenario_hash:90ceb2b7f9979d69
   Scenario: bc-container monitor surfaces an agent-working state-marker within a bounded interval of bc-container launch --startup-prompt exiting, with no human or host-side follow-up keystroke
     Given the shopsystem-bc-launcher BC is installed
     And no Docker container named "bc-shopsystem-messaging" is running

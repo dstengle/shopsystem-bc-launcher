@@ -21,7 +21,7 @@ Feature: bc-container launch leaves beads functionally usable inside the contain
   # bootstrap into a no-op — the self-inflicted lead-vlsu deadlock), and the
   # launcher must NOT `bd config set issue_prefix` (bd rejects it) or run a
   # separate `bd import` that pre-creates the DB.
-  @scenario_hash:01041619e313c43e
+  @scenario_hash:88255302b557edf7
   Scenario: after bc-container launch, beads is provisioned by bd bootstrap and boots write-ready
     Given the shopsystem-bc-launcher BC is installed
     And a BC named "shopsystem-bc-launcher" with a valid repo URL is configured

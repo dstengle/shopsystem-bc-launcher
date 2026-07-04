@@ -21,7 +21,7 @@ Feature: bc-container launch passes the broker CA as an env var, builds no CA bi
     Then a Docker container named "bc-shopsystem-messaging" is running
     And the container env has AGENT_VAULT_CA_PEM set to the operator-supplied broker CA PEM
 
-  @scenario_hash:34fc8db53931e62a
+  @scenario_hash:4d3e32aa1cc299e5
   Scenario: the controller builds no CA bind-mount and sets no controller-side TLS-trust env
     Given the shopsystem-bc-launcher BC is installed
     And the operator supplies the broker CA PEM via AGENT_VAULT_CA_PEM

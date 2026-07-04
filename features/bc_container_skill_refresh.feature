@@ -16,7 +16,7 @@ Feature: bc-container launch skill-refresh uses the correct shop-templates invoc
   MUST be checked, and a failed refresh MUST surface a real error instead of
   logging false success.
 
-  @scenario_hash:d0045dad01f070c8
+  @scenario_hash:96a1617dd4586f60
   Scenario: launch runs the VALID shop-templates update invocation with the derived shop-type
     Given the shopsystem-bc-launcher BC is installed
     And a BC named "shopsystem-messaging" with a valid repo URL is configured

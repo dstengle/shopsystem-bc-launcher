@@ -20,7 +20,7 @@ Feature: bc-container launch gates the startup prompt behind a messaging readine
     Then no startup prompt has been sent to the tmux session named "agent" in container "bc-shopsystem-messaging"
     And once the readiness sequence completes successfully, the startup prompt is sent to the tmux session named "agent"
 
-  @scenario_hash:767eba36f237a79a
+  @scenario_hash:52f7731c440a86bf
   Scenario: re-running the readiness sequence against an already-ready container is a no-op that reports ready
     Given the shopsystem-bc-launcher BC is installed
     And a Docker container named "bc-shopsystem-messaging" is running and has already passed its readiness sequence
@@ -38,7 +38,7 @@ Feature: bc-container launch gates the startup prompt behind a messaging readine
   # container's network context (docker exec) so probe reachability matches the
   # container's reachability. The pass/withhold semantics (both-reachable ->
   # inject, either-unreachable -> withhold) are UNCHANGED.
-  @scenario_hash:27b73cbb5eabf3f7
+  @scenario_hash:de07d649ed1bb22b
   Scenario: the readiness probes run from inside the container network, not from the launcher host
     Given the shopsystem-bc-launcher BC is installed
     And a BC container "bc-dummyco-messaging" is launched on the docker network "dummyco" for a product whose slug is "dummyco"

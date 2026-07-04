@@ -1,3 +1,4 @@
+@bc_internal
 Feature: bc-base installs agent-vault, materializes the broker CA from AGENT_VAULT_CA_PEM, and bakes the placeholder credential (bclaunch-9rr)
 
   This is a BC-INTERNAL structural hardening (bead bclaunch-9rr). It is NOT a

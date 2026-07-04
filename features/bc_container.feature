@@ -9,7 +9,7 @@ Feature: bc-container commands
     Then the command exits zero
     And a Docker container named "bc-shopsystem-messaging" is running
 
-  @scenario_hash:62e1e005e9ece9f3
+  @scenario_hash:d9dc0a051d536c3b
   Scenario: bc-container launch clones the BC repository inside the container
     Given the shopsystem-bc-launcher BC is installed
     And a BC named "shopsystem-messaging" with a valid repo URL is configured

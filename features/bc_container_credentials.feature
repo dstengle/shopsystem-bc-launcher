@@ -25,7 +25,7 @@ Feature: bc-container launch brokers BC-container credentials through agent-vaul
     Then no bind mount inside the container has the host "~/.config/gh" directory as its source
     And no bind mount inside the container has the host "~/.gitconfig" file as its source
 
-  @scenario_hash:d6296d959f851be5
+  @scenario_hash:95b02da48a6f08a9
   Scenario: bc-container launch does not require BCLAUNCHER_HOST_HOME to resolve a credential mount source
     Given the shopsystem-bc-launcher BC is installed
     And the environment variable BCLAUNCHER_HOST_HOME is unset
@@ -42,7 +42,7 @@ Feature: bc-container launch brokers BC-container credentials through agent-vaul
   # explicitly so a future bare-:14321 regression is caught. Asserts on the
   # ACTUAL runtime HTTPS_PROXY value injected into `docker run`, not an echoed
   # string (bclaunch-7ys / 5hl tautology guard).
-  @scenario_hash:46c636684004bde3
+  @scenario_hash:694a2c13042a29b8
   Scenario: the launched Claude agent is invoked wrapped in agent-vault run with its runtime proxy at the broker MITM listener
     Given the shopsystem-bc-launcher BC is installed
     And an agent-vault broker is running on the shopsystem network and is reachable
@@ -136,7 +136,7 @@ Feature: bc-container launch brokers BC-container credentials through agent-vaul
     Then the brokered Claude OAuth substitution and the brokered GitHub substitution both succeed
     And bc-container launch performed no step that read a real credential from any host file
 
-  @scenario_hash:f1b70c2b9ec76b98
+  @scenario_hash:ff04ee22410fd866
   Scenario: bc-container launch never writes a real credential into the broker vault or into a container
     Given the shopsystem-bc-launcher BC is installed
     When bc-container launch is run with BC name "shopsystem-messaging"
