@@ -1,3 +1,4 @@
+@bc:shopsystem-bc-launcher @origin:lead-dlrx
 Feature: bc-container launch pours the shop-templates skill-group into the launched BC shop (lead-dlrx)
 
   After cloning the BC repository, bc-container launch runs a shop-templates
@@ -7,7 +8,7 @@ Feature: bc-container launch pours the shop-templates skill-group into the launc
   launch step after the clone (and the beads/readiness setup steps), and is
   modelled behaviourally through the DockerDriver seam.
 
-  @scenario_hash:75ae95be0ecf1640 @bc:shopsystem-bc-launcher
+  @scenario_hash:75ae95be0ecf1640
   Scenario: bc-container launch pours the shop-templates skill-group into the launched BC shop after cloning
     Given the shopsystem-bc-launcher BC is installed
     And a BC named "shopsystem-messaging" with a valid repo URL is configured

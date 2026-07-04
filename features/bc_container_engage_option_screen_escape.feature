@@ -1,3 +1,4 @@
+@bc:shopsystem-bc-launcher @origin:lead-q3uy
 Feature: engage handles blocking interactive option screens by Escape-dismiss (lead-q3uy)
 
   # lead-q3uy — when the in-container agent runtime presents a blocking
@@ -11,7 +12,7 @@ Feature: engage handles blocking interactive option screens by Escape-dismiss (l
   #   * if it exposes NO escape affordance, NOT send Enter / NOT auto-confirm a
   #     default, and surface a WARNING naming the un-escapable screen.
 
-  @scenario_hash:f68d8199fef70fa7 @bc:shopsystem-bc-launcher
+  @scenario_hash:f68d8199fef70fa7
   Scenario: engage recognizes a blocking escape-able option screen, sends Escape (not Enter) to dismiss it, then submits the startup prompt
     Given the shopsystem-bc-launcher BC is installed
     And no Docker container named "bc-shopsystem-messaging" is running
@@ -23,7 +24,7 @@ Feature: engage handles blocking interactive option screens by Escape-dismiss (l
     And after the option screen is dismissed the startup prompt "bd prime" is submitted to the tmux session named "agent" with no host-side follow-up "bc-container inject" invocation required
     And the in-container agent transitions from the blocked option screen to actively processing the prompt "bd prime"
 
-  @scenario_hash:f17f0fc747e44e47 @bc:shopsystem-bc-launcher
+  @scenario_hash:f17f0fc747e44e47
   Scenario: an auto-dismissed option screen's content is captured and logged as a host-discoverable warning
     Given the shopsystem-bc-launcher BC is installed
     And no Docker container named "bc-shopsystem-messaging" is running
@@ -34,7 +35,7 @@ Feature: engage handles blocking interactive option screens by Escape-dismiss (l
     And that warning captures the rendered content of the dismissed option screen so a human can review what was auto-dismissed
     And the warning is discoverable from the host without attaching into the container
 
-  @scenario_hash:9d38d505fc8b5432 @bc:shopsystem-bc-launcher
+  @scenario_hash:9d38d505fc8b5432
   Scenario: an interactive screen with no escape affordance is not auto-confirmed with Enter
     Given the shopsystem-bc-launcher BC is installed
     And no Docker container named "bc-shopsystem-messaging" is running

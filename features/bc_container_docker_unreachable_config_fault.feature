@@ -1,6 +1,7 @@
+@bc:shopsystem-bc-launcher @origin:lead-wdvx
 Feature: bc-container docker-dependent subcommands surface a docker config fault distinctly from an empty result
 
-  @scenario_hash:510d02951321628e @bc:shopsystem-bc-launcher
+  @scenario_hash:510d02951321628e
   Scenario: bc-container list reports a docker-unreachable diagnostic instead of an empty success when the socket is permission-denied
     Given the shopsystem-bc-launcher BC is installed
     And the Docker socket is mounted but the calling user is denied access to it so docker calls fail with a permission-denied error
@@ -9,7 +10,7 @@ Feature: bc-container docker-dependent subcommands surface a docker config fault
     And stderr names the cause as the Docker daemon being unreachable due to the socket being permission-denied or not mounted
     And stdout does not include "No BC containers found."
 
-  @scenario_hash:2123096c12854ff1 @bc:shopsystem-bc-launcher
+  @scenario_hash:2123096c12854ff1
   Scenario Outline: a bc-container subcommand that depends on Docker surfaces a docker-unreachable config error distinctly from a legitimate empty-or-absent result
     Given the shopsystem-bc-launcher BC is installed
     And the Docker daemon cannot be reached because <docker_fault>

@@ -1,3 +1,4 @@
+@bc:shopsystem-bc-launcher @origin:lead-ezzr
 Feature: bc-container launch leaves beads functionally usable inside the container
 
   # lead-rply tightens this scenario's prefix-SOURCE premise.  The launcher
@@ -20,7 +21,7 @@ Feature: bc-container launch leaves beads functionally usable inside the contain
   # bootstrap into a no-op — the self-inflicted lead-vlsu deadlock), and the
   # launcher must NOT `bd config set issue_prefix` (bd rejects it) or run a
   # separate `bd import` that pre-creates the DB.
-  @scenario_hash:2904f3a905567b48 @bc:shopsystem-bc-launcher
+  @scenario_hash:01041619e313c43e
   Scenario: after bc-container launch, beads is provisioned by bd bootstrap and boots write-ready
     Given the shopsystem-bc-launcher BC is installed
     And a BC named "shopsystem-bc-launcher" with a valid repo URL is configured
@@ -48,7 +49,7 @@ Feature: bc-container launch leaves beads functionally usable inside the contain
   # immediately BEFORE the agent (tmux) starts, so no host chown is ever
   # needed.  The chown-whole-workspace-first recipe and the
   # .beads-vscode-owned pin (2904f3a905567b48) must continue to hold.
-  @scenario_hash:d9e4ce60e03df361 @bc:shopsystem-bc-launcher
+  @scenario_hash:d9e4ce60e03df361
   Scenario: every agent-touched workspace path stays vscode-owned across container init so no host chown is needed
     Given the shopsystem-bc-launcher BC is installed
     And a BC container is launched whose agent runs as the unprivileged vscode user

@@ -1,3 +1,4 @@
+@bc:shopsystem-bc-launcher @origin:lead-dlrx
 Feature: bc-base Dockerfile installs shop-templates from a VCS version pin (lead-dlrx)
 
   The bc-base image must carry the shop-templates CLI so that launched BC
@@ -11,7 +12,7 @@ Feature: bc-base Dockerfile installs shop-templates from a VCS version pin (lead
   structurally by inspecting the committed Dockerfile, mirroring the
   scenario-36 declarative-artifact precedent.
 
-  @scenario_hash:ccb145d71c7100a2 @bc:shopsystem-bc-launcher
+  @scenario_hash:ccb145d71c7100a2
   Scenario: the bc-base Dockerfile installs shop-templates from a VCS version pin alongside the other framework utility CLIs
     Given the shopsystem-bc-launcher BC repository
     When the bc-base Dockerfile in that repository is inspected

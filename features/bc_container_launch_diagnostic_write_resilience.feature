@@ -1,3 +1,4 @@
+@bc:shopsystem-bc-launcher @origin:adr-041
 Feature: bc-container launch-diagnostic write is best-effort/non-fatal and targets a user-writable default location
 
   # lead-bnhn (P1 bugfix, additive tightening of currently-UNPINNED robustness
@@ -28,7 +29,7 @@ Feature: bc-container launch-diagnostic write is best-effort/non-fatal and targe
   #       D2 host-discoverability contract (a documented per-BC path found by a
   #       host lookup that does not attach into a session).
 
-  @scenario_hash:fe76a2f67262f665 @bc:shopsystem-bc-launcher
+  @scenario_hash:fe76a2f67262f665
   Scenario: a launch whose diagnostic write fails is NOT aborted by the write failure and surfaces a host-discoverable warning
     Given the shopsystem-bc-launcher BC is installed
     And no Docker container named "bc-shopsystem-messaging" is running
@@ -39,7 +40,7 @@ Feature: bc-container launch-diagnostic write is best-effort/non-fatal and targe
     And bc-container surfaces a host-discoverable warning that the launch diagnostic could not be written, naming the target path and the write-failure cause
     And the underlying launch-failure cause is still reported on the host-discoverable warning surface
 
-  @scenario_hash:aae4e5470f5c55cb @bc:shopsystem-bc-launcher
+  @scenario_hash:aae4e5470f5c55cb
   Scenario: with no BCLAUNCHER_HOST_STATE_DIR override the default diagnostic location is under a user-writable per-user state directory and remains host-discoverable
     Given the shopsystem-bc-launcher BC is installed
     And no BCLAUNCHER_HOST_STATE_DIR override is set in the environment

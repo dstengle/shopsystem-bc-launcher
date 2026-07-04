@@ -1,3 +1,4 @@
+@bc:shopsystem-bc-launcher @origin:lead-yk3o
 Feature: launch resolves the bc-base latest digest before running (lead-yy30 / lead-yk3o)
 
   Per the architect ruling on lead-yk3o, scenario 39 is NOT infra/CI — it is
@@ -7,7 +8,7 @@ Feature: launch resolves the bc-base latest digest before running (lead-yy30 / l
   "latest" -> D_new and the test asserts launch resolves, uses D_new, and the
   started container runs from D_new rather than the cached D_old.
 
-  @scenario_hash:af2f03d3ac519cb5 @bc:shopsystem-bc-launcher
+  @scenario_hash:af2f03d3ac519cb5
   Scenario: launch resolves the current registry digest of bc-base latest before running, so a republished image reaches the new container
     Given the shopsystem-bc-launcher BC is installed
     And the local Docker cache holds the bc-base "latest" tag at an older digest "D_old"

@@ -1,3 +1,4 @@
+@bc:shopsystem-bc-launcher @origin:lead-5k8c
 Feature: bc-container launch bd-bootstrap is bootstrap-resilient and never fatal-strands the container (lead-5k8c)
 
   The in-container bd-bootstrap step runs AFTER the repo clone but BEFORE the
@@ -28,7 +29,7 @@ Feature: bc-container launch bd-bootstrap is bootstrap-resilient and never fatal
      left without an agent.  The agent self-heals the tracker via the BC
      session-start beads-health step.
 
-  @scenario_hash:ada742d33c996d34 @bc:shopsystem-bc-launcher
+  @scenario_hash:ada742d33c996d34
   Scenario: launch initializes an empty beads dolt remote then provisions beads write-ready
     Given the shopsystem-bc-launcher BC is installed
     And a BC named "shopsystem-bc-launcher" with a valid repo URL is configured
@@ -41,7 +42,7 @@ Feature: bc-container launch bd-bootstrap is bootstrap-resilient and never fatal
     And bd create run inside the container's workspace directory exits zero and yields a new issue id carrying that prefix
     And the launch still starts the agent
 
-  @scenario_hash:aecde8d40bc5a7d6 @bc:shopsystem-bc-launcher
+  @scenario_hash:aecde8d40bc5a7d6
   Scenario: a bd-bootstrap failure warns and proceeds to agent-start without fatal-stranding the container
     Given the shopsystem-bc-launcher BC is installed
     And a BC named "shopsystem-bc-launcher" with a valid repo URL is configured

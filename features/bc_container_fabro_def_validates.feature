@@ -1,3 +1,4 @@
+@bc:shopsystem-bc-launcher @origin:adr-051
 Feature: a launched bc-base BC carries a self-contained VALID fabro loop def (lead-ky63)
 
   Companion block-only PIN for the self-contained fabro loop def bundle that
@@ -28,7 +29,7 @@ Feature: a launched bc-base BC carries a self-contained VALID fabro loop def (le
     "__PLACEHOLDER__" for every provider-key/token slot (valid JSON, no
     real-credential-shaped literal). A real value REDs (ADR-049).
 
-  @scenario_hash:2dfefe2ba81e418d @bc:shopsystem-bc-launcher
+  @scenario_hash:2dfefe2ba81e418d
   Scenario: a launched bc-base BC has a self-contained valid fabro loop def that "fabro validate" accepts with the native fabro vault holding only placeholders
     Given the shopsystem-bc-launcher BC is installed
     And bc-container launch is run with BC name "shopsystem-messaging"

@@ -1,6 +1,7 @@
+@bc:shopsystem-bc-launcher @origin:lead-pixf
 Feature: bc-container agent-presence reporting and infra-failure surfacing (lead-pixf / lead-8aqh)
 
-  @scenario_hash:f2ddd6c75425573e @bc:shopsystem-bc-launcher
+  @scenario_hash:f2ddd6c75425573e
   Scenario: bc-container status reports the BC online when its agent is live
     Given the shopsystem-bc-launcher BC is installed
     And a Docker container named "bc-shopsystem-messaging" is running
@@ -11,7 +12,7 @@ Feature: bc-container agent-presence reporting and infra-failure surfacing (lead
     And stdout includes the container state "running"
     And stdout reports the agent presence as "online"
 
-  @scenario_hash:010e776c8e98d0e6 @bc:shopsystem-bc-launcher
+  @scenario_hash:010e776c8e98d0e6
   Scenario: bc-container list errors non-zero when the docker socket is unreachable
     Given the shopsystem-bc-launcher BC is installed
     And the docker socket is unreachable so container inspection is denied
@@ -20,7 +21,7 @@ Feature: bc-container agent-presence reporting and infra-failure surfacing (lead
     And stderr reports that the docker socket could not be reached
     And stdout does not report "No BC containers found"
 
-  @scenario_hash:aeebb281bfe68ae5 @bc:shopsystem-bc-launcher
+  @scenario_hash:aeebb281bfe68ae5
   Scenario: bc-container start-agent detects an existing live agent and no-ops instead of hanging on the readiness probe
     Given the shopsystem-bc-launcher BC is installed
     And a Docker container named "bc-shopsystem-messaging" is running

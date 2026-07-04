@@ -1,3 +1,4 @@
+@bc:shopsystem-bc-launcher @origin:adr-049
 Feature: bc-base bakes fabro v0.254.0 and the anthropic-oauth-shim, and the centralized poll enrolls fabro (lead-ckq5)
 
   bc-base bakes the fabro binary (pinned v0.254.0 from fabro-sh/fabro) and a
@@ -19,7 +20,7 @@ Feature: bc-base bakes fabro v0.254.0 and the anthropic-oauth-shim, and the cent
   executable body via _strip_yaml_comments (comment-only mapping does NOT
   satisfy — the 5vyb pattern).
 
-  @scenario_hash:a3512aedb8763150 @bc:bc-launcher
+  @scenario_hash:a3512aedb8763150
   Scenario: a launched bc-base BC has fabro v0.254.0 and the anthropic-oauth-shim present and launchable
     Given the shopsystem-bc-launcher BC is installed
     And bc-container launch is run with BC name "shopsystem-messaging"
@@ -29,7 +30,7 @@ Feature: bc-base bakes fabro v0.254.0 and the anthropic-oauth-shim, and the cent
     And the anthropic-oauth-shim is resolvable inside the container as a baked launcher, and invoking that launcher with its usage/help flag exits zero using the python standard library alone with no third-party import required
     And both fabro and the anthropic-oauth-shim are real baked artifacts present in the running container, not placeholders and not merely declared in the image manifest
 
-  @scenario_hash:4fc67c610cba6227 @bc:bc-launcher
+  @scenario_hash:4fc67c610cba6227
   Scenario: the centralized poll enrolls fabro as a baked dependency against fabro-sh/fabro and bump-rebuilds :latest on a newer release
     Given the bc-base Dockerfile in shopsystem-bc-launcher bakes fabro at pin "v0.254.0" as a baked dependency alongside shop-templates, shop-msg, scenarios, and beads
     And the single centralized scheduled bc-launcher workflow is the one poll that check-bump-rebuilds bc-base for its baked dependencies

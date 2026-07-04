@@ -1,6 +1,7 @@
+@bc:shopsystem-bc-launcher @origin:lead-lez1
 Feature: bc-container launch and inject commit prompts via two discrete tmux send-keys invocations
 
-  @scenario_hash:6477b2ab3720ac53 @bc:shopsystem-bc-launcher
+  @scenario_hash:456266b23b11fefe
     Scenario: bc-container launch --startup-prompt issues two discrete tmux send-keys invocations against the container driver — first the prompt text alone, then the Enter key alone — and no single invocation carries both
     Given the shopsystem-bc-launcher BC is installed
     And no Docker container named "bc-shopsystem-messaging" is running
@@ -11,7 +12,7 @@ Feature: bc-container launch and inject commit prompts via two discrete tmux sen
     And no single tmux send-keys invocation issued by the launch command's --startup-prompt handling carries both the prompt text "bd prime" and the Enter key together
     And the two invocations are issued in order: the text-only invocation first, the Enter-only invocation second
 
-  @scenario_hash:ad68aaf60377706e @bc:shopsystem-bc-launcher
+  @scenario_hash:76cdee3bb4a8026c
     Scenario: bc-container inject issues two discrete tmux send-keys invocations against the container driver — first the prompt text alone, then the Enter key alone — and no single invocation carries both
     Given the shopsystem-bc-launcher BC is installed
     And a Docker container named "bc-shopsystem-messaging" is running with a tmux session named "agent"

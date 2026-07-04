@@ -1,3 +1,4 @@
+@bc:shopsystem-bc-launcher @origin:brief-013 @service:agent-vault-broker
 Feature: bc-container launch brokers BC-container credentials through agent-vault
 
   # ADR-026 (accepted 2026-06-09) supersedes the host-credential-mount model.
@@ -6,7 +7,7 @@ Feature: bc-container launch brokers BC-container credentials through agent-vaul
   # path; there is no launch-mode flag and no host-mount fallback.  Dispatched
   # on lead-v4ih, unblocked by lead-hxb8.
 
-  @scenario_hash:6952248a419ca56b @bc:shopsystem-bc-launcher
+  @scenario_hash:6952248a419ca56b
   Scenario: a launched BC container has no host ~/.claude credential directory mount
     Given the shopsystem-bc-launcher BC is installed
     And bc-container launch is run with BC name "shopsystem-messaging"
@@ -15,7 +16,7 @@ Feature: bc-container launch brokers BC-container credentials through agent-vaul
     Then no bind mount inside the container has the host "~/.claude" directory as its source
     And no bind mount inside the container targets "/home/vscode/.claude" as a read-write directory mount
 
-  @scenario_hash:f838de07a80749f9 @bc:shopsystem-bc-launcher
+  @scenario_hash:f838de07a80749f9
   Scenario: a launched BC container has no host gh or gitconfig credential mount
     Given the shopsystem-bc-launcher BC is installed
     And bc-container launch is run with BC name "shopsystem-messaging"
@@ -24,7 +25,7 @@ Feature: bc-container launch brokers BC-container credentials through agent-vaul
     Then no bind mount inside the container has the host "~/.config/gh" directory as its source
     And no bind mount inside the container has the host "~/.gitconfig" file as its source
 
-  @scenario_hash:d6296d959f851be5 @bc:shopsystem-bc-launcher
+  @scenario_hash:d6296d959f851be5
   Scenario: bc-container launch does not require BCLAUNCHER_HOST_HOME to resolve a credential mount source
     Given the shopsystem-bc-launcher BC is installed
     And the environment variable BCLAUNCHER_HOST_HOME is unset
@@ -41,7 +42,7 @@ Feature: bc-container launch brokers BC-container credentials through agent-vaul
   # explicitly so a future bare-:14321 regression is caught. Asserts on the
   # ACTUAL runtime HTTPS_PROXY value injected into `docker run`, not an echoed
   # string (bclaunch-7ys / 5hl tautology guard).
-  @scenario_hash:46c636684004bde3 @bc:shopsystem-bc-launcher
+  @scenario_hash:46c636684004bde3
   Scenario: the launched Claude agent is invoked wrapped in agent-vault run with its runtime proxy at the broker MITM listener
     Given the shopsystem-bc-launcher BC is installed
     And an agent-vault broker is running on the shopsystem network and is reachable
@@ -59,7 +60,7 @@ Feature: bc-container launch brokers BC-container credentials through agent-vaul
   # literal "__PLACEHOLDER__" (no real OAuth token anywhere — the broker
   # substitutes the real Authorization on the wire). The delivery mechanism
   # (baked into the bc-base image, no controller mount) is unchanged.
-  @scenario_hash:8dfad9acd7503b3f @bc:shopsystem-bc-launcher
+  @scenario_hash:8dfad9acd7503b3f
   Scenario: the container's Claude credential file is a nested-claudeAiOauth placeholder baked into the image, never the real OAuth credential
     Given the shopsystem-bc-launcher BC is installed
     And bc-container launch is run with BC name "shopsystem-messaging"
@@ -73,7 +74,7 @@ Feature: bc-container launch brokers BC-container credentials through agent-vaul
     And the controller builds no credential bind-mount into the container
     And the real host OAuth accessToken value does not appear anywhere in the container's filesystem
 
-  @scenario_hash:97734ca69a510e37 @bc:shopsystem-bc-launcher
+  @scenario_hash:97734ca69a510e37
   Scenario: an authenticated GitHub operation from inside the container succeeds via the broker with no mounted GitHub credential
     Given the shopsystem-bc-launcher BC is installed
     And an agent-vault broker with a GitHub credential service is running on the shopsystem network and is reachable
@@ -82,7 +83,7 @@ Feature: bc-container launch brokers BC-container credentials through agent-vaul
     Then the operation completes successfully against GitHub
     And no GitHub token value is present in the container's environment or filesystem
 
-  @scenario_hash:f23dfbe84c899968 @bc:shopsystem-bc-launcher
+  @scenario_hash:f23dfbe84c899968
   Scenario: the broker substitutes the GitHub credential on the outbound request rather than the container holding it
     Given an agent-vault broker with a GitHub credential service is running on the shopsystem network
     And the container "bc-shopsystem-messaging" routes its GitHub-bound traffic through the broker's proxy listener
@@ -90,7 +91,7 @@ Feature: bc-container launch brokers BC-container credentials through agent-vaul
     Then the request the broker forwards to github.com carries the broker-stored GitHub credential
     And the request as it leaves the container carries no GitHub credential
 
-  @scenario_hash:6cb07698a874aa47 @bc:shopsystem-bc-launcher
+  @scenario_hash:4160c3e00ed0997e
   Scenario: bc-container launch surfaces a readiness failure when the agent-vault broker is unreachable, before the agent engages
     Given the shopsystem-bc-launcher BC is installed
     And no Docker container named "bc-shopsystem-messaging" is running
@@ -100,14 +101,14 @@ Feature: bc-container launch brokers BC-container credentials through agent-vaul
     And stderr reports an agent-vault readiness failure that names the configured agent-vault broker address
     And no startup prompt has been sent to the tmux session named "agent" in container "bc-shopsystem-messaging"
 
-  @scenario_hash:3b2a81c1bfe2897e @bc:shopsystem-bc-launcher
+  @scenario_hash:3b2a81c1bfe2897e
   Scenario: a BC container whose agent-vault broker is unreachable reports unhealthy despite the process being alive
     Given a BC container named "bc-shopsystem-messaging" is running with its agent process alive
     And the agent-vault broker configured for the container is not reachable
     When I inspect the container's health status via docker inspect
     Then the container's reported health status is "unhealthy"
 
-  @scenario_hash:f73afae009c283fc @bc:shopsystem-bc-launcher
+  @scenario_hash:c1e8bd6646b6bc69
   Scenario: the readiness barrier passes and engages the agent only when both the messaging database and the agent-vault broker are reachable
     Given the shopsystem-bc-launcher BC is installed
     And no Docker container named "bc-shopsystem-messaging" is running
@@ -117,7 +118,7 @@ Feature: bc-container launch brokers BC-container credentials through agent-vaul
     Then the readiness barrier reports both messaging-database and agent-vault checks passed
     And the startup prompt is sent to the tmux session named "agent" in container "bc-shopsystem-messaging"
 
-  @scenario_hash:64aaff804dc4bf98 @bc:shopsystem-bc-launcher
+  @scenario_hash:916581b93d85df47
   Scenario: the readiness barrier withholds engagement when the messaging database is reachable but the agent-vault broker is not
     Given the shopsystem-bc-launcher BC is installed
     And no Docker container named "bc-shopsystem-messaging" is running
@@ -127,7 +128,7 @@ Feature: bc-container launch brokers BC-container credentials through agent-vaul
     Then the command exits non-zero
     And no startup prompt has been sent to the tmux session named "agent" in container "bc-shopsystem-messaging"
 
-  @scenario_hash:2a4e9889c141c790 @bc:shopsystem-bc-launcher
+  @scenario_hash:2a4e9889c141c790
   Scenario: brokered launch presupposes the broker vault already holds the real credentials, provisioned out of band
     Given the agent-vault broker has been provisioned out of band with the real Claude OAuth credential and the real GitHub credential
     And the shopsystem-bc-launcher BC is installed
@@ -135,7 +136,7 @@ Feature: bc-container launch brokers BC-container credentials through agent-vaul
     Then the brokered Claude OAuth substitution and the brokered GitHub substitution both succeed
     And bc-container launch performed no step that read a real credential from any host file
 
-  @scenario_hash:f1b70c2b9ec76b98 @bc:shopsystem-bc-launcher
+  @scenario_hash:f1b70c2b9ec76b98
   Scenario: bc-container launch never writes a real credential into the broker vault or into a container
     Given the shopsystem-bc-launcher BC is installed
     When bc-container launch is run with BC name "shopsystem-messaging"
@@ -146,21 +147,21 @@ Feature: bc-container launch brokers BC-container credentials through agent-vaul
   # e4348b11e0b38d4f). Re-pinned against the NESTED claudeAiOauth shape; the
   # no-real-credential invariant SURVIVES (every baked value is "__PLACEHOLDER__"
   # or synthetic), only the JSON shape changes mount-of-bare -> baked-nested.
-  @scenario_hash:0c90e2234954ccc4 @bc:shopsystem-bc-launcher
+  @scenario_hash:0c90e2234954ccc4
   Scenario: no real Claude OAuth credential is observable from inside the container under the nested-claudeAiOauth shape
     Given the container "bc-shopsystem-messaging" is running under the agent-vault model
     When the container's filesystem and process environment are searched from inside the container
     Then the real Claude OAuth accessToken value is not present in any file or environment variable
     And the only .credentials.json present has its claudeAiOauth accessToken equal to "__PLACEHOLDER__"
 
-  @scenario_hash:b8f2e121a5fd77ba @bc:shopsystem-bc-launcher
+  @scenario_hash:b8f2e121a5fd77ba
   Scenario: no real GitHub credential and no host gh or gitconfig path is observable from inside the container
     Given the container "bc-shopsystem-messaging" is running under the agent-vault model
     When the container's filesystem and process environment are searched from inside the container
     Then no real GitHub token value is present in any file or environment variable
     And no path mounted from the host's "~/.config/gh" or "~/.gitconfig" is present inside the container
 
-  @scenario_hash:ff1ee370a4462e7d @bc:shopsystem-bc-launcher
+  @scenario_hash:ff1ee370a4462e7d
   Scenario: the only credential-bearing secret reachable from inside the container is the revocable agent-vault proxy token
     Given the container "bc-shopsystem-messaging" is running under the agent-vault model
     When the credential-bearing secrets reachable from inside the container are enumerated

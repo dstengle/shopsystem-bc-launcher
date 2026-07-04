@@ -1,3 +1,4 @@
+@bc:shopsystem-bc-launcher @origin:brief-013 @service:agent-vault-broker
 Feature: bc-container launch-time auto-clone is wired through the broker MITM proxy with CA trust
 
   # bclaunch-5fji (canary-found 2026-06-10, v0.2.4): the built-in launch-time
@@ -24,7 +25,7 @@ Feature: bc-container launch-time auto-clone is wired through the broker MITM pr
   # 6cb07698a874aa47 / 3b2a81c1bfe2897e) actually function at clone time; none
   # is retired.
 
-  @scenario_hash:7d72a39ed0d180c9 @bc:shopsystem-bc-launcher
+  @scenario_hash:877d03638a1b9402
   Scenario: the launch-time clone routes HTTPS through the broker MITM proxy on :14322 with token:vault basic-auth
     Given the shopsystem-bc-launcher BC is installed
     And the operator supplies agent-vault addr "https://agent-vault:14321" token "av_agt_canary_xyz" and vault "shopsystem"
@@ -32,7 +33,7 @@ Feature: bc-container launch-time auto-clone is wired through the broker MITM pr
     Then a Docker container named "bc-shopsystem-messaging" is running
     And the launch-time clone exec has HTTPS_PROXY set to "http://av_agt_canary_xyz:shopsystem@agent-vault:14322"
 
-  @scenario_hash:e4f8f0cb380a4a72 @bc:shopsystem-bc-launcher
+  @scenario_hash:a788be81c699254a
   Scenario: the launch-time clone HTTPS_PROXY does NOT point at the bare control API on :14321
     Given the shopsystem-bc-launcher BC is installed
     And the operator supplies agent-vault addr "https://agent-vault:14321" token "av_agt_canary_xyz" and vault "shopsystem"
@@ -42,7 +43,7 @@ Feature: bc-container launch-time auto-clone is wired through the broker MITM pr
     And the launch-time clone exec HTTPS_PROXY is not the control API on port 14321
     And the launch-time clone exec HTTPS_PROXY carries basic-auth userinfo "av_agt_canary_xyz:shopsystem"
 
-  @scenario_hash:f391c4ec56674b2e @bc:shopsystem-bc-launcher
+  @scenario_hash:c90e7a8d31b712b2
   Scenario: the launch-time clone exec carries GIT_SSL_CAINFO so it trusts the broker CA without a login shell
     Given the shopsystem-bc-launcher BC is installed
     And the operator supplies agent-vault addr "https://agent-vault:14321" token "av_agt_canary_xyz" and vault "shopsystem"
@@ -50,7 +51,7 @@ Feature: bc-container launch-time auto-clone is wired through the broker MITM pr
     Then a Docker container named "bc-shopsystem-messaging" is running
     And the launch-time clone exec has GIT_SSL_CAINFO set to "/home/vscode/.config/agent-vault/ca.pem"
 
-  @scenario_hash:fdf06d68949342f9 @bc:shopsystem-bc-launcher
+  @scenario_hash:783fd028693c0c20
   Scenario: the clone proxy userinfo uses the token verbatim (no double prefix) and URL-encodes the vault
     Given the shopsystem-bc-launcher BC is installed
     And the operator supplies agent-vault addr "https://agent-vault:14321" token "av_agt_already_prefixed" and vault "shop/space"

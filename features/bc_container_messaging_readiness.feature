@@ -1,6 +1,7 @@
+@bc:shopsystem-bc-launcher @origin:lead-cs7k @service:postgres
 Feature: bc-container launch gates the startup prompt behind a messaging readiness barrier
 
-  @scenario_hash:e6543853e4333506 @bc:shopsystem-bc-launcher
+  @scenario_hash:e6543853e4333506
   Scenario: bc-container launch surfaces a readiness failure when the messaging database is unreachable, before the agent engages
     Given the shopsystem-bc-launcher BC is installed
     And no Docker container named "bc-shopsystem-messaging" is running
@@ -10,7 +11,7 @@ Feature: bc-container launch gates the startup prompt behind a messaging readine
     And stderr reports a messaging readiness failure that names the SHOPMSG_DSN value
     And no startup prompt has been sent to the tmux session named "agent" in container "bc-shopsystem-messaging"
 
-  @scenario_hash:11778d987b2fc50f @bc:shopsystem-bc-launcher
+  @scenario_hash:c946bc6d8a05e44a
   Scenario: bc-container launch does not inject the startup prompt until the readiness barrier passes
     Given the shopsystem-bc-launcher BC is installed
     And no Docker container named "bc-shopsystem-messaging" is running
@@ -19,7 +20,7 @@ Feature: bc-container launch gates the startup prompt behind a messaging readine
     Then no startup prompt has been sent to the tmux session named "agent" in container "bc-shopsystem-messaging"
     And once the readiness sequence completes successfully, the startup prompt is sent to the tmux session named "agent"
 
-  @scenario_hash:11778d987b2fc50f @bc:shopsystem-bc-launcher
+  @scenario_hash:767eba36f237a79a
   Scenario: re-running the readiness sequence against an already-ready container is a no-op that reports ready
     Given the shopsystem-bc-launcher BC is installed
     And a Docker container named "bc-shopsystem-messaging" is running and has already passed its readiness sequence
@@ -37,7 +38,7 @@ Feature: bc-container launch gates the startup prompt behind a messaging readine
   # container's network context (docker exec) so probe reachability matches the
   # container's reachability. The pass/withhold semantics (both-reachable ->
   # inject, either-unreachable -> withhold) are UNCHANGED.
-  @scenario_hash:27b73cbb5eabf3f7 @bc:shopsystem-bc-launcher
+  @scenario_hash:27b73cbb5eabf3f7
   Scenario: the readiness probes run from inside the container network, not from the launcher host
     Given the shopsystem-bc-launcher BC is installed
     And a BC container "bc-dummyco-messaging" is launched on the docker network "dummyco" for a product whose slug is "dummyco"
@@ -55,7 +56,7 @@ Feature: bc-container launch gates the startup prompt behind a messaging readine
   # used verbatim as the runtime HTTPS_PROXY (controller _build_runtime_proxy_url)
   # so pointing the probe at dummyco-agent-vault does not clobber the
   # token:vault@host:14322 derived runtime proxy.
-  @scenario_hash:fa08c5496de9e401 @bc:shopsystem-bc-launcher
+  @scenario_hash:fa08c5496de9e401
   Scenario: the readiness probe broker host is derived from the product slug and is decoupled from the verbatim runtime-proxy override
     Given the shopsystem-bc-launcher BC is installed
     And a bc-manifest.yaml whose product field is "dummyco"

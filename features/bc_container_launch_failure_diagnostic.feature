@@ -1,3 +1,4 @@
+@bc:shopsystem-bc-launcher @origin:lead-63em
 Feature: bc-container launch persists a host-readable diagnostic file naming the failure cause when a launch fails to bring up a usable session
 
   # lead-63em (re-issue of lead-2qta, resolving this BC's surface-ambiguity
@@ -11,7 +12,7 @@ Feature: bc-container launch persists a host-readable diagnostic file naming the
   # launch_diagnostic_path / BCLAUNCHER_HOST_STATE_DIR):
   #   <BCLAUNCHER_HOST_STATE_DIR|/var/lib/bc-launcher>/<container>/launch-diagnostic.txt
 
-  @scenario_hash:0d010cf8f3175226 @bc:shopsystem-bc-launcher
+  @scenario_hash:0d010cf8f3175226
   Scenario Outline: a launch that fails to bring up a usable session writes a persisted host-readable diagnostic file naming the specific failure cause
     Given the shopsystem-bc-launcher BC is installed
     And no Docker container named "bc-shopsystem-messaging" is running
@@ -30,7 +31,7 @@ Feature: bc-container launch persists a host-readable diagnostic file naming the
       | the readiness barrier never reports both supporting servers ready | readiness     |
       | claude or its tmux session never started inside the container     | agent-startup |
 
-  @scenario_hash:7084bbbfdef94f81 @bc:shopsystem-bc-launcher
+  @scenario_hash:7084bbbfdef94f81
   Scenario: the persisted diagnostic file is discoverable from the host even when no tmux session ever came up
     Given the shopsystem-bc-launcher BC is installed
     And no Docker container named "bc-shopsystem-messaging" is running

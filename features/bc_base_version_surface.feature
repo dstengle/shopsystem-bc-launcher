@@ -1,3 +1,4 @@
+@bc:shopsystem-bc-launcher @origin:lead-5xnd
 Feature: published bc-base / bc-lead images surface the bc-launcher release and baked shop-templates versions via OCI labels and ENV (lead-5xnd)
 
   The published shopsystem-bc-base and shopsystem-bc-lead images are built FROM
@@ -17,7 +18,7 @@ Feature: published bc-base / bc-lead images surface the bc-launcher release and 
   `docker container inspect` of the published image is the lead's post-release
   pull verification, out of band of this suite.
 
-  @scenario_hash:7c0c949fccdf9df2 @bc:shopsystem-bc-launcher
+  @scenario_hash:7c0c949fccdf9df2
   Scenario Outline: a published bc-launcher image surfaces its bc-launcher release version and baked shop-templates version via OCI labels and ENV, overriding the misleading upstream base version label
     Given the bc-launcher publish workflow built and published the "<image>" image at bc-launcher release version "v0.3.38" baking shop-templates version "v0.47.0"
     When the published "<image>:latest" image is examined with "docker image inspect"
@@ -33,7 +34,7 @@ Feature: published bc-base / bc-lead images surface the bc-launcher release and 
       | ghcr.io/dstengle/shopsystem-bc-base |
       | ghcr.io/dstengle/shopsystem-bc-lead |
 
-  @scenario_hash:26d1817c9d115f0d @bc:shopsystem-bc-launcher
+  @scenario_hash:26d1817c9d115f0d
   Scenario: a container started from bc-base:latest surfaces the baked bc-launcher and shop-templates versions via container inspect, independent of the lost run-tag
     Given the published "ghcr.io/dstengle/shopsystem-bc-base" image at bc-launcher release version "v0.3.38" baking shop-templates version "v0.47.0" carries those versions as OCI labels and ENV
     And a container is started from that image addressed only by its "latest" tag, so the originating version tag is not recoverable from the running container

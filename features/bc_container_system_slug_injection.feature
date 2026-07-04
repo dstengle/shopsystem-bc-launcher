@@ -1,3 +1,4 @@
+@bc:shopsystem-bc-launcher @origin:lead-53y0
 Feature: bc-container launch resolves and injects SHOPMSG_SYSTEM_SLUG into the launched container
 
   bc-launcher RESOLVES the product slug (SHOPMSG_SYSTEM_SLUG env on the launcher
@@ -8,7 +9,7 @@ Feature: bc-container launch resolves and injects SHOPMSG_SYSTEM_SLUG into the l
   runtime. The injected slug, the docker network name, and the BC-name-shape
   prefix all derive from the ONE manifest product: resolver (lead-53y0).
 
-  @scenario_hash:53f4fd873162a623 @bc:shopsystem-bc-launcher
+  @scenario_hash:1fcba5b74c7c2541
   Scenario: launch injects -e SHOPMSG_SYSTEM_SLUG from the manifest product field when no env override
     Given a bc-manifest.yaml exists with product field "dummyco"
     And no SHOPMSG_SYSTEM_SLUG override is set on the launcher invocation
@@ -17,7 +18,7 @@ Feature: bc-container launch resolves and injects SHOPMSG_SYSTEM_SLUG into the l
     Then the command exits zero
     And the FakeDockerDriver records that the docker run command for "bc-shopsystem-messaging" includes the flag "-e SHOPMSG_SYSTEM_SLUG=dummyco"
 
-  @scenario_hash:9b2dfb44e498f6c4 @bc:shopsystem-bc-launcher
+  @scenario_hash:cefb043d0b16399f
   Scenario: a SHOPMSG_SYSTEM_SLUG env override on the launcher invocation wins over manifest product
     Given a bc-manifest.yaml exists with product field "dummyco"
     And a SHOPMSG_SYSTEM_SLUG override "overrideco" is set on the launcher invocation
@@ -27,7 +28,7 @@ Feature: bc-container launch resolves and injects SHOPMSG_SYSTEM_SLUG into the l
     And the FakeDockerDriver records that the docker run command for "bc-shopsystem-messaging" includes the flag "-e SHOPMSG_SYSTEM_SLUG=overrideco"
     And the FakeDockerDriver records that the docker run command does NOT include "-e SHOPMSG_SYSTEM_SLUG=dummyco"
 
-  @scenario_hash:4ee3ed0a9efaab04 @bc:shopsystem-bc-launcher
+  @scenario_hash:efba53a27679b509
   Scenario: under the default product slug launch injects -e SHOPMSG_SYSTEM_SLUG=shopsystem without regressing behavior
     Given a bc-manifest.yaml exists with product field "shopsystem"
     And no SHOPMSG_SYSTEM_SLUG override is set on the launcher invocation
@@ -36,7 +37,7 @@ Feature: bc-container launch resolves and injects SHOPMSG_SYSTEM_SLUG into the l
     Then the command exits zero
     And the FakeDockerDriver records that the docker run command for "bc-shopsystem-messaging" includes the flag "-e SHOPMSG_SYSTEM_SLUG=shopsystem"
 
-  @scenario_hash:e9766594770f1c89 @bc:shopsystem-bc-launcher
+  @scenario_hash:11c8e7f995a6f142
   Scenario: the docker network name and the BC-name-shape prefix both derive from the same manifest product slug
     Given a bc-manifest.yaml exists with product field "dummyco"
     And no SHOPMSG_SYSTEM_SLUG override is set on the launcher invocation

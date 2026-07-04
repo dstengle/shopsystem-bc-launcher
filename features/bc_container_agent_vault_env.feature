@@ -1,3 +1,4 @@
+@bc:shopsystem-bc-launcher @origin:brief-013 @service:agent-vault-broker
 Feature: bc-container launch injects operator-supplied agent-vault credentials into the container env
 
   # bclaunch-5hi (critical path): controller.launch() injected ONLY
@@ -8,7 +9,7 @@ Feature: bc-container launch injects operator-supplied agent-vault credentials i
   # NEVER a literal baked into source — the only credential literal in src/ is
   # the existing "__PLACEHOLDER__" for .credentials.json.
 
-  @scenario_hash:5a1c9e7d3b6f0428 @bc:shopsystem-bc-launcher
+  @scenario_hash:3d853e20c0baafc4
   Scenario: a launched BC container carries the operator-supplied AGENT_VAULT_ADDR, token and vault in its env
     Given the shopsystem-bc-launcher BC is installed
     And the operator supplies agent-vault addr "https://agent-vault:14321" token "av_agt_operator_supplied_xyz" and vault "shopsystem"
@@ -18,7 +19,7 @@ Feature: bc-container launch injects operator-supplied agent-vault credentials i
     And the container env has AGENT_VAULT_TOKEN set to "av_agt_operator_supplied_xyz"
     And the container env has AGENT_VAULT_VAULT set to "shopsystem"
 
-  @scenario_hash:6b2d0f8e4c7a1539 @bc:shopsystem-bc-launcher
+  @scenario_hash:b958e0e9f558b714
   Scenario: no real agent-vault token literal is baked into the launcher source
     Given the shopsystem-bc-launcher BC is installed
     When the launcher source tree under src/ is scanned for credential literals

@@ -1,3 +1,4 @@
+@bc:shopsystem-bc-launcher @origin:brief-013 @service:agent-vault-broker
 Feature: bc-container launch passes the broker CA as an env var, builds no CA bind-mount
 
   # bclaunch-7pf (REVISED under operator design directive — supersedes the
@@ -11,7 +12,7 @@ Feature: bc-container launch passes the broker CA as an env var, builds no CA bi
   # (bclaunch-9rr). The controller does NO CA handling: it injects the env var
   # and builds NO CA bind-mount.
 
-  @scenario_hash:7c3e1a9f5d8b2640 @bc:shopsystem-bc-launcher
+  @scenario_hash:0b1f6badad2c9e58
   Scenario: the operator-supplied broker CA travels as the AGENT_VAULT_CA_PEM container env var
     Given the shopsystem-bc-launcher BC is installed
     And the operator supplies the broker CA PEM via AGENT_VAULT_CA_PEM
@@ -20,7 +21,7 @@ Feature: bc-container launch passes the broker CA as an env var, builds no CA bi
     Then a Docker container named "bc-shopsystem-messaging" is running
     And the container env has AGENT_VAULT_CA_PEM set to the operator-supplied broker CA PEM
 
-  @scenario_hash:8d4f2b0a6e9c3751 @bc:shopsystem-bc-launcher
+  @scenario_hash:34fc8db53931e62a
   Scenario: the controller builds no CA bind-mount and sets no controller-side TLS-trust env
     Given the shopsystem-bc-launcher BC is installed
     And the operator supplies the broker CA PEM via AGENT_VAULT_CA_PEM
@@ -43,7 +44,7 @@ Feature: bc-container launch passes the broker CA as an env var, builds no CA bi
   # no \n-escape convention is introduced. Single-line env-file values and the
   # AGENT_VAULT_CA_PEM-travels-as-env-var contract (7c3e1a9f5d8b2640) are
   # unchanged; this is additive.
-  @scenario_hash:eb92b4a40939973f @bc:shopsystem-bc-launcher
+  @scenario_hash:eb92b4a40939973f
   Scenario: bc-container --env-file preserves a multi-line AGENT_VAULT_CA_PEM value intact through to the container env
     Given the shopsystem-bc-launcher BC is installed
     And an env file supplies AGENT_VAULT_CA_PEM as a multi-line PEM block spanning several physical lines

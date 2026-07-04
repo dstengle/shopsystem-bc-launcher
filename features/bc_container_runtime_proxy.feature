@@ -1,3 +1,4 @@
+@bc:shopsystem-bc-launcher @origin:brief-013 @service:agent-vault-broker
 Feature: bc-container launch points the container RUNTIME HTTPS_PROXY at the broker MITM proxy
 
   # bclaunch-3q12 (canary-found v0.2.5, fixed v0.2.6): the container's persistent
@@ -27,7 +28,7 @@ Feature: bc-container launch points the container RUNTIME HTTPS_PROXY at the bro
   # pinning failure mode (bclaunch-7ys / bclaunch-5hl). A bare-:14321 runtime
   # proxy fails these scenarios.
 
-  @scenario_hash:de8a75abba9c38ee @bc:shopsystem-bc-launcher
+  @scenario_hash:de8a75abba9c38ee
   Scenario: a plain brokered launch derives the runtime HTTPS_PROXY at the broker MITM proxy on :14322 with token:vault basic-auth
     Given the shopsystem-bc-launcher BC is installed
     And the operator supplies agent-vault addr "https://agent-vault:14321" token "av_agt_canary_xyz" and vault "shopsystem"
@@ -35,7 +36,7 @@ Feature: bc-container launch points the container RUNTIME HTTPS_PROXY at the bro
     Then a Docker container named "bc-shopsystem-messaging" is running
     And the container runtime HTTPS_PROXY is set to "http://av_agt_canary_xyz:shopsystem@agent-vault:14322"
 
-  @scenario_hash:580bb72558328694 @bc:shopsystem-bc-launcher
+  @scenario_hash:580bb72558328694
   Scenario: the plain brokered runtime HTTPS_PROXY does NOT point at the bare control API on :14321
     Given the shopsystem-bc-launcher BC is installed
     And the operator supplies agent-vault addr "https://agent-vault:14321" token "av_agt_canary_xyz" and vault "shopsystem"
@@ -45,7 +46,7 @@ Feature: bc-container launch points the container RUNTIME HTTPS_PROXY at the bro
     And the container runtime HTTPS_PROXY is not the control API on port 14321
     And the container runtime HTTPS_PROXY carries basic-auth userinfo "av_agt_canary_xyz:shopsystem"
 
-  @scenario_hash:8a30298f2afde4c4 @bc:shopsystem-bc-launcher
+  @scenario_hash:8a30298f2afde4c4
   Scenario: an explicit --agent-vault-broker full URL wins verbatim over the derived MITM proxy
     Given the shopsystem-bc-launcher BC is installed
     And the operator supplies agent-vault addr "https://agent-vault:14321" token "av_agt_canary_xyz" and vault "shopsystem"
@@ -53,7 +54,7 @@ Feature: bc-container launch points the container RUNTIME HTTPS_PROXY at the bro
     Then a Docker container named "bc-shopsystem-messaging" is running
     And the container runtime HTTPS_PROXY is set to "http://av_agt_override:other@broker.example:14399"
 
-  @scenario_hash:df5389b11bf85598 @bc:shopsystem-bc-launcher
+  @scenario_hash:df5389b11bf85598
   Scenario: the derived runtime proxy uses the token verbatim (no double prefix) and URL-encodes the vault
     Given the shopsystem-bc-launcher BC is installed
     And the operator supplies agent-vault addr "https://agent-vault:14321" token "av_agt_already_prefixed" and vault "shop/space"

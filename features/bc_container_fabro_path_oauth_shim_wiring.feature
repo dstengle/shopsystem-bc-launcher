@@ -1,3 +1,4 @@
+@bc:shopsystem-bc-launcher @origin:adr-049
 Feature: the fabro orchestrator launch path starts the anthropic-oauth-shim and points fabro's anthropic provider at it (lead-vwib)
 
   LAUNCHER WIRING ONLY. The anthropic-oauth-shim is lead-so2h's owned
@@ -23,7 +24,7 @@ Feature: the fabro orchestrator launch path starts the anthropic-oauth-shim and 
   round-trip (fabro-orchestration/02, @scenario_hash:9c7b4e8280665239) is the
   lead's E2E and is NOT this scenario's in-container checkable core.
 
-  @scenario_hash:8b5a1b9e5499293b @bc:shopsystem-bc-launcher
+  @scenario_hash:8b5a1b9e5499293b
   Scenario: launching a BC on the fabro orchestrator path starts the in-container anthropic-oauth-shim and points fabro's anthropic provider base_url at it while the native fabro vault holds only placeholders
     Given the shopsystem-bc-launcher BC is installed
     And bc-container launch is run for BC name "shopsystem-messaging" on the fabro orchestrator launch path

@@ -1,6 +1,7 @@
+@bc:shopsystem-bc-launcher @origin:lead-dqje
 Feature: the centralized bc-base poll treats the bc-launcher self-pin as a polled dependency (lead-dqje / lead-5yql)
 
-  @scenario_hash:493bbbb7dcb61d7e @bc:shopsystem-bc-launcher
+  @scenario_hash:493bbbb7dcb61d7e
   Scenario: the centralized poll treats the bc-launcher self-pin as a polled dependency and bumps it when stale then rebuilds
     Given the bc-base Dockerfile in shopsystem-bc-launcher pins shopsystem-bc-launcher itself at "@v0.3.9" in a "git+https://github.com/dstengle/shopsystem-bc-launcher" VCS pin
     And the centralized scheduled workflow resolves shopsystem-bc-launcher's own latest release tag against its canonical repository "dstengle/shopsystem-bc-launcher" using the workflow's own "GITHUB_TOKEN"
@@ -15,7 +16,7 @@ Feature: the centralized bc-base poll treats the bc-launcher self-pin as a polle
     And the workflow republishes "ghcr.io/dstengle/shopsystem-bc-base:latest" at the new digest built from the bumped Dockerfile
     And this self-pin handling composes with the existing baked-dependency checks rather than replacing them
 
-  @scenario_hash:e28886c34b0d4c65 @bc:shopsystem-bc-launcher
+  @scenario_hash:e28886c34b0d4c65
   Scenario: when the bc-launcher self-pin already equals bc-launcher's latest release the poll makes no change for it
     Given the bc-base Dockerfile in shopsystem-bc-launcher pins shopsystem-bc-launcher itself at "@v0.4.0" in a "git+https://github.com/dstengle/shopsystem-bc-launcher" VCS pin
     And the centralized scheduled workflow resolves shopsystem-bc-launcher's own latest release tag against "dstengle/shopsystem-bc-launcher" as "@v0.4.0"

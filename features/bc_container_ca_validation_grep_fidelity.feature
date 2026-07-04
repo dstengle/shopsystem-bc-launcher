@@ -1,3 +1,4 @@
+@bc:shopsystem-bc-launcher @origin:lead-eqao @service:agent-vault-broker
 Feature: bc-container CA-validation grep fidelity (lead-eqao, 3rd F3 cycle)
 
   Additive companion pin to the CA end-state scenario (@scenario_hash:09f871cf8b99a34b):
@@ -5,7 +6,7 @@ Feature: bc-container CA-validation grep fidelity (lead-eqao, 3rd F3 cycle)
   the launch invokes it, so a validation-internal grep-option defect that misjudges a
   VALID cert RED-tests instead of shipping silently.
 
-  @scenario_hash:3222fe1396f1ff53 @bc:shopsystem-bc-launcher
+  @scenario_hash:3222fe1396f1ff53
   Scenario Outline: on a real no-flag bc-container launch, the committed agent-vault-ca.sh validation step exercised exactly as the launch invokes it classifies the materialized CA by the real BEGIN-CERTIFICATE marker, so a valid cert is accepted and the clone proceeds while a genuinely marker-less cert is rejected, and no validation-internal error misjudges a valid cert
     Given the shopsystem-bc-launcher BC is installed
     And the launched BC routes outbound HTTPS through the agent-vault MITM proxy via "HTTPS_PROXY", so the clone requires the broker root CA to verify TLS

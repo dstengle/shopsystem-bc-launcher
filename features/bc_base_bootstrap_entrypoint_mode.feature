@@ -1,3 +1,4 @@
+@bc:shopsystem-bc-launcher @origin:lead-f6xs
 Feature: bc-base interactive bootstrap entrypoint mode (lead-f6xs)
 
   The bc-base image carries an INTERACTIVE BOOTSTRAP entrypoint MODE — a mode of
@@ -13,7 +14,7 @@ Feature: bc-base interactive bootstrap entrypoint mode (lead-f6xs)
   content (docker build is NOT run — docker is unavailable in this environment),
   the same structural-inspection idiom as the bc-base CA-trust / CLI-pin tests.
 
-  @scenario_hash:20b7a66364a26404 @bc:shopsystem-bc-launcher
+  @scenario_hash:20b7a66364a26404
   Scenario: bootstrap entrypoint mode runs an interactive claude and gh auth beat with a TTY instead of the brokered placeholder wrap
     Given the published bc-base image is run with the interactive bootstrap entrypoint mode selected
     And the agent-vault broker holds no Claude or GitHub credential for this product yet
@@ -22,7 +23,7 @@ Feature: bc-base interactive bootstrap entrypoint mode (lead-f6xs)
     And the entrypoint invokes "gh auth login" interactively attached to the host TTY for the human to authenticate
     And the entrypoint does not place a "__PLACEHOLDER__" credential as the Claude or GitHub credential for this beat
 
-  @scenario_hash:938342272de4e38a @bc:shopsystem-bc-launcher
+  @scenario_hash:938342272de4e38a
   Scenario: the bootstrap mode is a mode of the existing bc-base image and resolves to the same baked framework CLIs as a brokered run
     Given the published bc-base image is run with the interactive bootstrap entrypoint mode selected
     When the bootstrap entrypoint starts

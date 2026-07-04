@@ -1,6 +1,7 @@
+@bc:shopsystem-bc-launcher @origin:lead-fwrx
 Feature: bc-base and bc-lead default to the vscode user so baked ~/.claude resolves
 
-@scenario_hash:a4caf0477a74e4bc @bc:shopsystem-bc-launcher
+@scenario_hash:a4caf0477a74e4bc
 Scenario: the published bc-base and bc-lead images default to the vscode user so the baked ~/.claude state resolves for the running user
   Given the published image "ghcr.io/dstengle/shopsystem-bc-base:latest"
   And the published image "ghcr.io/dstengle/shopsystem-bc-lead:latest"

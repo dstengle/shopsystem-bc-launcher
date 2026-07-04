@@ -1,6 +1,7 @@
+@bc:shopsystem-bc-launcher @origin:lead-gw9v
 Feature: readiness wait treats a self-advanced agent as up, skips the trust-accept Enter, and still aborts when neither marker is reached (lead-gw9v)
 
-  @scenario_hash:e30b15363815abed @bc:shopsystem-bc-launcher
+  @scenario_hash:e30b15363815abed
   Scenario: claude self-advances past workspace-trust to input-ready, so the launcher detects input-ready, skips the trust-accept Enter, does not abort waiting for the transient trust banner, and injects the startup prompt unattended
     Given the shopsystem-bc-launcher BC is installed
     And no Docker container named "bc-shopsystem-messaging" is running
@@ -13,7 +14,7 @@ Feature: readiness wait treats a self-advanced agent as up, skips the trust-acce
     And the launcher submits the startup prompt "bd prime" to the tmux session named "agent" in container "bc-shopsystem-messaging" with no host-side follow-up "bc-container inject" invocation required
     And the launch command exits zero with the BC online unattended
 
-  @scenario_hash:f3784811e04a224d @bc:shopsystem-bc-launcher
+  @scenario_hash:f3784811e04a224d
   Scenario: the pre-trust path still works, so when the transient trust banner is observed first the launcher accepts trust with Enter, waits for input-ready, then injects the startup prompt
     Given the shopsystem-bc-launcher BC is installed
     And no Docker container named "bc-shopsystem-messaging" is running
@@ -24,7 +25,7 @@ Feature: readiness wait treats a self-advanced agent as up, skips the trust-acce
     And the launcher submits the startup prompt "bd prime" to the tmux session named "agent" in container "bc-shopsystem-messaging" with no host-side follow-up "bc-container inject" invocation required
     And the launch command exits zero with the BC online unattended
 
-  @scenario_hash:9fa36102d756a8fb @bc:shopsystem-bc-launcher
+  @scenario_hash:9fa36102d756a8fb
   Scenario: neither readiness marker is reached within the timeout, so the launcher warns and aborts without injecting the startup prompt
     Given the shopsystem-bc-launcher BC is installed
     And no Docker container named "bc-shopsystem-messaging" is running

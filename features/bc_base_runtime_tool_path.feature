@@ -1,3 +1,4 @@
+@bc:shopsystem-bc-launcher @origin:lead-h755
 Feature: a launched bc-base BC has gh and agent-vault resolvable on PATH at runtime (lead-h755)
 
   Regression guard pinning a present-but-unpinned runtime invariant: a launched
@@ -17,7 +18,7 @@ Feature: a launched bc-base BC has gh and agent-vault resolvable on PATH at runt
   (the same way other launched-container runtime scenarios are tested); the real
   runtime observable is the lead's pull verification for the published image.
 
-  @scenario_hash:04f2c7501273705c @bc:shopsystem-bc-launcher
+  @scenario_hash:04f2c7501273705c
   Scenario: a launched bc-base BC has gh and agent-vault resolvable on PATH
     Given the shopsystem-bc-launcher BC is installed
     And bc-container launch is run with BC name "shopsystem-messaging"

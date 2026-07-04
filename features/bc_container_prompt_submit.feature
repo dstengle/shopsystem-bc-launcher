@@ -1,3 +1,4 @@
+@bc:shopsystem-bc-launcher @origin:lead-lez1
 Feature: bc-container --startup-prompt and inject commit prompts to the agent (lead-xsmn / lead-hyee)
 
   # Scenarios 27 (0e733774844ed9f3) and 28 (17518db1dc1c9001) were RETIRED
@@ -8,7 +9,7 @@ Feature: bc-container --startup-prompt and inject commit prompts to the agent (l
   # features/bc_container_prompt_submit_two_call.feature, which pin the
   # two-discrete-invocation shape that actually commits.
 
-  @scenario_hash:5ef728039884a9a2 @bc:shopsystem-bc-launcher
+  @scenario_hash:861efc9ea1fe981d
   Scenario: bc-container monitor surfaces an agent-working state-marker within a bounded interval of bc-container launch --startup-prompt exiting, with no human or host-side follow-up keystroke
     Given the shopsystem-bc-launcher BC is installed
     And no Docker container named "bc-shopsystem-messaging" is running
@@ -25,7 +26,7 @@ Feature: bc-container --startup-prompt and inject commit prompts to the agent (l
   # rather than a fixed deadline that fires before a slow brokered boot
   # completes.  The markers and the inject-after-ready ordering
   # (5ef728039884a9a2) are UNCHANGED.
-  @scenario_hash:d227ccbcc9bdfa87 @bc:shopsystem-bc-launcher
+  @scenario_hash:d227ccbcc9bdfa87
   Scenario: a brokered boot that becomes ready after the legacy 60s deadline still has its startup prompt injected
     Given the shopsystem-bc-launcher BC is installed
     And a brokered BC container whose Claude agent reaches its input-ready marker only after more than 60 seconds
