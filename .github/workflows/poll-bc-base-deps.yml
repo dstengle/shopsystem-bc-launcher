@@ -96,11 +96,25 @@ jobs:
             dep="${entry%%|*}"
             repo="${entry##*|}"
 
-            # Resolve the latest release tag for this dependency using the
+            # Resolve this dependency's latest published release as the
+            # SEMVER-MAXIMUM release tag (lead-bss3, 9620473690f7ecb5) using the
             # workflow's OWN GITHUB_TOKEN against the canonical repo's public
-            # releases (0f386f31857fbeb1). No BC_LAUNCHER_DISPATCH_TOKEN.
-            latest="$(GH_TOKEN="${GITHUB_TOKEN}" gh release view \
-              --repo "${repo}" --json tagName --jq '.tagName')"
+            # releases (0f386f31857fbeb1, no BC_LAUNCHER_DISPATCH_TOKEN). We
+            # LIST every published release, keep only well-formed semver tags,
+            # version-sort them (sort -V) and take the MAX -- NOT an arbitrary
+            # or first release-list entry. The lookup is GUARDED (2>/dev/null,
+            # || true): a missing/malformed result for ONE dependency is skipped
+            # with a ::warning:: and the remaining baked deps are still checked,
+            # rather than a hard exit that aborts the whole poll under
+            # `set -euo pipefail`.
+            latest="$(GH_TOKEN="${GITHUB_TOKEN}" gh release list \
+              --repo "${repo}" --json tagName --jq '.[].tagName' 2>/dev/null \
+              | grep -E '^v?[0-9]+\.[0-9]+\.[0-9]+$' \
+              | sort -V | tail -n1 || true)"
+            if [ -z "${latest}" ]; then
+              echo "::warning::could not resolve a latest published release for ${dep} (${repo}); skipping this dependency and continuing the poll"
+              continue
+            fi
             echo "resolved latest for ${dep} (${repo}): ${latest}"
 
             # The CURRENT pin in docker/bc-base/Dockerfile for this dependency.
@@ -133,18 +147,32 @@ jobs:
             esac
             echo "current pin for ${dep}: ${current}"
 
-            # Compare the RESOLVED latest tag against the current Dockerfile pin
-            # (0f386f31857fbeb1). beads pins a bare version; normalize the
-            # leading "v" for comparison only.
+            # Compare the RESOLVED latest against the current Dockerfile pin
+            # under SEMVER (0f386f31857fbeb1). beads pins a bare version;
+            # normalize the leading "v" for comparison only.
             latest_norm="${latest#v}"
             current_norm="${current#v}"
-            if [ "${latest_norm}" = "${current_norm}" ]; then
+            if [ -z "${current_norm}" ]; then
+              echo "::warning::could not read the current ${dep} pin from ${DOCKERFILE}; skipping this dependency and continuing the poll"
               continue
             fi
 
-            # latest != pin -> the dep is newer. FIRST mutate the Dockerfile so
-            # the pin reads the new tag (5b6a931a493971a6). The bump happens
-            # BEFORE any build below.
+            # Only a STRICTLY-FORWARD latest bumps (9620473690f7ecb5): take the
+            # semver-MAX of {current pin, resolved latest} via sort -V. If latest
+            # equals the pin, OR latest is BEHIND the pin (the max resolves back
+            # to the current pin), this is a NO-OP -- the pin is NOT rewritten
+            # DOWN to the lower version and the job does NOT exit non-zero. A
+            # behind resolution (e.g. resolved v0.45.0 vs pin v0.48.0) is a
+            # no-bump result, never a "release not found" hard error.
+            max="$(printf '%s\n%s\n' "${current_norm}" "${latest_norm}" | sort -V | tail -n1)"
+            if [ "${latest_norm}" = "${current_norm}" ] || [ "${max}" = "${current_norm}" ]; then
+              echo "no bump for ${dep}: resolved latest ${latest} is not strictly greater than current pin ${current}"
+              continue
+            fi
+
+            # latest is STRICTLY GREATER than the current pin -> FIRST mutate the
+            # Dockerfile so the pin reads the new tag (5b6a931a493971a6). The
+            # bump happens BEFORE any build below.
             echo "bumping ${dep}: ${current} -> ${latest}"
             case "${dep}" in
               shop-templates)
