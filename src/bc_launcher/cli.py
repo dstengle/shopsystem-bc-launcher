@@ -164,9 +164,10 @@ def build_parser() -> argparse.ArgumentParser:
             "effective settings ([llm.providers.anthropic] "
             "base_url=http://127.0.0.1:8788/v1, adapter=anthropic), then starts "
             "an ephemeral in-container fabro server "
-            "(fabro server start --foreground --no-web) and runs the ADR-051 "
-            "loop def against it (fabro run workflow.fabro -I BC_NAME=<bc> -I "
-            "WORK_ID=<work_id>) as the engage — starting NO tmux 'agent' "
+            "(fabro server start --foreground --no-web) and runs the "
+            "PERSISTENT reactive dispatcher def against it (fabro run "
+            "dispatcher.fabro -I BC_NAME=<bc>, requiring NO --work-id; ADR-058) "
+            "as the engage — starting NO tmux 'agent' "
             "send-keys session and NO 'claude' on that path. The native fabro "
             "vault stays __PLACEHOLDER__-only and no real credential is written "
             "(ADR-049); the credential rides agent-vault on the wire. Container "
@@ -187,9 +188,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--work-id",
         default=None,
         help=(
-            "WORK_ID carried into the fabro run's -I input on the "
-            "--orchestrator fabro engage path (fabro run workflow.fabro "
-            "-I BC_NAME=<bc> -I WORK_ID=<work_id>). Unused on the tmux path."
+            "IGNORED no-op (ADR-058 D6). The fabro engage is now ONE persistent "
+            "reactive dispatcher (fabro run dispatcher.fabro -I BC_NAME=<bc>, "
+            "NO -I WORK_ID) that discovers work_ids at RUNTIME, so no launch-"
+            "time work id is required on either the fabro or the tmux path. Any "
+            "--work-id passed is accepted but ignored."
         ),
     )
     p_launch.add_argument("--shopmsg-dsn", help="SHOPMSG_DSN value for the container")

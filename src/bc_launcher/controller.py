@@ -588,7 +588,17 @@ FABRO_ANTHROPIC_ADAPTER = "anthropic"
 # launch parity) — only the engage tier differs.
 FABRO_BIN = "fabro"
 # The placed def's workflow file (relative to the def dir the engage runs in).
+# This is the UNCHANGED ADR-051 CHILD def: it is no longer the launcher's
+# engage target (ADR-058 corrected that to dispatcher.fabro). The dispatcher's
+# Haiku launch node spawns one detached `fabro run workflow.fabro` child per
+# pending work item at RUNTIME.
 FABRO_WORKFLOW_FILE = "workflow.fabro"
+# lead-odd9 / ADR-058 D1: the launcher's PERSISTENT REACTIVE engage target. The
+# one-shot `fabro run workflow.fabro -I BC_NAME -I WORK_ID` engage is REPLACED
+# by ONE persistent `fabro run dispatcher.fabro -I BC_NAME=<bc>` (no WORK_ID):
+# the reactive-cyclic dispatcher owns the container lifecycle and discovers
+# work_ids at RUNTIME rather than running one-shot on a launch-time work id.
+FABRO_DISPATCHER_FILE = "dispatcher.fabro"
 
 
 # lead-ze4w BUG#4: `fabro server start` reads a SERVER-level config at
@@ -676,30 +686,42 @@ def _fabro_server_install_argv() -> list[str]:
     return list(FABRO_SERVER_INSTALL_ARGV)
 
 
-def _fabro_run_argv(bc_name: str, work_id: str) -> list[str]:
-    """The argv the launcher uses to RUN the placed loop def against the
-    ephemeral fabro server as the ENGAGE step (lead-cadr).
+def _fabro_run_argv(bc_name: str) -> list[str]:
+    """The argv the launcher uses to RUN the PERSISTENT REACTIVE DISPATCHER def
+    against the ephemeral fabro server as the ENGAGE step (lead-odd9 / ADR-058
+    D1, correcting lead-cadr's one-shot).
 
-    `fabro run workflow.fabro -I BC_NAME=<bc_name> -I WORK_ID=<work_id>` — the
-    ADR-051 Implementer->Reviewer loop def (scenario 75) is the agent loop that
-    engages; BC_NAME + WORK_ID ride into the run via the def's
-    [run.environment.env].  Returned as a list so the test can assert the
-    launcher issues exactly this argv with the scenario's BC_NAME / WORK_ID.
+    `fabro run dispatcher.fabro -I BC_NAME=<bc_name>` — ONE persistent run that
+    OWNS the container's lifecycle and discovers work_ids at RUNTIME.  It
+    carries ONLY the constant BC_NAME into the run via the def's
+    [run.environment.env]; it supplies NO `-I WORK_ID` and requires NO launch-
+    time work id (ADR-058 D1/D6).  The prior one-shot `fabro run workflow.fabro
+    -I BC_NAME -I WORK_ID` engage (retired) ran the child def directly on a
+    launch-time work id; under ADR-058 the dispatcher's Haiku launch node spawns
+    one detached `fabro run workflow.fabro` child per pending work item at
+    runtime instead.  Returned as a list so the test can assert the launcher
+    issues exactly this argv with the scenario's BC_NAME.
     """
     return [
         FABRO_BIN,
         "run",
-        FABRO_WORKFLOW_FILE,
+        FABRO_DISPATCHER_FILE,
         "-I",
         f"BC_NAME={bc_name}",
-        "-I",
-        f"WORK_ID={work_id}",
     ]
 
 
-def _fabro_engage_script(bc_name: str, work_id: str) -> str:
+def _fabro_engage_script(bc_name: str) -> str:
     """Build the ``/bin/sh -c`` script that drives the fabro ENGAGE step in the
-    placed def dir (lead-cadr + lead-ze4w BUG#4).
+    placed def dir (lead-cadr + lead-ze4w BUG#4 + lead-odd9 / ADR-058).
+
+    lead-odd9 / ADR-058 D1: the ENGAGE run is now the PERSISTENT REACTIVE
+    ``fabro run dispatcher.fabro -I BC_NAME=<bc>`` (no WORK_ID), not the retired
+    one-shot ``fabro run workflow.fabro -I BC_NAME -I WORK_ID``.  Everything else
+    on this path — the ~/.fabro server-config bootstrap (BUG#4), the
+    env-before-install ordering (esy4 Defect D), the cwd=/workspace/.fabro run
+    (Defect B) — is UNCHANGED and is exactly the ADR-058 bundled clone-path fix
+    (@scenario_hash:cacccc52ba0b0766).
 
     lead-ze4w BUG#4: BEFORE `fabro server start`, bootstrap the SERVER-level
     fabro config so the server does not abort
@@ -757,7 +779,7 @@ def _fabro_engage_script(bc_name: str, work_id: str) -> str:
         shlex.quote(tok) for tok in _fabro_server_start_argv()
     )
     run_argv = " ".join(
-        shlex.quote(tok) for tok in _fabro_run_argv(bc_name, work_id)
+        shlex.quote(tok) for tok in _fabro_run_argv(bc_name)
     )
     def_dir = shlex.quote(FABRO_DEF_CONTAINER_DIR)
     server_log = shlex.quote(f"{FABRO_DEF_CONTAINER_DIR}/fabro-server.log")
@@ -2922,7 +2944,8 @@ class BcContainerController:
         out_lines: list[str],
         err_lines: list[str],
     ) -> CommandResult:
-        """Drive the FABRO orchestrator ENGAGE step (lead-cadr — S4).
+        """Drive the FABRO orchestrator ENGAGE step (lead-cadr — S4, corrected
+        by lead-odd9 / ADR-058).
 
         REPLACES the tmux/claude engage tier on the fabro launch path (ADR-050
         D3): AFTER the SAME readiness barriers the tmux path gates on
@@ -2933,13 +2956,19 @@ class BcContainerController:
              FOREGROUND with no web UI, bound to a local 127.0.0.1 socket
              (``fabro server start --foreground --no-web``), so the loop runs
              headless inside the one bc-base container; and
-          2. running the placed ADR-051 Implementer->Reviewer loop def against
-             that server (``fabro run workflow.fabro -I BC_NAME=<bc> -I
-             WORK_ID=<work_id>``) as the engage.
+          2. running the placed REACTIVE-PERSISTENT DISPATCHER def against that
+             server (``fabro run dispatcher.fabro -I BC_NAME=<bc>``) as the ONE
+             persistent engage (ADR-058 D1).  It carries ONLY the constant
+             BC_NAME and supplies NO ``-I WORK_ID``: the dispatcher OWNS the
+             container's lifecycle and discovers work_ids at RUNTIME, fanning
+             out one detached ``fabro run workflow.fabro`` child per pending
+             work item.
 
-        It starts NO tmux ``agent`` send-keys session and NO ``claude`` engage
-        — the engage tier is REPLACED by the fabro run-graph entry, not added
-        alongside it (reproduces fabro-orchestration/01
+        ``work_id`` is an IGNORED no-op on this path (ADR-058 D6): the fabro
+        launch interface requires no launch-time work id, exactly like the tmux
+        path.  It starts NO tmux ``agent`` send-keys session and NO ``claude``
+        engage — the engage tier is REPLACED by the fabro run-graph entry, not
+        added alongside it (reproduces fabro-orchestration/01
         @scenario_hash:1aeace4c593ab14f via the real bc-container launch path).
         """
         # Readiness barrier — messaging database reachability (IDENTICAL to the
@@ -3000,7 +3029,7 @@ class BcContainerController:
         # + run keep running headless in the container after this returns.
         engage_result = self._driver.exec_run(
             container,
-            ["/bin/sh", "-c", _fabro_engage_script(bc_name, work_id or "")],
+            ["/bin/sh", "-c", _fabro_engage_script(bc_name)],
             user=AGENT_CONTAINER_USER,
             env=_fabro_exec_env(),
             detach=True,
@@ -3008,7 +3037,7 @@ class BcContainerController:
         if engage_result.returncode != 0:
             reason = (
                 f"fabro engage failure: `fabro server start` / `fabro run "
-                f"{FABRO_WORKFLOW_FILE}` exited {engage_result.returncode}: "
+                f"{FABRO_DISPATCHER_FILE}` exited {engage_result.returncode}: "
                 f"{(engage_result.stderr or engage_result.stdout).strip()}"
             )
             err_lines.append("warning: " + reason + "\n")
@@ -3018,13 +3047,13 @@ class BcContainerController:
                 stderr="".join(err_lines),
             )
         out_lines.append(
-            "Fabro orchestrator engage (lead-cadr): started the ephemeral "
-            f"in-container fabro server ({' '.join(_fabro_server_start_argv())}"
-            ") and ran the ADR-051 loop def as the engage ("
-            f"{' '.join(_fabro_run_argv(bc_name, work_id or ''))}); no tmux "
-            "'agent' send-keys session and no 'claude' engage started on this "
-            "path — the engage tier is REPLACED by the fabro run-graph entry "
-            "(ADR-050 D3)\n"
+            "Fabro orchestrator engage (lead-cadr / ADR-058): started the "
+            "ephemeral in-container fabro server "
+            f"({' '.join(_fabro_server_start_argv())}) and ran the PERSISTENT "
+            "reactive dispatcher def as the engage ("
+            f"{' '.join(_fabro_run_argv(bc_name))}); no tmux 'agent' send-keys "
+            "session and no 'claude' engage started on this path — the engage "
+            "tier is REPLACED by the fabro run-graph entry (ADR-050 D3)\n"
         )
         return CommandResult(
             exit_code=0, stdout="".join(out_lines), stderr="".join(err_lines)

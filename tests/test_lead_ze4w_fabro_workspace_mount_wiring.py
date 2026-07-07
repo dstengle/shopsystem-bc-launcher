@@ -617,17 +617,22 @@ def test_8q2x_defect_b_run_resolves_def_dir_workflow_not_workspace_root(
         f"parent cwd at the image WORKDIR); script:\n{script}"
     )
 
-    # (3) `fabro run workflow.fabro` runs AFTER the backgrounded server group,
-    # in the SAME (cwd=/workspace/.fabro) shell -> resolves
-    # /workspace/.fabro/workflow.fabro, NOT /workspace/workflow.fabro.
-    run_pos = script.find("fabro run workflow.fabro")
+    # (3) `fabro run dispatcher.fabro` (lead-odd9 / ADR-058 replaced the
+    # one-shot `fabro run workflow.fabro`) runs AFTER the backgrounded server
+    # group, in the SAME (cwd=/workspace/.fabro) shell -> resolves
+    # /workspace/.fabro/dispatcher.fabro, NOT /workspace/dispatcher.fabro.
+    run_pos = script.find("fabro run dispatcher.fabro")
     assert run_pos != -1, (
-        f"Defect B: engage must issue `fabro run workflow.fabro`; "
+        f"Defect B: engage must issue `fabro run dispatcher.fabro`; "
         f"script:\n{script}"
     )
     assert run_pos > m.start(), (
         "Defect B: `fabro run` must run AFTER the backgrounded server group, "
         f"in the foreground shell; script:\n{script}"
+    )
+    assert "/workspace/dispatcher.fabro" not in script, (
+        "Defect B: the engage must NOT resolve /workspace/dispatcher.fabro "
+        f"(the WORKDIR-root path the bug produced); script:\n{script}"
     )
     assert "/workspace/workflow.fabro" not in script, (
         "Defect B: the engage must NOT resolve /workspace/workflow.fabro "

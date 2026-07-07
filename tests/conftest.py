@@ -13504,7 +13504,6 @@ from bc_launcher.controller import (
     AGENT_TMUX_SESSION as _CADR_AGENT_SESSION,
     LAUNCH_PATH_FABRO as _CADR_LAUNCH_PATH_FABRO,
     LAUNCH_PATH_TMUX as _CADR_LAUNCH_PATH_TMUX,
-    _fabro_run_argv as _cadr_run_argv,
     _fabro_server_start_argv as _cadr_server_start_argv,
 )
 
@@ -13697,27 +13696,12 @@ def cadr_fabro_server_started(provider, server_argv, ctx):
     assert provider == "provider=local"
 
 
-@then(parsers.parse(
-    'the launcher invokes "{run_argv}" against that server as the engage '
-    'step, carrying BC_NAME and WORK_ID into the run via the def\'s '
-    '"{env_table}", so the ADR-051 Implementer->Reviewer loop def (scenario '
-    "75) is the agent loop that engages"))
-def cadr_fabro_run_invoked(run_argv, env_table, ctx):
-    bc_name = ctx["cadr_bc_name"]
-    work_id = ctx["cadr_work_id"]
-    argv = _cadr_run_argv(bc_name, work_id)
-    assert " ".join(argv) == run_argv, (
-        f"launcher fabro-run argv must be {run_argv!r}; got {argv!r}"
-    )
-    assert argv[:3] == ["fabro", "run", "workflow.fabro"]
-    assert f"BC_NAME={bc_name}" in argv, "run must carry -I BC_NAME (teeth)"
-    assert f"WORK_ID={work_id}" in argv, "run must carry -I WORK_ID (teeth)"
-    call = _cadr_fabro_engage_call(ctx)
-    assert call is not None
-    assert run_argv in call.command[2], (
-        f"launcher engage script must issue {run_argv!r}; got "
-        f"{call.command[2]!r}"
-    )
+# NOTE (lead-odd9): the prior one-shot run-argv then-step
+# (`the launcher invokes "..." ... carrying BC_NAME and WORK_ID`) pinned the
+# RETIRED @scenario_hash:68e14cdcd8b7c145 engage (`fabro run workflow.fabro -I
+# BC_NAME -I WORK_ID`). ADR-058 replaces it with the persistent dispatcher
+# engage, pinned by @scenario_hash:30fd5f2079f1c433 via `odd9_run_dispatcher`.
+# The obsolete step def is removed with its scenario.
 
 
 @then(parsers.parse(
