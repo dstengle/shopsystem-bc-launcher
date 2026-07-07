@@ -52,13 +52,13 @@ Feature: bc-container launch bd-bootstrap is bootstrap-resilient and never fatal
     Then the launch warns about the bd bootstrap failure and still starts the agent
     And the launch result is success
 
-  @scenario_hash:04a510e2b6e9e9c1 @bc:shopsystem-bc-launcher
-  Scenario: standing up a new BC creates its absent lead-beads tracker repo and seeds the dolt remote so bd bootstrap succeeds
+  @scenario_hash:90caf5523e7d5ce0 @bc:shopsystem-bc-launcher
+  Scenario: standing up a new BC creates its absent beads tracker repo and seeds the dolt remote so bd bootstrap succeeds
     Given a new BC whose shop-name slug is "<bc>" is being stood up under GitHub owner "<owner>"
-    And its scaffolded ".beads/config.yaml" "sync.remote" points at "<owner>/<bc>-lead-beads", distinct from the lead's own "<product>-lead-beads"
-    And the "<owner>/<bc>-lead-beads" tracker repository does not yet exist
+    And its scaffolded ".beads/config.yaml" "sync.remote" points at "<owner>/<bc>-beads", distinct from the lead's own "<product>-lead-beads"
+    And the "<owner>/<bc>-beads" tracker repository does not yet exist
     When the BC-standup flow provisions the new BC's beads tracker and runs "bd bootstrap"
-    Then the standup flow creates the absent "<owner>/<bc>-lead-beads" tracker repository with an initial branch and commit
-    And the standup flow adds the "<owner>/<bc>-lead-beads" bd dolt remote and seeds it with an initial push so it is not an empty repository with no branches
+    Then the standup flow creates the absent "<owner>/<bc>-beads" tracker repository with an initial branch and commit
+    And the standup flow adds the "<owner>/<bc>-beads" bd dolt remote and seeds it with an initial push so it is not an empty repository with no branches
     And the subsequent "bd bootstrap" for the new BC exits zero instead of failing with "Repository not found" or "git remote has no branches"
     And "bd create" run in the stood-up BC's workspace exits zero and yields a new issue id so its beads tracker is usable for bd-backed gated work
