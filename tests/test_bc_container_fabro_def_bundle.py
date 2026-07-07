@@ -57,10 +57,14 @@ from tests.fake_driver import FakeDockerDriver
 
 BC_NAME = "shopsystem-messaging"
 
-# The 15 def-root-relative paths the bundle MUST ship (acceptance criterion
+# The 17 def-root-relative paths the bundle MUST ship (acceptance criterion
 # 0).  Enumerated independently of the source constant so a change to
 # FABRO_DEF_FILES that drops or renames a file fails this test loudly.
+# lead-odd9 / ADR-058 D2 added the reactive dispatcher def (dispatcher.fabro +
+# dispatcher.toml) alongside the UNCHANGED ADR-051 workflow.fabro child def.
 EXPECTED_DEF_FILES = (
+    "dispatcher.fabro",
+    "dispatcher.toml",
     "workflow.fabro",
     "workflow.toml",
     "project.toml",
@@ -90,14 +94,14 @@ def test_all_fifteen_def_files_present_as_launcher_assets():
         path = root / rel
         assert path.is_file(), f"missing def-bundle asset: {rel} (expected {path})"
 
-    # Exactly 15 files under the asset root — no thinner and no extra bundle.
+    # Exactly the enumerated files under the asset root — no thinner, no extra.
     present = {
         str(p.relative_to(root)).replace("\\", "/")
         for p in root.rglob("*")
         if p.is_file()
     }
     assert present == set(EXPECTED_DEF_FILES), (
-        "def-bundle asset set does not match the expected 15 files.\n"
+        "def-bundle asset set does not match the expected files.\n"
         f"unexpected extras: {present - set(EXPECTED_DEF_FILES)}\n"
         f"missing: {set(EXPECTED_DEF_FILES) - present}"
     )

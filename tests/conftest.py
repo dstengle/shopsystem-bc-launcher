@@ -14400,9 +14400,14 @@ def odd9_bf9f_cyclic_graph(start_shape, end_shape, cond, ctx):
     assert watch_launch and "outcome=failed" not in watch_launch[0], (
         "watch -> launch must be UNCONDITIONAL (the success WAKE edge)"
     )
+    # The DOT attribute quotes the value (condition="outcome=failed"); the
+    # meaningful, quote-independent token is outcome=failed (cond is the
+    # gherkin's unquoted condition=outcome=failed).
+    assert "outcome=failed" in cond
     watch_end = [a for s, d, a in edges if (s, d) == ("watch", "end")]
-    assert watch_end and cond in watch_end[0], (
-        f"watch -> end must carry {cond!r} (the shutdown edge); got {watch_end!r}"
+    assert watch_end and "outcome=failed" in watch_end[0], (
+        "watch -> end must be the conditional shutdown edge (outcome=failed); "
+        f"got {watch_end!r}"
     )
     # The cycle: launch -> watch is unconditional (always loops back).
     launch_watch = [a for s, d, a in edges if (s, d) == ("launch", "watch")]
@@ -14433,11 +14438,21 @@ def odd9_bf9f_watch_native(drain_cmd, watch_cmd, sentinel, ctx):
     assert "prompt=" not in body and "class=" not in body, (
         "the watch node must have NO LLM (no prompt=/class=)"
     )
+    # The poured def is BC-GENERIC: BC_NAME arrives via the [run.environment.env]
+    # overlay, so the node body carries the base command parameterized by
+    # $BC_NAME, not the concrete BC name in the gherkin illustration.  Bind to
+    # the base command (drain_cmd / watch_cmd with the concrete BC name stripped)
+    # and require the $BC_NAME parameterization.
+    drain_base = drain_cmd.replace(" shopsystem-messaging", "")
+    watch_base = watch_cmd.replace(" shopsystem-messaging", "")
+    assert "$BC_NAME" in body, (
+        f"the watch node must be parameterized by $BC_NAME (env overlay); body:\n{body}"
+    )
     # FIRST the non-blocking catch-up drain, THEN the blocking watch.
-    drain_pos = body.find(drain_cmd)
-    watch_pos = body.find(watch_cmd)
-    assert drain_pos != -1, f"watch node must drain {drain_cmd!r}; body:\n{body}"
-    assert watch_pos != -1, f"watch node must block on {watch_cmd!r}; body:\n{body}"
+    drain_pos = body.find(drain_base)
+    watch_pos = body.find(watch_base)
+    assert drain_pos != -1, f"watch node must drain {drain_base!r}; body:\n{body}"
+    assert watch_pos != -1, f"watch node must block on {watch_base!r}; body:\n{body}"
     assert drain_pos < watch_pos, (
         "watch must FIRST drain pending inbox non-blockingly, THEN block on "
         f"shop-msg watch; body:\n{body}"
@@ -14467,9 +14482,18 @@ def odd9_bf9f_launch_agent(model, pending_cmd, spawn, ctx):
     graph = _odd9_graph(ctx)
     nodes = _ky63_parse_nodes(graph)
     body = nodes["launch"]
-    # AGENT (not native): has a prompt / class, NOT a script= native node.
+    # AGENT (not native): carries a prompt= and an agent class=, and is NOT a
+    # native parallelogram script= node.  (The prompt PROSE may mention the
+    # child's native "script=" env, so bind to the structural native marker
+    # shape=parallelogram, not to the substring "script=".)
     assert "prompt=" in body, "the launch node must be an AGENT (prompt=)"
-    assert "script=" not in body, "the launch node must NOT be a native script= node"
+    assert 'class="' in body, "the launch node must carry an agent class="
+    assert "shape=parallelogram" not in body, (
+        "the launch node must be an AGENT, not a native parallelogram script= node"
+    )
+    assert not re.search(r'(^|[,\s])script\s*=\s*"', body), (
+        "the launch node must NOT declare a native script= attribute"
+    )
     # Pinned to claude-haiku-4-5 via the graph model_stylesheet.
     m = re.search(r'model_stylesheet\s*=\s*"([^"]*)"', graph)
     assert m is not None, "dispatcher.fabro must declare a model_stylesheet"
@@ -14477,10 +14501,13 @@ def odd9_bf9f_launch_agent(model, pending_cmd, spawn, ctx):
         f"the launch node must be pinned to {model!r} via model_stylesheet; got "
         f"{m.group(1)!r}"
     )
-    # Reads the authoritative pending set.
-    assert pending_cmd in body, (
+    # Reads the authoritative pending set.  The poured def is BC-GENERIC, so
+    # the prompt names the base command parameterized by $BC_NAME rather than
+    # the concrete BC name in the gherkin illustration.
+    pending_base = pending_cmd.replace(" shopsystem-messaging", "")
+    assert pending_base in body and "$BC_NAME" in body, (
         f"the launch node must read the authoritative pending set via "
-        f"{pending_cmd!r}; body:\n{body}"
+        f"{pending_base!r} (parameterized by $BC_NAME); body:\n{body}"
     )
     # Spawns one detached workflow.fabro child per pending work id, with -I
     # BC_NAME + -I WORK_ID + --parent + --detach.

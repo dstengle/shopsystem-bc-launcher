@@ -415,10 +415,16 @@ def _clone_ca_materialize_script(ca_path: str = AGENT_VAULT_CONTAINER_CA_PATH) -
 # so the placed def is byte-identical to the shipped asset.
 FABRO_DEF_CONTAINER_DIR = f"{CONTAINER_WORKSPACE}/.fabro"
 FABRO_DEF_ASSET_SUBDIR = "assets/fabro-def"
-# The 15 def-root-relative paths the bundle ships (acceptance criterion 0).
+# The def-root-relative paths the bundle ships (acceptance criterion 0).
 # Enumerated explicitly so a dropped/renamed asset is a loud failure, not a
-# silently-thinner bundle.
+# silently-thinner bundle.  lead-odd9 / ADR-058 D2 adds the reactive-dispatcher
+# def (dispatcher.fabro + its dispatcher.toml run config) alongside the
+# UNCHANGED ADR-051 workflow.fabro child def, so the poured /workspace/.fabro/
+# is runnable as `fabro run dispatcher.fabro` (the persistent engage) with the
+# workflow.fabro child fanned out per work item at runtime.
 FABRO_DEF_FILES: tuple[str, ...] = (
+    "dispatcher.fabro",
+    "dispatcher.toml",
     "workflow.fabro",
     "workflow.toml",
     "project.toml",
