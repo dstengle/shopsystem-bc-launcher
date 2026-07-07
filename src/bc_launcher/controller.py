@@ -187,6 +187,52 @@ def _is_empty_remote_failure(message: str) -> bool:
     )
 
 
+def _beads_dolt_repo_slug(bc_name: str) -> str:
+    """The `<owner>/<bc>-beads` GitHub slug for a BC's beads tracker repo.
+
+    lead-7jc2.  This is the repo the launcher CREATES when standing up a new
+    BC whose `<bc>-beads` tracker does not yet exist, distinct from the lead's
+    own `<product>-lead-beads`.  Mirrors the `git+https://` remote URL built by
+    `_beads_dolt_remote_url` but in the `gh repo create`/`gh repo view` slug
+    form (no scheme, no `.git` suffix).
+    """
+    return f"{BEADS_REMOTE_ORG}/{bc_name}-beads"
+
+
+def _is_repo_not_found_failure(message: str) -> bool:
+    """Whether a `bd bootstrap` failure was caused by an ABSENT tracker repo.
+
+    lead-7jc2.  When the `<bc>-beads` GitHub tracker repo does not exist at
+    all, bootstrap's clone fails "Repository not found" — a strictly earlier
+    failure than the empty-but-existing remote's "git remote has no branches".
+    That condition — and ONLY that condition — is what the absent-repo
+    create-then-seed provisioning recovers; other bootstrap failures fall
+    through to the empty-remote seed path (lead-5k8c) or the warn-and-continue
+    path.
+    """
+    return "repository not found" in message.lower()
+
+
+def _create_absent_tracker_repo_script(beads_repo_slug: str) -> str:
+    """Shell to CREATE an ABSENT `<bc>-beads` GitHub tracker repo (lead-7jc2).
+
+    The absent-repo case observed live: bd bootstrap's clone fails "Repository
+    not found" because the `<bc>-beads` GitHub repo was never created.  This
+    creates it with an INITIAL BRANCH AND COMMIT (`gh repo create ...
+    --add-readme` seeds an initial commit on the default branch) so it is not
+    an empty branchless repo, then verifies it is now viewable.  The
+    subsequent empty-remote seed step (lead-5k8c) adds the `bd dolt remote`
+    and pushes the Dolt working set.  `gh` auth flows through the agent-vault
+    proxy; a create that races an already-existing repo is tolerated (the
+    verify tail is the load-bearing check).
+    """
+    return (
+        "set -e; "
+        f"gh repo create {beads_repo_slug} --private --add-readme || true; "
+        f"gh repo view {beads_repo_slug} >/dev/null"
+    )
+
+
 def _empty_remote_seed_script(beads_remote_url: str) -> str:
     """Shell to INITIALIZE an empty `<bc>-beads` Dolt remote (lead-5k8c).
 
@@ -2435,6 +2481,59 @@ class BcContainerController:
                  f"cd {CONTAINER_WORKSPACE} && bd bootstrap"],
                 user=AGENT_CONTAINER_USER,
             )
+
+            # lead-7jc2 — ABSENT-REPO PROVISIONING.  When standing up a NEW BC
+            # whose `<bc>-beads` GitHub tracker repo does NOT EXIST at all,
+            # `bd bootstrap`'s clone fails "Repository not found" — a strictly
+            # earlier failure than the empty-but-existing remote's "git remote
+            # has no branches".  Observed live: this stranded the create-bc
+            # path even when the sync.remote owner was correct.  The fix is to
+            # CREATE the absent repo (with an initial branch/commit) BEFORE the
+            # empty-remote seed step, INSTEAD of fatal-failing the launch.
+            # After creation the repo EXISTS but its Dolt remote is still
+            # uninitialized, so a retried bootstrap then falls into the
+            # lead-5k8c empty-remote seed path below, which adds the
+            # `bd dolt remote` and pushes the working set.
+            if boot_result.returncode != 0 and _is_repo_not_found_failure(
+                boot_result.stderr or boot_result.stdout or ""
+            ):
+                beads_repo_slug = _beads_dolt_repo_slug(bc_name)
+                create_result = self._driver.exec_run(
+                    container,
+                    ["bash", "-lc",
+                     _create_absent_tracker_repo_script(beads_repo_slug)],
+                    user=AGENT_CONTAINER_USER,
+                )
+                if create_result.returncode == 0:
+                    out_lines.append(
+                        "Absent beads tracker repo detected; created "
+                        f"{beads_repo_slug} with an initial branch/commit and "
+                        "retried bd bootstrap (lead-7jc2)\n"
+                    )
+                    # Re-assert vscode ownership, then retry bootstrap; the
+                    # now-created-but-empty remote falls into the empty-remote
+                    # seed path below.
+                    self._driver.exec_run(
+                        container,
+                        ["chown", "-R",
+                         f"{AGENT_CONTAINER_USER}:{AGENT_CONTAINER_USER}",
+                         CONTAINER_WORKSPACE],
+                    )
+                    boot_result = self._driver.exec_run(
+                        container,
+                        ["bash", "-lc",
+                         f"cd {CONTAINER_WORKSPACE} && bd bootstrap"],
+                        user=AGENT_CONTAINER_USER,
+                    )
+                else:
+                    err_lines.append(
+                        "warning: beads tracker repo does not exist and could "
+                        f"not be created ({beads_repo_slug}, exit "
+                        f"{create_result.returncode}): "
+                        f"{(create_result.stderr or create_result.stdout).strip()}; "
+                        "proceeding to agent-start so the agent can self-heal "
+                        "(lead-7jc2)\n"
+                    )
 
             # lead-5k8c — EMPTY-REMOTE PROVISIONING.  A BC whose `<bc>-beads`
             # Dolt remote was never seeded (the GitHub repo exists but is

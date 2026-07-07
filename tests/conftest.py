@@ -27,6 +27,7 @@ from tests.fake_driver import (
     FakeRegistryDriver,
     is_bd_bootstrap_command,
     _is_empty_remote_seed_command,
+    _is_repo_create_command,
 )
 from tests.fake_github_driver import FakeGitHubDriver
 from tests.fake_git_driver import FakeGitDriver
@@ -7430,6 +7431,188 @@ def assert_bootstrap_failure_warns_and_starts_agent(ctx, fake_driver):
         "The 'Started tmux session' log line must still be emitted on a "
         f"failed bd bootstrap (lead-5k8c); stdout={result.stdout!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# lead-7jc2 — ABSENT-repo provisioning: standing up a new BC must CREATE its
+# absent `<bc>-beads` GitHub tracker repo (with an initial branch/commit) and
+# ADD + SEED its Dolt remote before `bd bootstrap` can succeed.  Extends the
+# lead-5k8c empty-remote seed pin (@scenario_hash:ada742d33c996d34) from the
+# empty-but-existing remote to the absent-repo case.  The abstract <bc>/<owner>
+# placeholders in the pinned scenario bind to the launcher BC itself, stood up
+# under the configured beads remote org; the create-then-seed behaviour is
+# exercised through the fake driver keyed by container name (gh/docker may be
+# unavailable in-test, so the pin binds to the recorded standup behaviour).
+# ---------------------------------------------------------------------------
+
+@given(parsers.parse(
+    'a new BC whose shop-name slug is "{bc}" is being stood up under '
+    'GitHub owner "{owner}"'
+))
+def standup_new_bc(bc, owner, ctx, fake_driver, controller, tmp_path):
+    # Concrete binding of the abstract <bc>/<owner> placeholders: stand up the
+    # launcher BC itself.  Sets up the same fixtures the "BC is installed" given
+    # provides (this scenario does not include that given).
+    bc_name = "shopsystem-bc-launcher"
+    ctx["driver"] = fake_driver
+    ctx["controller"] = controller
+    ctx["bc_name"] = bc_name
+    ctx["repo_url"] = f"https://github.com/shopsystem/{bc_name}.git"
+    ctx["container_name"] = f"bc-{bc_name}"
+    ctx["standup_owner"] = owner
+    credential_home = tmp_path / "fake_home"
+    credential_home.mkdir(parents=True, exist_ok=True)
+    (credential_home / ".claude").mkdir(parents=True, exist_ok=True)
+    (credential_home / ".config" / "gh").mkdir(parents=True, exist_ok=True)
+    gitconfig = credential_home / ".gitconfig"
+    if not gitconfig.exists():
+        gitconfig.write_text("")
+    ctx["credential_home"] = credential_home
+
+
+@given(parsers.parse(
+    'its scaffolded ".beads/config.yaml" "sync.remote" points at '
+    '"{tracker}", distinct from the lead\'s own "{lead_tracker}"'
+))
+def standup_config_sync_remote(tracker, lead_tracker, ctx):
+    # Records the pre-state contract that the BC's OWN tracker slug is DISTINCT
+    # from the lead's <product>-lead-beads.  The load-bearing provisioning
+    # behaviour is asserted through the fake driver (keyed by container name);
+    # this step pins that the two tracker slugs are not the same repository.
+    assert tracker != lead_tracker, (
+        f"the BC's own tracker {tracker!r} must be distinct from the lead's "
+        f"own tracker {lead_tracker!r}"
+    )
+    ctx["standup_tracker"] = tracker
+
+
+@given(parsers.parse('the "{tracker}" tracker repository does not yet exist'))
+def standup_tracker_repo_absent(tracker, ctx, fake_driver):
+    container_name = f"bc-{ctx['bc_name']}"
+    fake_driver.set_beads_repo_absent(container_name, True)
+    # A committed prefix so bootstrap can derive a usable issue_prefix and
+    # `bd create` yields a prefixed id once provisioning completes.
+    fake_driver.set_committed_beads_prefix(container_name, "bclaunch")
+    ctx["committed_beads_prefix"] = "bclaunch"
+    ctx["container_name"] = container_name
+
+
+@when(parsers.parse(
+    "the BC-standup flow provisions the new BC's beads tracker and runs "
+    '"bd bootstrap"'
+))
+def standup_provisions_and_bootstraps(ctx, fake_driver, controller, tmp_path):
+    import yaml as _yaml
+    bc_name = ctx["bc_name"]
+    manifest_path = tmp_path / "bc-manifest.yaml"
+    manifest_path.write_text(_yaml.dump({
+        "product": "shopsystem product",
+        "bcs": [{"name": bc_name, "remote": ctx["repo_url"], "role": "bc"}],
+    }))
+    result = controller.launch(
+        bc_name=bc_name,
+        repo_url=ctx["repo_url"],
+        manifest_path=manifest_path,
+        credential_home=ctx.get("credential_home"),
+    )
+    ctx["result"] = result
+    ctx["container_name"] = f"bc-{bc_name}"
+
+
+@then(parsers.parse(
+    'the standup flow creates the absent "{tracker}" tracker repository '
+    'with an initial branch and commit'
+))
+def assert_absent_tracker_repo_created(tracker, ctx, fake_driver):
+    container_name = ctx["container_name"]
+    create_calls = [
+        c for c in fake_driver.exec_calls
+        if c.container == container_name and _is_repo_create_command(c.command)
+    ]
+    assert create_calls, (
+        "The standup flow must CREATE the absent `<bc>-beads` tracker repo "
+        "(gh repo create with an initial branch/commit) instead of leaving "
+        "bd bootstrap failing 'Repository not found'; no repo-create step ran. "
+        f"exec calls on {container_name!r}: "
+        f"{[c.command for c in fake_driver.exec_calls if c.container == container_name]!r}"
+    )
+    assert fake_driver.beads_repo_created(container_name), (
+        "The absent `<bc>-beads` tracker repo must end up CREATED after the "
+        f"standup flow's repo-create step (lead-7jc2); container={container_name!r}"
+    )
+
+
+@then(parsers.parse(
+    'the standup flow adds the "{tracker}" bd dolt remote and seeds it with '
+    'an initial push so it is not an empty repository with no branches'
+))
+def assert_standup_seeds_dolt_remote(tracker, ctx, fake_driver):
+    container_name = ctx["container_name"]
+    calls = [c for c in fake_driver.exec_calls if c.container == container_name]
+    seed_calls = [c for c in calls if _is_empty_remote_seed_command(c.command)]
+    assert seed_calls, (
+        "The standup flow must ADD + SEED the `<bc>-beads` Dolt remote "
+        "(init-and-push an initial branch/commit) after creating the repo so "
+        f"it is not empty/branchless (lead-7jc2); calls={[c.command for c in calls]!r}"
+    )
+    assert fake_driver.beads_remote_seeded(container_name), (
+        "The `<bc>-beads` Dolt remote must end up SEEDED after the standup "
+        f"flow's init-and-push step (lead-7jc2); container={container_name!r}"
+    )
+    # The repo must be CREATED before it is seeded (a seed/push to a
+    # non-existent repo would itself fail 'Repository not found').
+    create_idx = next(
+        (i for i, c in enumerate(calls) if _is_repo_create_command(c.command)),
+        None,
+    )
+    seed_idx = next(
+        (i for i, c in enumerate(calls)
+         if _is_empty_remote_seed_command(c.command)),
+        None,
+    )
+    assert create_idx is not None and seed_idx is not None and create_idx < seed_idx, (
+        "The repo-create step must precede the dolt-remote seed step "
+        f"(lead-7jc2); create_idx={create_idx!r} seed_idx={seed_idx!r}"
+    )
+
+
+@then(parsers.parse(
+    'the subsequent "bd bootstrap" for the new BC exits zero instead of '
+    'failing with "Repository not found" or "git remote has no branches"'
+))
+def assert_standup_bootstrap_exits_zero(ctx, fake_driver):
+    container_name = ctx["container_name"]
+    result = ctx["result"]
+    combined = (result.stdout or "") + (result.stderr or "")
+    assert fake_driver.beads_working_set_provisioned(container_name), (
+        "After the standup creates and seeds the tracker repo, `bd bootstrap` "
+        "must succeed and provision the working set (not fatal on 'Repository "
+        f"not found' / 'git remote has no branches'); output={combined!r}"
+    )
+    assert "Repository not found" not in combined, (
+        "The launch must not surface an unrecovered 'Repository not found' "
+        f"bootstrap failure after creating the absent repo; output={combined!r}"
+    )
+    assert "bd bootstrap failed" not in combined, (
+        "The subsequent bd bootstrap must exit zero (no warn-and-strand) after "
+        f"the standup provisions the tracker repo (lead-7jc2); output={combined!r}"
+    )
+
+
+@then(parsers.parse(
+    '"bd create" run in the stood-up BC\'s workspace exits zero and yields a '
+    'new issue id so its beads tracker is usable for bd-backed gated work'
+))
+def assert_standup_bd_create_yields_id(ctx, fake_driver):
+    container_name = ctx["container_name"]
+    result = fake_driver.exec_run(container_name, ["bd", "create", "scratch"])
+    assert result.returncode == 0, (
+        f"Expected `bd create` to exit zero inside {container_name!r} after the "
+        f"standup provisioned the tracker, got rc={result.returncode} "
+        f"stderr={result.stderr!r}"
+    )
+    issue_id = result.stdout.strip()
+    assert issue_id, "Expected `bd create` to emit a new issue id on stdout"
 
 
 # ---------------------------------------------------------------------------

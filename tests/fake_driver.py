@@ -75,6 +75,26 @@ def _is_empty_remote_seed_command(command: list[str]) -> bool:
     return False
 
 
+def _is_repo_create_command(command: list[str]) -> bool:
+    """Return True if ``command`` is the launcher's ABSENT-repo CREATE step.
+
+    lead-7jc2.  When `bd bootstrap` fails because the `<bc>-beads` GitHub
+    tracker repo does not exist at all ("Repository not found"), the launcher
+    CREATES it (`gh repo create <owner>/<bc>-beads` with an initial branch/
+    commit) before seeding its Dolt remote.  The create step runs as a
+    login-shell script and is recognised by its `gh repo create` body,
+    distinct from the empty-remote seed step (which this matcher must NOT
+    claim — the seed has no `gh repo create`).
+    """
+    if (
+        len(command) >= 3
+        and command[0] == "bash"
+        and command[1] in ("-lc", "-c")
+    ):
+        return "gh repo create" in command[2]
+    return False
+
+
 @dataclass
 class ExecCall:
     """Records one exec_run or exec_interactive call.
@@ -656,6 +676,16 @@ class FakeDockerDriver:
         # (models a seed that cannot reach/initialize the remote), so the
         # warn-and-continue-to-agent-start path can be exercised.
         self._beads_remote_seed_fails: set[str] = set()
+        # lead-7jc2 — containers whose `<bc>-beads` GitHub tracker repo does
+        # NOT EXIST at all.  While absent (and not yet created by the launcher)
+        # a `bd bootstrap` clone fails "Repository not found" — a strictly
+        # earlier failure than the empty-but-existing remote's "git remote has
+        # no branches".  The launcher must CREATE the absent repo before it can
+        # seed it.
+        self._beads_repo_absent: set[str] = set()
+        # Containers whose previously-absent `<bc>-beads` tracker repo has been
+        # CREATED by the launcher's absent-repo provisioning step.
+        self._beads_repo_created: set[str] = set()
 
     # --- Setup helpers (called by step definitions) ---
 
@@ -1241,6 +1271,25 @@ class FakeDockerDriver:
         """True once the launcher's empty-remote init-and-push step has seeded
         the previously-empty `<bc>-beads` Dolt remote (lead-5k8c)."""
         return container_name in self._beads_remote_seeded
+
+    def set_beads_repo_absent(
+        self, container_name: str, absent: bool = True
+    ) -> None:
+        """Model the BC's `<bc>-beads` GitHub tracker repo as NOT EXISTING
+        (lead-7jc2).  While absent (and not yet created by the launcher), a
+        `bd bootstrap` clone fails "Repository not found" — the launcher must
+        CREATE the repo (with an initial branch/commit) before it can seed the
+        Dolt remote and provision the working set.
+        """
+        if absent:
+            self._beads_repo_absent.add(container_name)
+        else:
+            self._beads_repo_absent.discard(container_name)
+
+    def beads_repo_created(self, container_name: str) -> bool:
+        """True once the launcher's absent-repo provisioning step has CREATED
+        the previously-absent `<bc>-beads` tracker repo (lead-7jc2)."""
+        return container_name in self._beads_repo_created
 
     def committed_beads_prefix(self, container_name: str) -> str:
         """Return the committed prefix the cloned repo's registry carries."""
@@ -2303,6 +2352,25 @@ class FakeDockerDriver:
         # script.  When the remote is empty (and the seed is not forced to
         # fail) the seed succeeds and marks the remote seeded, after which
         # `bd bootstrap` succeeds; a forced-fail seed exits non-zero.
+        # lead-7jc2 — the launcher's ABSENT-repo CREATE step.  When the
+        # `<bc>-beads` GitHub tracker repo does not exist ("Repository not
+        # found"), the launcher creates it with an initial branch/commit
+        # (`gh repo create ... --add-readme`).  After creation the repo EXISTS
+        # but its Dolt remote is still EMPTY/uninitialized (no refs/dolt yet),
+        # so a subsequent `bd bootstrap` fails "git remote has no branches"
+        # until the empty-remote seed step initializes it — exactly the
+        # existing lead-5k8c seed path.
+        if _is_repo_create_command(command):
+            self._beads_repo_created.add(container_name)
+            self._beads_repo_absent.discard(container_name)
+            self._beads_remote_empty.add(container_name)
+            return subprocess.CompletedProcess(
+                command, 0,
+                "Created repository with an initial branch and commit "
+                "(refs/heads/main present)\n",
+                "",
+            )
+
         if _is_empty_remote_seed_command(command):
             if container_name in self._beads_remote_seed_fails:
                 return subprocess.CompletedProcess(
@@ -2319,6 +2387,20 @@ class FakeDockerDriver:
             )
 
         if is_bd_bootstrap_command(command):
+            # lead-7jc2 — an ABSENT `<bc>-beads` GitHub tracker repo makes the
+            # bootstrap clone fail "Repository not found" (a strictly earlier
+            # failure than an empty-but-existing remote) UNTIL the launcher's
+            # absent-repo provisioning step CREATES it.
+            if (
+                container_name in self._beads_repo_absent
+                and container_name not in self._beads_repo_created
+            ):
+                return subprocess.CompletedProcess(
+                    command, 1, "",
+                    "dolt clone git+https://github.com/dstengle/"
+                    f"{container_name}-beads.git: Repository not found; the "
+                    "remote repository does not exist\n",
+                )
             # lead-5k8c — an EMPTY/uninitialized `<bc>-beads` Dolt remote makes
             # the bootstrap clone fail "git remote has no branches" UNTIL the
             # launcher's empty-remote seed step initializes it.
