@@ -7519,6 +7519,22 @@ def standup_provisions_and_bootstraps(ctx, fake_driver, controller, tmp_path):
     ctx["container_name"] = f"bc-{bc_name}"
 
 
+def _resolve_standup_tracker_slug(tracker: str, bc_name: str) -> str:
+    """Resolve the scenario's abstract "<owner>/<bc>-beads" tracker template
+    into the CONCRETE GitHub slug the standup flow must target.
+
+    lead-jq9b / ADR-043 D5.  The scenario pins the tracker NAME form via the
+    `{tracker}` placeholder; the load-bearing binding is that the standup's
+    provisioning commands target exactly this concrete slug.  `<owner>` binds
+    to the beads remote org the controller derives its slug under, and `<bc>`
+    binds to the BC being stood up.  Resolving from the scenario text (not a
+    hardcoded slug) is what ties the on-disk contract to the emitted command:
+    change the pinned NAME form and this expectation changes with it.
+    """
+    from bc_launcher.controller import BEADS_REMOTE_ORG
+    return tracker.replace("<owner>", BEADS_REMOTE_ORG).replace("<bc>", bc_name)
+
+
 @then(parsers.parse(
     'the standup flow creates the absent "{tracker}" tracker repository '
     'with an initial branch and commit'
@@ -7536,6 +7552,26 @@ def assert_absent_tracker_repo_created(tracker, ctx, fake_driver):
         f"exec calls on {container_name!r}: "
         f"{[c.command for c in fake_driver.exec_calls if c.container == container_name]!r}"
     )
+    # ADR-043 D5 (lead-jq9b): the create command must concretely target the
+    # scenario's captured `{tracker}` slug — not merely "some gh repo create".
+    # This ties the emitted `gh repo create <owner>/<bc>-beads` to the pinned
+    # NAME form and closes the drift hole that let a `<bc>-lead-beads` scenario
+    # pass against a `<bc>-beads` controller.
+    expected_slug = _resolve_standup_tracker_slug(tracker, ctx["bc_name"])
+    create_scripts = [c.command[2] for c in create_calls]
+    assert any(f"gh repo create {expected_slug}" in s for s in create_scripts), (
+        "The repo-create step must target the scenario's tracker slug "
+        f"{expected_slug!r} (ADR-043 D5 <product>-<bc>-beads); "
+        f"got create scripts={create_scripts!r}"
+    )
+    # ADR-043 D5: `-lead-beads` is the LEAD's tracker suffix ONLY; a per-BC
+    # tracker create must NEVER target it.
+    for s in create_scripts:
+        assert "-lead-beads" not in s, (
+            "The per-BC tracker repo-create must NOT target a `-lead-beads` "
+            "slug (ADR-043 D5: that suffix is the lead's own tracker only); "
+            f"script={s!r}"
+        )
     assert fake_driver.beads_repo_created(container_name), (
         "The absent `<bc>-beads` tracker repo must end up CREATED after the "
         f"standup flow's repo-create step (lead-7jc2); container={container_name!r}"
@@ -7555,6 +7591,23 @@ def assert_standup_seeds_dolt_remote(tracker, ctx, fake_driver):
         "(init-and-push an initial branch/commit) after creating the repo so "
         f"it is not empty/branchless (lead-7jc2); calls={[c.command for c in calls]!r}"
     )
+    # ADR-043 D5 (lead-jq9b): the dolt-remote-add/seed command must concretely
+    # target the scenario's captured `{tracker}` slug (embedded in the
+    # `git+https://.../<owner>/<bc>-beads.git` remote URL) — not merely "some
+    # seed ran".  This ties the emitted `bd dolt remote add` + push to the
+    # pinned NAME form and closes the same drift hole on the seed path.
+    expected_slug = _resolve_standup_tracker_slug(tracker, ctx["bc_name"])
+    seed_scripts = [c.command[2] for c in seed_calls]
+    assert any(expected_slug in s for s in seed_scripts), (
+        "The dolt-remote-add/seed step must target the scenario's tracker slug "
+        f"{expected_slug!r} (ADR-043 D5 <product>-<bc>-beads); "
+        f"got seed scripts={seed_scripts!r}"
+    )
+    for s in seed_scripts:
+        assert "-lead-beads" not in s, (
+            "The per-BC dolt-remote seed must NOT target a `-lead-beads` slug "
+            f"(ADR-043 D5: that suffix is the lead's own tracker only); script={s!r}"
+        )
     assert fake_driver.beads_remote_seeded(container_name), (
         "The `<bc>-beads` Dolt remote must end up SEEDED after the standup "
         f"flow's init-and-push step (lead-7jc2); container={container_name!r}"
