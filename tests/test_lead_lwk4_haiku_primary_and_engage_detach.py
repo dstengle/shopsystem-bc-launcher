@@ -277,21 +277,25 @@ def test_r7_engage_exec_is_detached_so_launch_returns(tmp_path):
 
 def test_r7_engage_still_issues_server_and_run_argv_inside_detached_session(tmp_path):
     """Detaching changes HOW the engage is issued, not WHETHER: the
-    `fabro server start --foreground --no-web` and `fabro run workflow.fabro -I
-    BC_NAME=... -I WORK_ID=...` argv stay present INSIDE the detached session
-    (scn 77 @scenario_hash:68e14cdcd8b7c145 stays green).
+    `fabro server start --foreground --no-web` and the PERSISTENT dispatcher run
+    `fabro run dispatcher.fabro -I BC_NAME=...` argv stay present INSIDE the
+    detached session (lead-odd9 / ADR-058 replaced the retired one-shot
+    `fabro run workflow.fabro -I BC_NAME -I WORK_ID` engage; the pin is now
+    @scenario_hash:30fd5f2079f1c433).
 
     TEETH: drop the server-start or run argv -> RED.
     """
     script = _fabro_engage_exec(tmp_path).command[2]
     assert "fabro server start --foreground --no-web" in script, (
-        f"scn 77 pins the server-start argv inside the engage; script:\n{script}"
+        f"the engage pins the server-start argv; script:\n{script}"
     )
-    assert f"fabro run workflow.fabro -I BC_NAME={BC_NAME}" in script, (
-        f"the engage must carry the `fabro run ... -I BC_NAME` argv; script:\n{script}"
+    assert f"fabro run dispatcher.fabro -I BC_NAME={BC_NAME}" in script, (
+        "the engage must carry the persistent `fabro run dispatcher.fabro -I "
+        f"BC_NAME` argv (ADR-058 D1); script:\n{script}"
     )
-    assert f"WORK_ID={WORK_ID}" in script, (
-        f"the engage must carry `-I WORK_ID`; script:\n{script}"
+    assert "WORK_ID" not in script, (
+        "the persistent dispatcher engage must carry NO -I WORK_ID (ADR-058 "
+        f"D1); script:\n{script}"
     )
 
 
