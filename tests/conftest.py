@@ -13902,3 +13902,361 @@ def cadr_no_fabro_on_default(ctx):
         "tmux-default path must issue NO `fabro run`; the launcher issued "
         f"{[c.command[:3] for c in run]!r}"
     )
+
+
+# ===========================================================================
+# lead-odd9 — ADR-058: the fabro engage is corrected from the ONE-SHOT
+# `fabro run workflow.fabro -I BC_NAME -I WORK_ID` (retired) to ONE persistent
+# reactive-cyclic `fabro run dispatcher.fabro -I BC_NAME=<bc>` engage, plus the
+# bundled clone-path bootstrap (valid ~/.fabro server config + run cwd).
+#
+# Pins:
+#   @scenario_hash:30fd5f2079f1c433 — engage-tier SELECTION + parity (dispatcher
+#       engage, no launch-time work id, --work-id ignored no-op).
+#   @scenario_hash:bf9f8c9d7f2865e3 — the poured dispatcher.fabro cyclic-graph
+#       contract (start/watch/launch/end + reactive cycle).
+#   @scenario_hash:cacccc52ba0b0766 — the bundled clone-path server-config
+#       provisioning + run-cwd fix (lead-l4iw).
+#
+# FIDELITY: every assertion binds to the REAL launcher's ACTUAL recorded exec
+# calls (controller.launch over FakeDockerDriver) and to the REAL committed
+# dispatcher.fabro asset bytes — never a model.  The dispatcher.fabro structural
+# leg reuses the ky63 quote-aware DOT parser (_ky63_parse_nodes /
+# _ky63_parse_edges).
+# ===========================================================================
+
+from bc_launcher.controller import (  # noqa: E402
+    FABRO_SERVER_SETTINGS_CONTAINER_PATH as _ODD9_SERVER_SETTINGS_PATH,
+    FABRO_SETTINGS_CONTAINER_PATH as _ODD9_PROJECT_SETTINGS_PATH,
+    FABRO_DEF_CONTAINER_DIR as _ODD9_DEF_DIR,
+)
+
+_ODD9_BC = "shopsystem-messaging"
+
+
+def _odd9_drive_fabro_launch(bc_name, ctx, fake_driver, controller, tmp_path,
+                             work_id=None, extra_argv=None):
+    """Drive the REAL launcher on the --orchestrator fabro path, resolving the
+    launch_path exactly as the CLI does.  When ``work_id`` is None NO --work-id
+    is supplied (the ADR-058 D6 interface: the fabro path takes no work id).
+    Records the SAME ctx keys the lead-cadr helpers read so their assertions and
+    the shared readiness/inspect/parity steps work unchanged."""
+    argv = ["launch", bc_name, "--orchestrator", "fabro"]
+    if work_id is not None:
+        argv += ["--work-id", work_id]
+    if extra_argv:
+        argv += extra_argv
+    parser = _cadr_build_parser()
+    args = parser.parse_args(argv)
+    assert args.orchestrator == "fabro"
+    launch_path = (
+        _CADR_LAUNCH_PATH_FABRO
+        if (args.orchestrator == "fabro" or getattr(args, "fabro_path", False))
+        else _CADR_LAUNCH_PATH_TMUX
+    )
+    assert launch_path == _CADR_LAUNCH_PATH_FABRO
+    manifest_path = _cadr_write_manifest(tmp_path, bc_name)
+    result = controller.launch(
+        bc_name=bc_name,
+        repo_url=f"https://github.com/shopsystem/{bc_name}.git",
+        manifest_path=manifest_path,
+        credential_home=ctx.get("credential_home"),
+        launch_path=launch_path,
+        work_id=getattr(args, "work_id", None),
+    )
+    assert result.exit_code == 0, (
+        f"fabro-path launch failed: stdout={result.stdout!r} "
+        f"stderr={result.stderr!r}"
+    )
+    ctx["cadr_result"] = result
+    ctx["cadr_driver"] = fake_driver
+    ctx["cadr_bc_name"] = bc_name
+    ctx["container_name"] = f"bc-{bc_name}"
+    return result
+
+
+# --- Given: fabro path, NO --work-id supplied (shared by 30fd + bf9f) --------
+
+@given(parsers.parse(
+    'bc-container launch is run for BC name "{bc_name}" on the fabro '
+    'orchestrator launch path selected by "--orchestrator fabro" with no '
+    '"--work-id" supplied'))
+def odd9_launch_fabro_no_workid(bc_name, ctx, fake_driver, controller, tmp_path):
+    _odd9_drive_fabro_launch(bc_name, ctx, fake_driver, controller, tmp_path,
+                             work_id=None)
+
+
+@given(parsers.parse(
+    'bc-container launch is run for BC name "{bc_name}" on the fabro '
+    'orchestrator launch path selected by "--orchestrator fabro" in a FRESH '
+    'CLONE-PATH container with NO host-home "~/.fabro" mount and no '
+    'interactively pre-configured fabro home'))
+def odd9_launch_fabro_clone_path(bc_name, ctx, fake_driver, controller, tmp_path):
+    # A fresh clone-path launch is the SAME real launcher drive with no
+    # pre-existing ~/.fabro: the FakeDockerDriver container starts clean, so the
+    # engage's OWN ~/.fabro provisioning (fabro install) is what must bootstrap
+    # the server config.  Bind to the launcher's actual recorded engage execs.
+    _odd9_drive_fabro_launch(bc_name, ctx, fake_driver, controller, tmp_path,
+                             work_id=None)
+
+
+# --- Given: container running with the poured def (structural presence only) --
+
+@given(parsers.parse(
+    'the container "{container_name}" is running with the self-contained fabro '
+    'def POURED by shop-templates into "{def_dir}" at launch, not carried on '
+    'the baked bc-base image (@scenario_hash:{h_def}, re-homed to '
+    'shopsystem-templates), with the started anthropic-oauth-shim and fabro\'s '
+    'anthropic "base_url" wired to it (scenario 76, @scenario_hash:{h76})'))
+def odd9_container_running_poured(container_name, def_dir, h_def, h76, ctx,
+                                  fake_driver):
+    assert fake_driver.is_running(container_name), (
+        f"Expected {container_name!r} to be running after the fabro-path launch."
+    )
+    ctx["container_name"] = container_name
+
+
+@given(parsers.parse(
+    'the container "{container_name}" has cloned the repo and shop-templates '
+    'has POURED "{def_dir}" including "dispatcher.fabro" and the UNCHANGED '
+    'ADR-051 "workflow.fabro" child def'))
+def odd9_container_cloned_poured(container_name, def_dir, ctx, fake_driver):
+    assert fake_driver.is_running(container_name), (
+        f"Expected {container_name!r} to be running after the fabro-path launch."
+    )
+    ctx["container_name"] = container_name
+
+
+# --- When (cacccc) -----------------------------------------------------------
+
+@when(
+    "the launcher's recorded fabro engage steps — the server config it "
+    "provisions, the \"fabro server start\" argv, and the working directory of "
+    "the \"fabro run\" engage — are inspected structurally, without a live "
+    "docker daemon, a running fabro server, or a reachable agent-vault")
+def odd9_inspect_engage_steps(ctx):
+    ctx["odd9_inspected"] = True
+
+
+# --- Then (30fd): the ONE persistent dispatcher engage, no WORK_ID -----------
+
+@then(parsers.parse(
+    'the launcher invokes "{run_argv}" against that server as the ONE '
+    'persistent engage step, carrying only the constant BC_NAME into the run '
+    'via the def\'s "{env_table}" and supplying NO "-I WORK_ID", so the '
+    'reactive dispatcher def poured into "{def_dir}" owns the container\'s '
+    'lifecycle and discovers work ids at runtime rather than running one-shot '
+    "on a launch-time work id (ADR-058 D1 correcting ADR-050 D3)"))
+def odd9_run_dispatcher(run_argv, env_table, def_dir, ctx):
+    assert run_argv == "fabro run dispatcher.fabro -I BC_NAME=shopsystem-messaging"
+    call = _cadr_fabro_engage_call(ctx)
+    assert call is not None, (
+        "the fabro-path launcher did not emit a fabro engage exec; "
+        f"exec_calls: {[c.command[:3] for c in _cadr_exec_calls(ctx)]!r}"
+    )
+    script = call.command[2]
+    # The ONE persistent dispatcher engage: `fabro run dispatcher.fabro
+    # -I BC_NAME=<bc>` — no -I WORK_ID, no one-shot workflow.fabro run.
+    assert run_argv in script, (
+        f"launcher engage script must issue {run_argv!r}; got {script!r}"
+    )
+    assert "WORK_ID" not in script, (
+        "the persistent dispatcher engage must carry NO -I WORK_ID (ADR-058 "
+        f"D1); the engage script still references WORK_ID:\n{script}"
+    )
+    assert "fabro run workflow.fabro" not in script, (
+        "the engage must NOT run the child def one-shot (fabro run "
+        f"workflow.fabro); that is the retired ONE-SHOT engage:\n{script}"
+    )
+
+
+# --- Then (30fd): --work-id is an ignored no-op on the fabro path ------------
+
+@then(parsers.parse(
+    'no "--work-id" is required at the fabro launch interface and any '
+    '"--work-id" passed on the fabro path is an ignored no-op, exactly like '
+    "the tmux path which takes no work id at launch, restoring the interface "
+    "half of launch parity (ADR-058 D6)"))
+def odd9_work_id_no_op(ctx, fake_driver, controller, tmp_path):
+    # (1) The interface REQUIRES no work id: the launch under test supplied
+    #     none and reached exit 0 through the engage.
+    assert ctx["cadr_result"].exit_code == 0
+    # (2) --work-id is still ACCEPTED by the parser (a no-op, not an error).
+    parser = _cadr_build_parser()
+    aliased = parser.parse_args(
+        ["launch", _ODD9_BC, "--orchestrator", "fabro", "--work-id", "ignored-xyz"]
+    )
+    assert getattr(aliased, "work_id", None) == "ignored-xyz"
+    # (3) Passing --work-id on the fabro path is an IGNORED no-op: re-driving the
+    #     launcher WITH a work id yields a byte-identical dispatcher engage that
+    #     carries NEITHER the value NOR any -I WORK_ID.
+    _odd9_drive_fabro_launch(_ODD9_BC, ctx, fake_driver, controller, tmp_path,
+                             work_id="ignored-xyz")
+    call = _cadr_fabro_engage_call(ctx)
+    script = call.command[2]
+    assert "ignored-xyz" not in script, (
+        "a --work-id passed on the fabro path must be an IGNORED no-op; the "
+        f"value leaked into the engage:\n{script}"
+    )
+    assert "WORK_ID" not in script, (
+        "a --work-id passed on the fabro path must NOT add -I WORK_ID to the "
+        f"persistent dispatcher engage:\n{script}"
+    )
+
+
+# --- Then (30fd): no tmux/claude engage on the fabro path (no h01 suffix) -----
+
+@then(parsers.parse(
+    'no tmux "agent" send-keys session and no "claude" engage is started on '
+    'this path, the engage tier being REPLACED by the fabro run-graph entry '
+    "rather than added alongside it (ADR-050 D3)"))
+def odd9_no_tmux_no_claude(ctx):
+    agent_send_keys = _cadr_tmux_agent_send_keys(ctx)
+    assert agent_send_keys == [], (
+        "fabro path must start NO tmux 'agent' send-keys session; the launcher "
+        f"issued {[c.command for c in agent_send_keys]!r}"
+    )
+    claude = _cadr_claude_engage_send_keys(ctx)
+    assert claude == [], (
+        "fabro path must start NO 'claude' engage; the launcher issued "
+        f"{[c.command for c in claude]!r}"
+    )
+    assert _cadr_fabro_server_calls(ctx), "fabro server start must be present"
+    assert _cadr_fabro_run_calls(ctx), "fabro run must be present"
+
+
+# --- Then (cacccc): valid ~/.fabro server config provisioned before start ----
+
+@then(parsers.parse(
+    'BEFORE starting the server the launcher provisions a VALID server config '
+    'at "{server_settings}" (the file "fabro server start" reads), e.g. by '
+    'running "{install_eg}", and that file contains a "[server.auth]" table '
+    'with "methods" set, a "SESSION_SECRET" of exactly 64 hexadecimal '
+    'characters, and a "FABRO_DEV_TOKEN" of the form "fabro_dev_" followed by '
+    '64 hexadecimal characters (NOT a bare hex token), so "fabro server start '
+    '--foreground --no-web" starts successfully rather than dying at '
+    '"server.auth.methods: field is required"'))
+def odd9_server_config_provisioned(server_settings, install_eg, ctx):
+    call = _cadr_fabro_engage_call(ctx)
+    assert call is not None
+    script = call.command[2]
+    # The engage provisions the SERVER config via `fabro install` (result-proven
+    # in wf_10649334-946 to write [server.auth] methods + a 64-hex SESSION_SECRET
+    # + a fabro_dev_+64hex FABRO_DEV_TOKEN under ~/.fabro), and it does so BEFORE
+    # `fabro server start`.
+    install_pos = script.find("fabro install")
+    start_pos = script.find("fabro server start")
+    assert install_pos != -1, (
+        f"the engage must provision the server config via `fabro install` "
+        f"(e.g. {install_eg!r}); script:\n{script}"
+    )
+    assert start_pos != -1, "the engage must issue `fabro server start`"
+    assert install_pos < start_pos, (
+        "the server config must be provisioned BEFORE `fabro server start`, "
+        f"else the server dies at `server.auth.methods: field is required`; "
+        f"script:\n{script}"
+    )
+    # The install argv the launcher issues is the result-equivalent recipe: the
+    # ADR-058 pinned commitment is the RESULT (a valid server config), so assert
+    # the load-bearing flags are present (a superset is allowed).
+    for flag in ("--non-interactive", "--skip-llm", "--github-strategy"):
+        assert flag in script, (
+            f"the `fabro install` provisioning must carry {flag!r}; script:\n{script}"
+        )
+    # `fabro server start` reads the SERVER-level ~/.fabro/settings.toml, which
+    # the launcher targets at the container user's home (distinct from the
+    # project settings).
+    assert _ODD9_SERVER_SETTINGS_PATH.endswith("/.fabro/settings.toml"), (
+        f"the server config path must be a ~/.fabro/settings.toml; got "
+        f"{_ODD9_SERVER_SETTINGS_PATH!r}"
+    )
+
+
+@then(parsers.parse(
+    'this provisioned "{server_settings}" server config is DISTINCT from '
+    '"{project_settings}", the PROJECT LLM settings the launcher already writes '
+    "— the project settings are NOT the server config and do not by themselves "
+    'satisfy "fabro server start", so the launcher writes BOTH the project '
+    '"{project_settings2}" and the server "{server_settings2}"'))
+def odd9_both_settings_distinct(server_settings, project_settings,
+                                project_settings2, server_settings2, ctx):
+    # The two settings files are DISTINCT container paths.
+    assert _ODD9_PROJECT_SETTINGS_PATH != _ODD9_SERVER_SETTINGS_PATH, (
+        "the project settings and the server settings must be DISTINCT files; "
+        f"both resolved to {_ODD9_PROJECT_SETTINGS_PATH!r}"
+    )
+    assert _ODD9_PROJECT_SETTINGS_PATH == f"{_ODD9_DEF_DIR}/settings.toml", (
+        f"the PROJECT settings must live at the poured def dir; got "
+        f"{_ODD9_PROJECT_SETTINGS_PATH!r}"
+    )
+    # The launcher writes the PROJECT settings (a recorded exec places the
+    # project /workspace/.fabro/settings.toml bytes).
+    placed_project = [
+        c for c in _cadr_exec_calls(ctx)
+        if c.command[:2] == ["/bin/sh", "-c"]
+        and len(c.command) >= 3
+        and _ODD9_PROJECT_SETTINGS_PATH in c.command[2]
+    ]
+    assert placed_project, (
+        "the launcher must WRITE the project settings "
+        f"{_ODD9_PROJECT_SETTINGS_PATH!r} (no placing exec recorded)"
+    )
+    # And the engage PROVISIONS the server settings (fabro install writes
+    # ~/.fabro/settings.toml).
+    call = _cadr_fabro_engage_call(ctx)
+    assert call is not None and "fabro install" in call.command[2], (
+        "the engage must provision the server ~/.fabro/settings.toml via "
+        "`fabro install`"
+    )
+
+
+@then(parsers.parse(
+    'the launcher issues the persistent "{run_argv}" engage with its working '
+    'directory set to the project dir "{proj_dir}", NOT "{workspace}", so '
+    'fabro resolves the poured "dispatcher.fabro" (and its sibling '
+    '"workflow.fabro") rather than failing "workflow not found: '
+    '/workspace/workflow.fabro"'))
+def odd9_run_cwd(run_argv, proj_dir, workspace, ctx):
+    call = _cadr_fabro_engage_call(ctx)
+    assert call is not None
+    script = call.command[2]
+    assert run_argv == "fabro run dispatcher.fabro -I BC_NAME=shopsystem-messaging"
+    assert run_argv in script, (
+        f"the engage must issue {run_argv!r}; script:\n{script}"
+    )
+    # cwd = the project dir: `cd /workspace/.fabro` precedes `fabro run`.
+    cd_pos = script.find(f"cd {proj_dir}")
+    if cd_pos == -1:
+        cd_pos = script.find(f"cd '{proj_dir}'")
+    run_pos = script.find("fabro run dispatcher.fabro")
+    assert cd_pos != -1 and cd_pos < run_pos, (
+        f"the engage must `cd {proj_dir}` BEFORE `fabro run` so the poured def "
+        f"resolves; script:\n{script}"
+    )
+    # It must NOT resolve the WORKDIR-root path the clone-path bug produced.
+    assert f"{workspace}/dispatcher.fabro" not in script, (
+        f"the engage must NOT resolve {workspace}/dispatcher.fabro; script:\n{script}"
+    )
+    assert f"{workspace}/workflow.fabro" not in script, (
+        f"the engage must NOT resolve {workspace}/workflow.fabro; script:\n{script}"
+    )
+
+
+@then(parsers.parse(
+    'as the observable result a fresh clone-path "{flag}" launch REACHES the '
+    "fabro engage successfully — the in-container fabro server comes up and "
+    'the "fabro run" engage resolves the poured def — instead of crashing at '
+    "server auth bootstrap or def resolution as the un-provisioned clone path "
+    "currently does (ADR-058 bundled fix, lead-l4iw)"))
+def odd9_reaches_engage(flag, ctx):
+    # Observable result: the launch drove to exit 0 AND both engage legs (server
+    # start + dispatcher run) are present in the recorded engage.
+    assert ctx["cadr_result"].exit_code == 0, (
+        "the fresh clone-path fabro launch must REACH the engage (exit 0)"
+    )
+    assert _cadr_fabro_server_calls(ctx), "fabro server start must be present"
+    assert _cadr_fabro_run_calls(ctx), "fabro run must be present"
+    call = _cadr_fabro_engage_call(ctx)
+    assert "fabro run dispatcher.fabro" in call.command[2], (
+        "the engage must resolve the poured dispatcher.fabro def"
+    )
