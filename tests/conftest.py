@@ -14598,3 +14598,281 @@ def odd9_bf9f_no_tmux_parity(ctx):
     assert ctx["cadr_driver"].is_running(ctx["container_name"]), (
         "the shared launch body must have created + started the container"
     )
+
+
+# ===========================================================================
+# lead-bss3 (request_bugfix, @scenario_hash:9620473690f7ecb5) — the poll must
+# resolve each baked dependency's latest as the SEMVER-MAX published release and
+# only bump on a STRICTLY-FORWARD version: a behind-or-equal resolution (e.g.
+# resolved v0.45.0 vs pin v0.48.0) is a NO-OP (no downgrade, no non-zero exit),
+# and a missing/malformed latest for one dependency is SKIPPED WITH A WARNING
+# while the remaining baked deps are still checked (never a hard exit 1 that
+# aborts the whole poll).
+#
+# This REFINES sibling pins 5b6a931a493971a6 (newer->bump) and cf8625dbac93cfdc
+# (equal->no-op); it is ADDITIVE. Per the 5vyb / scenario-40 declarative-artifact
+# precedent, live Actions / live registry state is OUT-OF-BAND: the assertions
+# bind to the COMMITTED workflow's executable body via _strip_yaml_comments —
+# logic present ONLY in a YAML comment does NOT satisfy them.
+# ===========================================================================
+
+
+def _bss3_poll_exec_body(ctx):
+    """The centralized poll workflow's executable body with full-line YAML
+    comments stripped (5vyb precedent). Logic only in a comment does not count."""
+    wf = ctx.get("poll_workflow")
+    if wf is None or isinstance(wf, list):
+        wf = _centralized_poll_workflow()
+        ctx["poll_workflow"] = wf
+    assert wf is not None and not isinstance(wf, list), (
+        "No single centralized scheduled check-bump-rebuild workflow found."
+    )
+    ctx.setdefault("poll_workflow_text", wf[0].read_text())
+    return _strip_yaml_comments(wf[0].read_text())
+
+
+@given(parsers.parse(
+    'the bc-base Dockerfile in shopsystem-bc-launcher pins the baked '
+    'dependency "{dependency}" at "{pin}"'))
+def given_bss3_dockerfile_pins_named_dep(dependency, pin, ctx):
+    ctx["poll_workflow"] = _centralized_poll_workflow()
+    assert ctx["poll_workflow"] is not None and not isinstance(
+        ctx["poll_workflow"], list
+    ), "No single centralized scheduled check-bump-rebuild workflow found."
+    ctx["poll_workflow_text"] = ctx["poll_workflow"][0].read_text()
+    ctx["bss3_dep"] = dependency
+    ctx["bss3_pin"] = pin
+    # The named pin must actually be the current bc-base Dockerfile pin, so the
+    # behind-resolution downgrade case (v0.45.0 vs v0.48.0) is grounded in the
+    # real committed artifact.
+    dockerfile = _find_bc_base_dockerfile()
+    assert dockerfile is not None, "bc-base Dockerfile not found."
+    df_text = dockerfile.read_text()
+    if dependency == "shop-templates":
+        assert f"ARG SHOP_TEMPLATES_VERSION={pin}" in df_text, (
+            f"bc-base Dockerfile does not pin {dependency!r} at {pin!r} via "
+            f"ARG SHOP_TEMPLATES_VERSION; got:\n"
+            + "\n".join(l for l in df_text.splitlines()
+                        if "SHOP_TEMPLATES_VERSION" in l)
+        )
+
+
+@given(
+    'the single centralized scheduled bc-launcher poll workflow\'s '
+    '"check-bump-rebuild" job resolves each baked dependency\'s latest '
+    "published release to decide whether to bump and rebuild bc-base")
+def given_bss3_single_poll_resolves_latest(ctx):
+    ctx.setdefault("poll_workflow", _centralized_poll_workflow())
+    assert ctx["poll_workflow"] is not None and not isinstance(
+        ctx["poll_workflow"], list
+    ), "No single centralized scheduled check-bump-rebuild workflow found."
+    ctx.setdefault("poll_workflow_text", ctx["poll_workflow"][0].read_text())
+    # The job that does the check-bump-rebuild must exist.
+    doc = ctx["poll_workflow"][1]
+    assert "check-bump-rebuild" in doc.get("jobs", {}), (
+        "The centralized poll declares no 'check-bump-rebuild' job."
+    )
+
+
+@when(
+    "the workflow's executable body, with YAML comment lines excluded, is "
+    'inspected for how it resolves "latest" and decides whether to bump')
+def when_bss3_inspect_exec_body(ctx):
+    ctx["bss3_exec_body"] = _bss3_poll_exec_body(ctx)
+
+
+@then(
+    "the executable body resolves a dependency's latest as the "
+    "semver-maximum published release rather than an arbitrary or first "
+    "release-list entry")
+def then_bss3_resolves_semver_max(ctx):
+    body = ctx.setdefault("bss3_exec_body", _bss3_poll_exec_body(ctx))
+    # Semver-MAX means: enumerate the published releases and pick the maximum
+    # under a VERSION-aware sort — not a single arbitrary/"first" release-list
+    # entry. `gh release view` returns one (repo-default) release; a semver-max
+    # resolution must LIST releases and version-sort them.
+    assert "gh release list" in body, (
+        "The executable body does not enumerate the release LIST "
+        "(`gh release list`); resolving `latest` from a single "
+        "`gh release view` entry is an arbitrary/first pick, not the "
+        "semver-maximum published release."
+    )
+    assert "sort -V" in body, (
+        "The executable body does not version-sort the releases (`sort -V`); "
+        "without a semver-aware sort it cannot resolve the semver-MAXIMUM "
+        "published release."
+    )
+    picks_max = (
+        "tail -n1" in body or "tail -n 1" in body or "tail -1" in body
+        or "sort -rV" in body or "sort -Vr" in body
+    )
+    assert picks_max, (
+        "The executable body version-sorts but does not select the MAXIMUM "
+        "(no `tail -n1` on an ascending `sort -V`, nor a reverse `sort -rV` "
+        "head); it does not resolve the semver-max release."
+    )
+    # TEETH: a semver-max resolution present ONLY in a descriptive comment must
+    # NOT satisfy this — prove the comment-stripping is load-bearing.
+    raw = ctx["poll_workflow"][0].read_text()
+    sentinel = "sort -V # BSS3-COMMENT-ONLY-PHANTOM"
+    injected = raw + f"\n# resolved via {sentinel}\n"
+    assert sentinel not in _strip_yaml_comments(injected), (
+        "A semver-max resolution present only in a YAML comment survived "
+        "comment-stripping; the resolution must live in the executable body."
+    )
+
+
+@then(
+    'the executable body bumps "docker/bc-base/Dockerfile" and rebuilds '
+    "bc-base only when the resolved latest is strictly greater than the "
+    "current pin under semver comparison")
+def then_bss3_bumps_only_strictly_greater(ctx):
+    body = ctx.setdefault("bss3_exec_body", _bss3_poll_exec_body(ctx))
+    assert "docker/bc-base/Dockerfile" in body or "DOCKERFILE" in body, (
+        "The executable body does not reference the bc-base Dockerfile."
+    )
+    sortv_idx = body.find("sort -V")
+    sed_idx = body.find("sed -i")
+    assert sortv_idx != -1, "No semver-aware compare (`sort -V`) in the body."
+    assert sed_idx != -1, "No in-place Dockerfile pin bump (`sed -i`) found."
+    assert sortv_idx < sed_idx, (
+        "The Dockerfile pin bump (`sed -i`) is not gated on a semver "
+        "comparison computed first (`sort -V` does not precede `sed -i`); the "
+        "bump would fire on any inequality, not only a strictly-greater latest."
+    )
+
+
+@then(
+    'when the resolved latest for "shop-templates" is "v0.45.0" while the '
+    'pin is "v0.48.0", the executable body treats the behind-or-equal result '
+    "as a no-op: it does not rewrite the pin to the lower \"v0.45.0\" and "
+    "does not exit non-zero")
+def then_bss3_behind_is_noop_no_downgrade(ctx):
+    body = ctx.setdefault("bss3_exec_body", _bss3_poll_exec_body(ctx))
+    # A behind-or-equal resolution must be recognized under SEMVER (not a bare
+    # string `!=` that would bump on ANY difference, including a downgrade).
+    assert "sort -V" in body, (
+        "The executable body decides the bump without a semver comparison "
+        "(`sort -V`); a bare inequality test would rewrite the v0.48.0 pin "
+        "DOWN to a resolved v0.45.0."
+    )
+    # The behind-or-equal branch must be a NO-OP: the loop CONTINUEs without
+    # reaching the sed bump. The buggy body has exactly ONE `continue` (the
+    # equality short-circuit) and then bumps on every inequality; a correct
+    # body continues on equal AND on behind (and on a missing resolution).
+    assert body.count("continue") >= 2, (
+        "The executable body has fewer than two `continue` guards; a "
+        "behind-or-equal resolution is not treated as a no-op and would "
+        "downgrade the pin."
+    )
+    # The semver max of {current, latest} must be compared against the CURRENT
+    # pin so that when latest is not strictly greater the bump is skipped.
+    assert re.search(r"max[^\n]*current", body) or re.search(
+        r"current[^\n]*max", body
+    ), (
+        "The executable body does not compare the semver max against the "
+        "current pin, so it cannot treat a behind-or-equal latest as a no-op."
+    )
+    # It must NOT hard-abort on the behind resolution.
+    assert "exit 1" not in body, (
+        "The executable body contains a hard `exit 1`; a behind resolution "
+        "must be a no-op, not a non-zero exit."
+    )
+
+
+@then(
+    "a resolved latest that is below the current pin is handled as a no-bump "
+    'resolution result, not as a "release not found" hard error that exits '
+    "the job")
+def then_bss3_below_pin_is_no_bump_not_error(ctx):
+    body = ctx.setdefault("bss3_exec_body", _bss3_poll_exec_body(ctx))
+    assert "sort -V" in body, (
+        "Without a semver compare (`sort -V`) a below-pin latest cannot be "
+        "recognized as a no-bump result."
+    )
+    assert body.count("continue") >= 2, (
+        "A below-pin resolution is not routed to a no-bump `continue`."
+    )
+    assert "exit 1" not in body, (
+        "The executable body hard-exits (`exit 1`); a below-pin resolution "
+        "must be a no-bump result, not a 'release not found' hard error."
+    )
+
+
+@then(
+    "a missing or malformed latest release for one dependency is skipped "
+    "with a warning while the remaining baked dependencies are still "
+    'checked, rather than a hard "exit 1" that aborts the whole poll for '
+    "every dependency")
+def then_bss3_missing_skipped_with_warning(ctx):
+    body = ctx.setdefault("bss3_exec_body", _bss3_poll_exec_body(ctx))
+    # Skip WITH A WARNING: a GitHub Actions warning annotation on the skip.
+    assert "::warning::" in body, (
+        "The executable body emits no `::warning::` on a missing/malformed "
+        "resolution; a bad release for one dependency must be SKIPPED WITH A "
+        "WARNING, not silently or via a hard abort."
+    )
+    # The resolution must be guarded so a missing release does not pipefail the
+    # whole `set -euo pipefail` job.
+    assert "|| true" in body or "2>/dev/null" in body, (
+        "The release resolution is not guarded (`|| true` / `2>/dev/null`); "
+        "under `set -euo pipefail` a missing release would abort the whole "
+        "poll for every dependency."
+    )
+    # The skip must CONTINUE the loop so remaining baked deps are still checked.
+    assert body.count("continue") >= 2, (
+        "A missing/malformed resolution does not `continue` to the remaining "
+        "baked dependencies."
+    )
+    assert "exit 1" not in body, (
+        "The executable body hard-exits (`exit 1`) rather than skipping one "
+        "bad dependency and checking the rest."
+    )
+
+
+@then(
+    "when the resolved latest for a baked dependency is strictly greater "
+    "than its current pin, the executable body bumps that Dockerfile pin "
+    'then rebuilds and republishes "ghcr.io/dstengle/shopsystem-bc-base:latest"'
+    " at the new digest")
+def then_bss3_strictly_greater_bumps_then_rebuilds(ctx):
+    body = ctx.setdefault("bss3_exec_body", _bss3_poll_exec_body(ctx))
+    assert "ghcr.io/dstengle/shopsystem-bc-base:latest" in body, (
+        "The executable body does not republish the bc-base :latest image."
+    )
+    sed_idx = body.find("sed -i")
+    build_idx = body.find("build-push-action")
+    if build_idx == -1:
+        build_idx = body.find("docker build")
+    assert sed_idx != -1, "No Dockerfile pin bump (`sed -i`) found."
+    assert build_idx != -1, "No bc-base rebuild step found."
+    assert sed_idx < build_idx, (
+        "The rebuild is declared BEFORE the pin bump; on a strictly-greater "
+        "latest the bump must precede the rebuild so :latest is republished at "
+        "the new digest built from the bumped pin."
+    )
+
+
+@then(
+    'an executable body that rewrote the "shop-templates" pin from "v0.48.0" '
+    'down to "v0.45.0" or exited non-zero on that behind-resolution would '
+    "not satisfy this behavior")
+def then_bss3_downgrade_or_nonzero_insufficient(ctx):
+    body = ctx.setdefault("bss3_exec_body", _bss3_poll_exec_body(ctx))
+    # TEETH: the bump must be gated on a semver-MAX comparison (so a behind
+    # latest cannot rewrite the pin DOWN), and the behind path must not exit
+    # non-zero. A body that bumped on a bare inequality (the pre-fix shape)
+    # would downgrade and fails here because `sort -V` would not gate the sed.
+    sortv_idx = body.find("sort -V")
+    sed_idx = body.find("sed -i")
+    assert sortv_idx != -1 and sed_idx != -1 and sortv_idx < sed_idx, (
+        "The bump is not gated on a semver-max comparison; a behind resolution "
+        "would rewrite the v0.48.0 pin down to v0.45.0."
+    )
+    assert body.count("continue") >= 2, (
+        "The behind path is not a no-op `continue`; the pin could be "
+        "downgraded."
+    )
+    assert "exit 1" not in body, (
+        "The behind resolution path can exit non-zero; it must be a no-op."
+    )

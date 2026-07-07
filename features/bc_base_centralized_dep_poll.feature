@@ -58,6 +58,19 @@ Feature: centralized scheduled bc-base dependency check-bump-rebuild (lead-czwo)
     And the workflow does not run a bc-base image build
     And the workflow does not republish "ghcr.io/dstengle/shopsystem-bc-base:latest" with a new digest
 
+  @scenario_hash:9620473690f7ecb5 @bc:shopsystem-bc-launcher
+  Scenario: the poll resolves each baked dependency's latest as the semver-max release and only bumps on a strictly-forward version, never downgrading and never dying on one bad release
+    Given the bc-base Dockerfile in shopsystem-bc-launcher pins the baked dependency "shop-templates" at "v0.48.0"
+    And the single centralized scheduled bc-launcher poll workflow's "check-bump-rebuild" job resolves each baked dependency's latest published release to decide whether to bump and rebuild bc-base
+    When the workflow's executable body, with YAML comment lines excluded, is inspected for how it resolves "latest" and decides whether to bump
+    Then the executable body resolves a dependency's latest as the semver-maximum published release rather than an arbitrary or first release-list entry
+    And the executable body bumps "docker/bc-base/Dockerfile" and rebuilds bc-base only when the resolved latest is strictly greater than the current pin under semver comparison
+    And when the resolved latest for "shop-templates" is "v0.45.0" while the pin is "v0.48.0", the executable body treats the behind-or-equal result as a no-op: it does not rewrite the pin to the lower "v0.45.0" and does not exit non-zero
+    And a resolved latest that is below the current pin is handled as a no-bump resolution result, not as a "release not found" hard error that exits the job
+    And a missing or malformed latest release for one dependency is skipped with a warning while the remaining baked dependencies are still checked, rather than a hard "exit 1" that aborts the whole poll for every dependency
+    And when the resolved latest for a baked dependency is strictly greater than its current pin, the executable body bumps that Dockerfile pin then rebuilds and republishes "ghcr.io/dstengle/shopsystem-bc-base:latest" at the new digest
+    And an executable body that rewrote the "shop-templates" pin from "v0.48.0" down to "v0.45.0" or exited non-zero on that behind-resolution would not satisfy this behavior
+
   @scenario_hash:59c0f539187eabbb
   Scenario: an operator manually starts the workflow via workflow_dispatch and it runs the same check-bump-rebuild path
     Given the centralized bc-base rebuild workflow in shopsystem-bc-launcher declares a "workflow_dispatch" trigger
