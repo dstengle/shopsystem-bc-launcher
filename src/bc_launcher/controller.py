@@ -282,6 +282,51 @@ def _empty_remote_seed_script(beads_remote_url: str) -> str:
         f"git ls-remote {beads_remote_url} 'refs/dolt/*' | grep -q refs/dolt"
     )
 
+
+# lead-r34c / GAP B — the scaffolded ORIGIN_OWNER placeholder in the tracker
+# remote is correct at SCAFFOLD time (no origin owner is known yet), but it must
+# be RESOLVED to the derived GitHub owner BEFORE the in-container `bd bootstrap`
+# runs.  Empirically proven (David's 2026-07-07 shopsystem-knowledge standup):
+# the standup resolved the owner to `dstengle` for the gh-create step but never
+# wrote it back into the in-container `.beads` config / functional bd dolt
+# remote, so `bd bootstrap` cloned the stale
+# `git+https://github.com/ORIGIN_OWNER/<bc>-beads.git` URL and failed
+# "Repository not found".  This writeback derives the owner from the CONTAINER's
+# `/workspace` git origin remote (the real origin the clone left behind) and
+# rewrites BOTH the `.beads/config.yaml` `sync.remote` AND the functional bd
+# dolt remote (the one `bd dolt remote list` reports and `bd bootstrap` clones
+# from), so no literal `ORIGIN_OWNER` segment survives to bootstrap time and the
+# clone target is `<owner>/<bc>-beads`.  It is idempotent + best-effort: on a
+# config already carrying a resolved owner the sed is a no-op and the dolt
+# remote re-add is harmless.
+def _resolve_origin_owner_writeback_script(bc_name: str) -> str:
+    """Shell to RESOLVE the ORIGIN_OWNER placeholder to the derived GitHub owner
+    and WRITE it into the in-container `.beads` config sync.remote + the
+    functional bd dolt remote BEFORE `bd bootstrap` (lead-r34c / GAP B)."""
+    remote_tail = f"{bc_name}-beads.git"
+    return (
+        f"set -e; cd {CONTAINER_WORKSPACE}; "
+        # (1) Derive the GitHub owner from the container's /workspace git origin
+        #     remote: strip a trailing `.git`, normalise a `git@host:owner/repo`
+        #     scp-form colon to a slash, then take the second-to-last path
+        #     segment (`<owner>` in `.../<owner>/<repo>`).
+        f"url=$(git -C {CONTAINER_WORKSPACE} remote get-url origin); "
+        "owner=$(printf '%s' \"$url\" | sed -E 's#\\.git$##; s#:#/#g' "
+        "| awk -F/ '{print $(NF-1)}'); "
+        "test -n \"$owner\"; "
+        # (2) Rewrite the scaffolded `.beads` config sync.remote placeholder so
+        #     no literal ORIGIN_OWNER survives in the tracker config.
+        "if [ -f .beads/config.yaml ]; then "
+        "sed -i \"s#ORIGIN_OWNER#${owner}#g\" .beads/config.yaml; fi; "
+        # (3) Rewrite the FUNCTIONAL bd dolt remote (the one `bd dolt remote
+        #     list` reports and `bd bootstrap` clones from): drop the stale
+        #     ORIGIN_OWNER remote and re-add it under the derived owner so the
+        #     bootstrap clone target is <owner>/<bc>-beads.
+        f"remote_url=\"git+https://github.com/${{owner}}/{remote_tail}\"; "
+        "bd dolt remote remove origin 2>/dev/null || true; "
+        "bd dolt remote add origin \"$remote_url\" || true"
+    )
+
 # ---------------------------------------------------------------------------
 # Agent-vault credential broker model (ADR-026, lead-hxb8 / lead-v4ih)
 # ---------------------------------------------------------------------------
@@ -2496,6 +2541,30 @@ class BcContainerController:
                  f"{AGENT_CONTAINER_USER}:{AGENT_CONTAINER_USER}",
                  CONTAINER_WORKSPACE],
             )
+
+            # lead-r34c / GAP B — RESOLVE the scaffolded ORIGIN_OWNER placeholder
+            # to the derived GitHub owner and WRITE it into the in-container
+            # `.beads` config sync.remote + the functional bd dolt remote BEFORE
+            # `bd bootstrap` runs.  The scaffold was pushed with the literal
+            # ORIGIN_OWNER placeholder (correct at scaffold time — no origin
+            # owner was known yet); without this writeback `bd bootstrap` clones
+            # the stale `git+https://github.com/ORIGIN_OWNER/<bc>-beads.git` URL
+            # and fatal-fails "Repository not found" (observed live in David's
+            # 2026-07-07 shopsystem-knowledge standup).  The owner is derived
+            # from the CONTAINER's `/workspace` git origin (the real origin the
+            # clone left behind), so by bootstrap time no literal ORIGIN_OWNER
+            # segment survives in the functional remote and its clone target is
+            # `<owner>/<bc>-beads`.  Best-effort: a config already carrying a
+            # resolved owner makes this an idempotent no-op.  Run as vscode (the
+            # workspace + `.beads` are vscode-owned after the chown above) so the
+            # `.beads` writes stay agent-usable.
+            self._driver.exec_run(
+                container,
+                ["bash", "-lc",
+                 _resolve_origin_owner_writeback_script(bc_name)],
+                user=AGENT_CONTAINER_USER,
+            )
+
             boot_result = self._driver.exec_run(
                 container,
                 ["bash", "-lc",
