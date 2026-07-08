@@ -27,6 +27,7 @@ from tests.fake_driver import (
     FakeRegistryDriver,
     is_bd_bootstrap_command,
     _is_empty_remote_seed_command,
+    _is_origin_owner_writeback_command,
     _is_repo_create_command,
 )
 from tests.fake_github_driver import FakeGitHubDriver
@@ -7774,6 +7775,196 @@ def assert_gh_repo_create_exits_zero(slug, ctx, fake_driver):
     assert fake_driver.beads_repo_created(container_name), (
         "The absent tracker repo must end up CREATED (viewable) after the "
         f"provisioning exec; container={container_name!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# lead-r34c / GAP B — the in-container standup must RESOLVE the scaffolded
+# ORIGIN_OWNER placeholder to the derived GitHub owner (parsed from the
+# container's /workspace git origin) and WRITE it into the .beads config
+# sync.remote AND the functional bd dolt remote BEFORE `bd bootstrap`, so the
+# bootstrap clone target is <owner>/<bc>-beads and no literal ORIGIN_OWNER
+# survives.  Empirically observed (David's 2026-07-07 shopsystem-knowledge
+# standup): the scaffold was pushed with the ORIGIN_OWNER placeholder (correct
+# at scaffold time), the standup resolved the owner to dstengle for the
+# gh-create step but did NOT write it back into the in-container .beads config,
+# so `bd bootstrap` cloned the stale ORIGIN_OWNER URL and failed "Repository not
+# found".  Additive to @scenario_hash:90caf5523e7d5ce0 (NOT retired): that pin
+# binds repo creation + seeding; this pin (8ca9508bd7f5fecf) tightens the
+# previously-unpinned runtime owner-writeback.  Fidelity binds to the executable
+# standup provisioning surface PLUS the in-container config observed via
+# `bd dolt remote list` / the `bd bootstrap` clone target, NOT a live clone.
+# ---------------------------------------------------------------------------
+
+@given(parsers.parse(
+    'a new BC whose shop-name slug is "{bc}" is stood up from a lead whose '
+    'GitHub owner resolves to "{owner}"'
+))
+def standup_new_bc_owner_resolves(bc, owner, ctx, fake_driver, controller, tmp_path):
+    # Concrete binding of the abstract <bc>/<owner> placeholders: stand up the
+    # launcher BC itself, whose in-container /workspace git origin resolves to
+    # the configured beads remote org (the same owner the real
+    # github.com/<org>/shopsystem-bc-launcher origin carries).
+    from bc_launcher.controller import BEADS_REMOTE_ORG
+    bc_name = "shopsystem-bc-launcher"
+    ctx["driver"] = fake_driver
+    ctx["controller"] = controller
+    ctx["bc_name"] = bc_name
+    ctx["repo_url"] = f"https://github.com/shopsystem/{bc_name}.git"
+    ctx["container_name"] = f"bc-{bc_name}"
+    # The derived owner the container's /workspace git origin resolves to — the
+    # concrete binding of the scenario's abstract "<owner>".
+    ctx["derived_owner"] = BEADS_REMOTE_ORG
+    credential_home = tmp_path / "fake_home"
+    credential_home.mkdir(parents=True, exist_ok=True)
+    (credential_home / ".claude").mkdir(parents=True, exist_ok=True)
+    (credential_home / ".config" / "gh").mkdir(parents=True, exist_ok=True)
+    gitconfig = credential_home / ".gitconfig"
+    if not gitconfig.exists():
+        gitconfig.write_text("")
+    ctx["credential_home"] = credential_home
+
+
+@given(parsers.parse(
+    'its scaffolded beads tracker config was pushed carrying the literal '
+    '"{placeholder}" placeholder in the tracker remote because no origin owner '
+    'was known at scaffold time'
+))
+def standup_scaffold_carries_owner_placeholder(placeholder, ctx, fake_driver):
+    assert placeholder == "ORIGIN_OWNER", (
+        f"GAP B pins the ORIGIN_OWNER placeholder; got {placeholder!r}"
+    )
+    container_name = f"bc-{ctx['bc_name']}"
+    # The scaffolded functional bd dolt remote carries the literal ORIGIN_OWNER
+    # placeholder; the container's /workspace git origin resolves to the derived
+    # owner the standup must write back before bootstrap.
+    fake_driver.set_beads_remote_owner_placeholder(
+        container_name, ctx["derived_owner"]
+    )
+    # A committed prefix so bootstrap can derive a usable issue_prefix once the
+    # owner-writeback lets the clone succeed.
+    fake_driver.set_committed_beads_prefix(container_name, "bclaunch")
+    ctx["committed_beads_prefix"] = "bclaunch"
+    ctx["container_name"] = container_name
+
+
+@when(parsers.parse(
+    "the BC-standup flow provisions the in-container beads tracker and runs "
+    '"bd bootstrap"'
+))
+def standup_provisions_in_container_and_bootstraps(
+    ctx, fake_driver, controller, tmp_path
+):
+    import yaml as _yaml
+    bc_name = ctx["bc_name"]
+    manifest_path = tmp_path / "bc-manifest.yaml"
+    manifest_path.write_text(_yaml.dump({
+        "product": "shopsystem product",
+        "bcs": [{"name": bc_name, "remote": ctx["repo_url"], "role": "bc"}],
+    }))
+    result = controller.launch(
+        bc_name=bc_name,
+        repo_url=ctx["repo_url"],
+        manifest_path=manifest_path,
+        credential_home=ctx.get("credential_home"),
+    )
+    ctx["result"] = result
+    ctx["container_name"] = f"bc-{bc_name}"
+
+
+@then(parsers.parse(
+    'the in-container tracker\'s functional bd dolt remote, the one '
+    '"bd dolt remote list" reports and "bd bootstrap" clones from, contains no '
+    'literal "{placeholder}" segment'
+))
+def assert_functional_remote_no_placeholder(placeholder, ctx, fake_driver):
+    container_name = ctx["container_name"]
+    # A resolve-and-writeback exec must have run BEFORE bd bootstrap (its op
+    # index must precede the first bd bootstrap exec).
+    calls = [c for c in fake_driver.exec_calls if c.container == container_name]
+    writeback_idx = next(
+        (i for i, c in enumerate(calls)
+         if _is_origin_owner_writeback_command(c.command)),
+        None,
+    )
+    bootstrap_idx = next(
+        (i for i, c in enumerate(calls) if is_bd_bootstrap_command(c.command)),
+        None,
+    )
+    assert writeback_idx is not None, (
+        "The standup must run an ORIGIN_OWNER->derived-owner writeback exec "
+        "(resolve the owner from /workspace git origin and rewrite the .beads "
+        "config + functional bd dolt remote) BEFORE bd bootstrap (lead-r34c); "
+        f"no writeback exec ran. calls={[c.command for c in calls]!r}"
+    )
+    assert bootstrap_idx is not None and writeback_idx < bootstrap_idx, (
+        "The ORIGIN_OWNER writeback must PRECEDE bd bootstrap so the clone "
+        f"target is already resolved; writeback_idx={writeback_idx!r} "
+        f"bootstrap_idx={bootstrap_idx!r}"
+    )
+    # The functional remote `bd dolt remote list` reports carries no ORIGIN_OWNER
+    # segment after the writeback.
+    remote_list = fake_driver.exec_run(
+        container_name, ["bd", "dolt", "remote", "list"]
+    )
+    assert placeholder not in (remote_list.stdout or ""), (
+        f"`bd dolt remote list` must not report a {placeholder!r} owner segment "
+        f"after the standup's writeback; got {remote_list.stdout!r}"
+    )
+    owner = fake_driver.beads_functional_remote_owner(container_name)
+    assert owner and placeholder not in owner, (
+        "The functional bd dolt remote's owner segment must not be the "
+        f"{placeholder!r} placeholder after the writeback; got owner={owner!r}"
+    )
+    url = fake_driver.beads_functional_remote_url(container_name)
+    assert placeholder not in url, (
+        f"The functional bd dolt remote URL must carry no {placeholder!r} "
+        f"segment after the writeback; got url={url!r}"
+    )
+
+
+@then(parsers.parse(
+    'that functional bd dolt remote\'s owner segment equals the derived GitHub '
+    'owner "{owner}" so its clone target is "{clone_target}"'
+))
+def assert_functional_remote_owner_is_derived(owner, clone_target, ctx, fake_driver):
+    container_name = ctx["container_name"]
+    derived = ctx["derived_owner"]
+    got = fake_driver.beads_functional_remote_owner(container_name)
+    assert got == derived, (
+        "The functional bd dolt remote's owner segment must equal the derived "
+        f"GitHub owner {derived!r} (resolved from /workspace git origin); "
+        f"got {got!r}"
+    )
+    # The clone target the bootstrap uses is <owner>/<bc>-beads under the
+    # derived owner — the concrete resolution of the scenario's "<owner>/<bc>".
+    url = fake_driver.beads_functional_remote_url(container_name)
+    assert f"/{derived}/" in url, (
+        f"The functional remote URL must carry the derived owner {derived!r} in "
+        f"its owner segment so the clone target is <owner>/<bc>-beads; got {url!r}"
+    )
+
+
+@then(parsers.parse(
+    '"bd bootstrap" for the new BC exits zero instead of failing '
+    '"Repository not found" against an "{bad_target}" URL'
+))
+def assert_bootstrap_exits_zero_not_origin_owner(bad_target, ctx, fake_driver):
+    container_name = ctx["container_name"]
+    result = ctx["result"]
+    combined = (result.stdout or "") + (result.stderr or "")
+    assert fake_driver.beads_working_set_provisioned(container_name), (
+        "After the standup resolves ORIGIN_OWNER to the derived owner before "
+        "bootstrap, `bd bootstrap` must succeed and provision the working set "
+        f"(not fatal on 'Repository not found'); output={combined!r}"
+    )
+    assert "ORIGIN_OWNER" not in combined, (
+        "The launch must surface no ORIGIN_OWNER clone target after the "
+        f"writeback; output={combined!r}"
+    )
+    assert "bd bootstrap failed" not in combined, (
+        "The subsequent bd bootstrap must exit zero (no warn-and-strand) after "
+        f"the standup's owner-writeback (lead-r34c); output={combined!r}"
     )
 
 

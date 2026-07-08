@@ -70,3 +70,12 @@ Feature: bc-container launch bd-bootstrap is bootstrap-resilient and never fatal
     When the standup runs its beads-tracker provisioning exec that invokes "gh repo create <owner>/<bc>-beads --private --add-readme"
     Then that provisioning exec's environment sets a non-empty GH_TOKEN placeholder so gh authenticates through the agent-vault proxy instead of exiting non-zero with a "gh auth login" or "populate GH_TOKEN" error
     And the "gh repo create" invocation exits zero and the "<owner>/<bc>-beads" tracker repository exists and is viewable
+
+  @scenario_hash:8ca9508bd7f5fecf @bc:shopsystem-bc-launcher
+  Scenario: after standup the new BC's functional bd dolt remote resolves to the derived owner so bd bootstrap clones <owner>/<bc>-beads instead of the ORIGIN_OWNER placeholder
+    Given a new BC whose shop-name slug is "<bc>" is stood up from a lead whose GitHub owner resolves to "<owner>"
+    And its scaffolded beads tracker config was pushed carrying the literal "ORIGIN_OWNER" placeholder in the tracker remote because no origin owner was known at scaffold time
+    When the BC-standup flow provisions the in-container beads tracker and runs "bd bootstrap"
+    Then the in-container tracker's functional bd dolt remote, the one "bd dolt remote list" reports and "bd bootstrap" clones from, contains no literal "ORIGIN_OWNER" segment
+    And that functional bd dolt remote's owner segment equals the derived GitHub owner "<owner>" so its clone target is "<owner>/<bc>-beads"
+    And "bd bootstrap" for the new BC exits zero instead of failing "Repository not found" against an "ORIGIN_OWNER/<bc>-beads" URL
