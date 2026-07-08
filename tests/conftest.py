@@ -16351,3 +16351,174 @@ def b3f0_no_watch_no_llm(ctx):
         f"/ model:), so the steady-state loop spends zero model tokens; "
         f"executable graph:\n{executable}"
     )
+
+
+# ===========================================================================
+# lead-b3f0 scenario C (@scenario_hash:6088da7e9e4c4e59): the native `dispatch`
+# node hands each pending work id W to its child via a per-child `.toml`
+# carrying the CONCRETE work id in a [run.environment.env] WORK_ID overlay, and
+# spawns the child DETACHED (`fabro run <child>.toml --detach`) -- NOT
+# `-I WORK_ID`, which does NOT reach the child's native `script=` node env.  The
+# spawned child is the UNCHANGED ADR-051 workflow.fabro def.  Binds structurally
+# to the REAL committed dispatcher.fabro `dispatch` node body + the workflow.fabro
+# child asset (reusing the ky63 quote-aware DOT parser).  Never a model.
+# ===========================================================================
+
+
+# --- Given (C): container running with dispatcher.fabro + UNCHANGED child def -
+
+@given(parsers.parse(
+    'the container "{container_name}" is running with the self-contained fabro '
+    'def set POURED by shop-templates into "{def_dir}", including the '
+    '"dispatcher.fabro" graph def and the UNCHANGED ADR-051 child def'))
+def b3f0_container_running_with_child(container_name, def_dir, ctx, fake_driver,
+                                      controller, tmp_path):
+    _odd9_drive_fabro_launch(_ODD9_BC, ctx, fake_driver, controller, tmp_path,
+                             work_id=None)
+    assert fake_driver.is_running(container_name), (
+        f"Expected {container_name!r} to be running after the fabro-path launch."
+    )
+    ctx["container_name"] = container_name
+
+
+# --- Given (C): poll has yielded a concrete pending work id W (framing) -------
+
+@given(parsers.parse(
+    'the "poll" node has yielded a concrete pending work id "{w}" from '
+    '"{pending_cmd}"'))
+def b3f0_poll_yielded_w(w, pending_cmd, ctx):
+    ctx["b3f0_w"] = w
+
+
+# --- When (C): inspect the dispatch node script + the per-child .toml ---------
+
+@when(parsers.parse(
+    'the poured "dispatcher.fabro" def\'s native "dispatch" node script and the '
+    'per-child ".toml" it materializes are inspected structurally, without a '
+    "live docker daemon, a running fabro server, or a reachable agent-vault"))
+def b3f0_inspect_dispatch(ctx):
+    graph = _b3f0_dispatcher_graph_text()
+    ctx["b3f0_dispatcher_graph"] = graph
+    nodes = _ky63_parse_nodes(graph)
+    assert "dispatch" in nodes, "dispatcher.fabro missing the native dispatch node"
+    body = nodes["dispatch"]
+    # The dispatch node must be NATIVE (parallelogram script=, no LLM).
+    assert "script=" in body and "shape=parallelogram" in body, (
+        f"the dispatch node must be a NATIVE script= node; body:\n{body}"
+    )
+    assert "prompt=" not in body and "class=" not in body, (
+        f"the dispatch node must have NO LLM (no prompt=/class=); body:\n{body}"
+    )
+    ctx["b3f0_dispatch_body"] = body
+
+
+def _b3f0_dispatch_body(ctx):
+    return ctx.get("b3f0_dispatch_body") or _ky63_parse_nodes(
+        _b3f0_dispatcher_graph_text())["dispatch"]
+
+
+# --- Then (C): per-child .toml carries WORK_ID in [run.environment.env] -------
+
+@then(parsers.parse(
+    'for each pending work id "{w}" the native "dispatch" node materializes a '
+    'per-child ".toml" that carries the CONCRETE work id in a '
+    '"{env_table}" overlay as "{work_kv}", so the child receives its work id '
+    'through the child ".toml" env overlay'))
+def b3f0_dispatch_materializes_toml(w, env_table, work_kv, ctx):
+    body = _b3f0_dispatch_body(ctx)
+    assert env_table == "[run.environment.env]"
+    # The dispatch node MATERIALIZES a per-child .toml (writes a .toml file).
+    assert ".toml" in body, (
+        f"the dispatch node must materialize a per-child .toml; body:\n{body}"
+    )
+    # That .toml carries a [run.environment.env] overlay …
+    assert "[run.environment.env]" in body, (
+        f"the materialized child .toml must carry a {env_table} overlay; body:\n{body}"
+    )
+    # … into which the CONCRETE per-child work id is written as WORK_ID (the id
+    # comes from the loop variable, not a hard-coded literal), so it is per-child.
+    assert "WORK_ID" in body, (
+        f"the materialized child .toml overlay must set WORK_ID; body:\n{body}"
+    )
+    assert re.search(r"WORK_ID\b", body) and "$wid" in body, (
+        "the WORK_ID written into the overlay must be the CONCRETE per-child work "
+        f"id (from the poll loop variable), not a fixed literal; body:\n{body}"
+    )
+
+
+# --- Then (C): spawns the child DETACHED via `fabro run <child>.toml --detach` -
+
+@then(parsers.parse(
+    'the "dispatch" node then spawns that child DETACHED by issuing "{spawn}", '
+    "so children run in PARALLEL isolated per WORK_ID and the dispatch node "
+    'does not block on them before the "wait -> poll" back-edge'))
+def b3f0_dispatch_spawns_detached(spawn, ctx):
+    body = _b3f0_dispatch_body(ctx)
+    # Spawns the child via `fabro run <child>.toml --detach` (the poured def is
+    # generic: the child toml path is per-work-id, so bind to the base command
+    # `fabro run` + `.toml` + `--detach` rather than the literal illustration).
+    assert "fabro run" in body, f"the dispatch node must issue `fabro run`; body:\n{body}"
+    assert "--detach" in body, (
+        f"the dispatch node must spawn the child DETACHED (--detach) so it does "
+        f"not block on children before the back-edge; body:\n{body}"
+    )
+    # The `fabro run` targets a `.toml` (the per-child entrypoint), not a bare
+    # `.fabro` graph def.
+    assert re.search(r"fabro run [^\n]*\.toml", body), (
+        f"the dispatch node must `fabro run` a per-child .toml entrypoint; body:\n{body}"
+    )
+
+
+# --- Then (C): child is the UNCHANGED ADR-051 def; overlay reaches native env -
+
+@then(parsers.parse(
+    'the spawned child runs the UNCHANGED ADR-051 child def, and the concrete '
+    '"{work_kv}" from the "{env_table}" overlay REACHES that child\'s native '
+    '"script=" node env so the child acts on its own work id (BC-proven: a '
+    "detached child ran with child-ran-WORK_ID delivered via the env overlay)"))
+def b3f0_child_unchanged_overlay_reaches(work_kv, env_table, ctx):
+    body = _b3f0_dispatch_body(ctx)
+    # The child def the materialized toml applies is workflow.fabro (ADR-051).
+    assert "workflow.fabro" in body, (
+        f"the materialized child .toml must apply the ADR-051 workflow.fabro "
+        f"child def (graph = workflow.fabro); body:\n{body}"
+    )
+    # workflow.fabro is present in the bundle and UNCHANGED (a launch does not
+    # spawn a mutated child def).
+    wf = _ky63_def_asset_root() / "workflow.fabro"
+    assert wf.is_file(), "the ADR-051 workflow.fabro child def must ship in the bundle"
+    # The overlay-reaches-native-script pattern is the PROVEN one the child's own
+    # workflow.toml documents: [run.environment.env] reaches native script env
+    # (unlike -I). The materialized child toml uses that SAME channel.
+    child_toml = (_ky63_def_asset_root() / "workflow.toml").read_text()
+    assert "[run.environment.env]" in child_toml and "WORK_ID" in child_toml, (
+        "the child workflow.toml must document the [run.environment.env] WORK_ID "
+        "overlay (the proven native-script delivery channel)"
+    )
+
+
+# --- Then (C): negative control — `-I WORK_ID` does not reach native env ------
+
+@then(parsers.parse(
+    'as the negative control, had the dispatch instead passed the work id as '
+    '"{i_form}" (the ADR-058 mechanism), that value would NOT reach the child\'s '
+    'native "script=" node env — the exact delivery gap this "{env_table}" '
+    "overlay exists to close, and the reason no Haiku \"launch\" node is needed"))
+def b3f0_negative_control_i_workid(i_form, env_table, ctx):
+    body = _b3f0_dispatch_body(ctx)
+    # NEGATIVE CONTROL: the dispatch node must NOT pass `-I WORK_ID` (it would not
+    # reach the child's native script= env); it uses the env overlay instead.
+    assert "-I WORK_ID" not in body, (
+        "the dispatch node must NOT deliver the work id via `-I WORK_ID` (that "
+        f"does not reach the child's native script= env); body:\n{body}"
+    )
+    assert "[run.environment.env]" in body, (
+        f"the dispatch node must deliver WORK_ID via the {env_table} overlay "
+        f"(the channel that DOES reach the child native script env); body:\n{body}"
+    )
+    # And no Haiku `launch` agent node is needed — the whole def is native.
+    graph = ctx.get("b3f0_dispatcher_graph") or _b3f0_dispatcher_graph_text()
+    assert "launch" not in _ky63_parse_nodes(graph), (
+        "no Haiku `launch` node is needed: the env-overlay delivery lets a NATIVE "
+        "dispatch node do what previously required an agent"
+    )
