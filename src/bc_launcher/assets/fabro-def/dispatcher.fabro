@@ -56,11 +56,20 @@ digraph BcShopDispatcher {
           label="poll: list pending inbox work ids (non-blocking)",
           script="shop-msg pending inbox --bc \"$BC_NAME\""]
 
-    // ---------- dispatch: NATIVE, acts on the pending work ids (NO LLM) ------
-    // Scenario C elaborates the per-child .toml env-overlay fan-out here.
+    // ---------- dispatch: NATIVE fan-out, one detached child per work_id -----
+    // Scenario C (@scenario_hash:6088da7e9e4c4e59). Reads the AUTHORITATIVE
+    // pending set from `shop-msg pending inbox --bc $BC_NAME`; per pending work
+    // id W it MATERIALIZES a per-child `.toml` (child-$wid.toml) carrying the
+    // CONCRETE work id in a [run.environment.env] WORK_ID overlay -- the channel
+    // that REACHES the child's native script= node env (`-I WORK_ID` does NOT)
+    // -- then spawns `fabro run child-$wid.toml --detach`. The child applies the
+    // UNCHANGED ADR-051 workflow.fabro def. Children run in PARALLEL isolated
+    // per WORK_ID; dispatch does NOT block on them before the wait->poll
+    // back-edge. Single-level \" DOT escapes only (the proven poll/watch idiom);
+    // every literal TOML `"` is written via single-quoted echo fragments.
     dispatch [shape=parallelogram, deterministic=true,
-              label="dispatch: act on each pending work id",
-              script="shop-msg pending inbox --bc \"$BC_NAME\" | awk '{print $1}' | while read -r wid; do [ -n \"$wid\" ] || continue; echo \"dispatch $wid\"; done"]
+              label="dispatch: fan out one detached workflow.fabro child per pending work id",
+              script="shop-msg pending inbox --bc \"$BC_NAME\" | awk '{print $1}' | while read -r wid; do [ -n \"$wid\" ] || continue; { echo '[workflow]'; echo 'graph = \"workflow.fabro\"'; echo '[run.inputs]'; echo 'BC_NAME = \"'\"$BC_NAME\"'\"'; echo 'WORK_ID = \"'\"$wid\"'\"'; echo '[run.environment.env]'; echo 'BC_NAME = \"'\"$BC_NAME\"'\"'; echo 'WORK_ID = \"'\"$wid\"'\"'; echo '[run.environment]'; echo 'id = \"local\"'; echo '[environments.local]'; echo 'provider = \"local\"'; echo '[run.pull_request]'; echo 'enabled = false'; } > \"child-$wid.toml\"; fabro run \"child-$wid.toml\" --detach; done"]
 
     // ---------- wait: NATIVE short sleep before the back-edge (NO LLM) -------
     wait [shape=parallelogram, deterministic=true,
