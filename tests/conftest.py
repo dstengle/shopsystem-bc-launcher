@@ -16996,8 +16996,8 @@ def l3zzu_idemp_negctl(ctx):
 # that REACHES the child's native script= env; `-I WORK_ID` does NOT) and spawns
 # the child DETACHED (`fabro run child-W.toml --detach`).  The child runs the
 # UNCHANGED ADR-051 workflow.fabro def -- preserving the lead-b3f0 delivery
-# guarantee (which retired 6088da7e9e4c4e59 re-pins through the ACP node).  Binds
-# directly to the NON-LLM dispatch_acp_agent.py delivery contract
+# guarantee that the retired lead-b3f0 scenario C re-pins through the ACP node.
+# Binds directly to the NON-LLM dispatch_acp_agent.py delivery contract
 # (materialize_child_config / spawn_command) + the UNCHANGED child asset bytes.
 # Never a model.
 # ===========================================================================
