@@ -272,7 +272,26 @@ def _empty_remote_seed_script(beads_remote_url: str) -> str:
     commit to the `<bc>-beads.git` GitHub repo (agent-vault proxy injects
     creds via HTTPS_PROXY), then `bd dolt remote add origin <url>` +
     `bd dolt push`, and verify `refs/dolt/data` appears in `git ls-remote`.
+
+    lead-ktl0 / GAP E — the RAW-git operations (`git push`, `git ls-remote`)
+    must target the PLAIN `https://` tracker URL, NOT the `git+https://` DOLT
+    remote URL.  `git+https` is a Dolt-tooling transport convention; passed to
+    raw git it errors "git: 'remote-git+https' is not a git command; fatal:
+    remote helper 'git+https' aborted session" (exit 128).  Under `set -e` that
+    FATAL push aborted the seed BEFORE `bd dolt push` (the step that actually
+    seeds the Dolt data), stranding the tracker so the retried `bd bootstrap`
+    failed "contains no Dolt data".  So: (a) the raw-git ops use the plain
+    `https://` URL (strip the `git+` prefix), and (b) the git-side push is made
+    NON-FATAL (`|| true`) — `create-absent` already `gh repo create
+    --add-readme`'d the initial branch/commit, so the git-side push is
+    redundant/optional and its failure must never abort the seed before
+    `bd dolt push` runs.  Only the raw-git ops need the plain scheme; the
+    `bd dolt remote add origin` keeps the `git+https://` DOLT remote URL — that
+    is the correct scheme for bd's own dolt tooling.
     """
+    # Strip the `git+` transport prefix so RAW git accepts the URL; the dolt
+    # remote itself keeps the original `git+https://` scheme below.
+    git_push_url = beads_remote_url.removeprefix("git+")
     return (
         f"set -e; cd {CONTAINER_WORKSPACE}; "
         # Materialize the committed registry into a throwaway init tree so the
@@ -283,13 +302,17 @@ def _empty_remote_seed_script(beads_remote_url: str) -> str:
         "git -C \"$tmp\" add -A; "
         "git -C \"$tmp\" -c user.email=bc-launcher@shopsystem "
         "-c user.name=bc-launcher commit -m 'seed beads remote' >/dev/null; "
-        f"git -C \"$tmp\" push \"{beads_remote_url}\" main >/dev/null; "
-        # Point the local bd working set at the now-initialized remote and push
-        # the embedded-Dolt working set up.
+        # NON-FATAL raw-git push to the PLAIN https:// URL: redundant (the
+        # branch already exists) and must not abort the seed under set -e.
+        f"git -C \"$tmp\" push \"{git_push_url}\" main >/dev/null 2>&1 || true; "
+        # Point the local bd working set at the now-initialized DOLT remote
+        # (git+https:// — bd's own tooling handles that scheme) and push the
+        # embedded-Dolt working set up.  THIS is the step that seeds refs/dolt/*.
         f"bd dolt remote add origin {beads_remote_url} || true; "
         "bd dolt push || true; "
-        # Verify the remote now carries Dolt data refs (init succeeded).
-        f"git ls-remote {beads_remote_url} 'refs/dolt/*' | grep -q refs/dolt"
+        # Verify the remote now carries Dolt data refs (raw git ls-remote, so
+        # the PLAIN https:// URL again).
+        f"git ls-remote {git_push_url} 'refs/dolt/*' | grep -q refs/dolt"
     )
 
 
