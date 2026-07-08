@@ -16052,154 +16052,220 @@ def _model_create_fresh_seed_outcome(create_fresh_before_seed: bool) -> dict:
     }
 
 
-@given(
-    'a new BC is stood up via "create-bc" whose beads tracker remote at '
-    '"<owner>/<bc>-beads" exists but is empty of Dolt data, and whose '
-    'committed ".beads/metadata.json" names a definite issue_prefix'
+# ---------------------------------------------------------------------------
+# lead-tc38 / GAP H (ROOT, supersedes GAP G e3a0ec19298e7ce7) — the empty-remote
+# seed must UNCONFIGURE sync.remote from .beads/config.yaml BEFORE `bd init -p`
+# create-fresh, then RESTORE it before the `bd dolt remote add`/`bd dolt push`
+# seed.  GAP G's create-fresh `bd init -p <prefix>` ran WHILE `sync.remote` was
+# STILL configured to the derived `<owner>/<bc>-beads` remote (which EXISTS but
+# is EMPTY of Dolt data).  With `sync.remote` configured, `bd init` (like
+# `bd bootstrap`) CLONES the empty remote and HARD-FAILS "contains no Dolt
+# data"; the create-fresh never happens.  GAP G's coverage FALSE-GREENED
+# because its fixture OMITTED the configured-empty-remote precondition; confirmed
+# in a real in-container launch (v0.3.56).
+#
+# These steps materialise the CONFIGURED-empty-remote precondition GAP G omitted
+# (a real-shaped `.beads/config.yaml` carrying a live `sync.remote:` line) and
+# EXECUTE the seed's create-fresh/seed body with `bd` stubbed to record the
+# `.beads/config.yaml` contents at each step, asserting the EXECUTED ordering:
+# sync.remote ABSENT at `bd init` time (unconfigured first) and RESTORED by the
+# `bd dolt remote add`/`bd dolt push` time.  Scenario @scenario_hash:
+# 5351a4a8071b594f.  Additive to chain predecessors (GAP E fa1bb9d7e6653b35,
+# GAP D 6fc82a7375ed8aa9 / ada742d33c996d34, GAP B 8ca9508bd7f5fecf, GAP A
+# c1abb192dd2a5eae, GAP G-derived prefix extraction) — only e3a0ec19298e7ce7 is
+# retired.
+# ---------------------------------------------------------------------------
+
+_GAPH_SYNC_REMOTE_LINE = (
+    'sync.remote: "git+https://github.com/dstengle/shopsystem-knowledge-beads.git"'
 )
-def gapg_empty_remote_committed_metadata(ctx):
-    """Record the standup pre-state (lead-vb6j / ROOT / GAP G): the tracker
-    remote `<owner>/<bc>-beads` EXISTS (git branch/commit present) but carries
-    NO Dolt data, and the cloned repo's committed `.beads/metadata.json` names
-    a definite issue_prefix the create-fresh must adopt.  The surface under
-    observation is the executable `_empty_remote_seed_script` orchestration
-    ordering, so a concrete `<owner>/<bc>` is used to materialise a well-formed
-    configured DOLT (`git+https://`) remote URL."""
-    ctx["gapg_owner"] = "dstengle"
-    ctx["gapg_bc"] = "shopsystem-knowledge"
-    ctx["gapg_dolt_url"] = (
-        f"git+https://github.com/{ctx['gapg_owner']}/{ctx['gapg_bc']}-beads.git"
+
+
+def _run_gaph_seed_body(script: str, workspace, probe_dir):
+    """Execute the seed's create-fresh/seed body (committed-prefix extraction
+    through the dolt seed, minus the live `git ls-remote` verify tail) with `bd`
+    stubbed to record `.beads/config.yaml` at each step it runs, so the EXECUTED
+    unconfigure -> init -> restore -> seed ordering can be asserted rather than
+    mere string presence (lead-tc38 / GAP H)."""
+    start = script.index("gapg_prefix=")
+    end = script.index("git ls-remote", start)
+    fragment = script[start:end]
+    prelude = (
+        f'PROBE="{probe_dir}"; '
+        'bd() { '
+        '  if [ "$1" = "init" ]; then cp .beads/config.yaml "$PROBE/at_init.yaml"; return 0; fi; '
+        '  if [ "$1" = "dolt" ] && [ "$2" = "remote" ]; then cp .beads/config.yaml "$PROBE/at_remote_add.yaml"; return 0; fi; '
+        '  if [ "$1" = "dolt" ] && [ "$2" = "push" ]; then cp .beads/config.yaml "$PROBE/at_push.yaml"; return 0; fi; '
+        '  return 0; '
+        '}; '
+    )
+    return subprocess.run(
+        ["bash", "-c", prelude + fragment],
+        cwd=str(workspace),
+        capture_output=True,
+        text=True,
     )
 
 
-@when(
-    "the standup's beads provisioning orchestration runs its bootstrap-and-seed "
-    "ordering"
+def _model_gaph_bd_init_outcome(sync_remote_configured_at_init: bool) -> dict:
+    """Reference model of the negative control (the scenario's last And): if
+    `bd init -p` runs WHILE `sync.remote` is configured to the empty remote it
+    CLONES that remote and HARD-FAILS "contains no Dolt data"; only with
+    sync.remote UNCONFIGURED does create-fresh succeed (lead-tc38 / GAP H)."""
+    if sync_remote_configured_at_init:
+        return {"bd_init": "clone-hard-fail", "bd_create": "issue_prefix-config-missing"}
+    return {"bd_init": "create-fresh", "bd_create": "prefixed-id"}
+
+
+@given(
+    'a scaffolded BC whose ".beads/config.yaml" has "sync.remote" CONFIGURED to '
+    'the derived "<owner>/<bc>-beads" remote that exists but is EMPTY of Dolt '
+    'data, and whose committed ".beads/metadata.json" names a definite '
+    'issue_prefix in its "dolt_database" field'
 )
-def gapg_run_seed_ordering(ctx):
+def gaph_configured_empty_remote(ctx, tmp_path):
+    """Materialise the CONFIGURED-empty-remote precondition GAP G omitted
+    (lead-tc38 / GAP H): a `.beads` tree whose `config.yaml` carries a LIVE
+    `sync.remote:` line pointing at the derived `<owner>/<bc>-beads` tracker
+    remote (which exists but is EMPTY of Dolt data), plus a real-shaped
+    `metadata.json` naming the committed prefix in `dolt_database`."""
+    owner, bc = "dstengle", "shopsystem-knowledge"
+    ctx["gaph_owner"] = owner
+    ctx["gaph_bc"] = bc
+    ctx["gaph_dolt_url"] = f"git+https://github.com/{owner}/{bc}-beads.git"
+    ctx["gaph_committed_prefix"] = "shopsystem_knowledge"
+
+    ws = tmp_path / "gaph_ws"
+    beads = ws / ".beads"
+    beads.mkdir(parents=True)
+    (beads / "config.yaml").write_text(
+        "# Beads Configuration File\n"
+        "# the tracker remote line follows\n"
+        "\n"
+        + _GAPH_SYNC_REMOTE_LINE + "\n"
+    )
+    (beads / "metadata.json").write_text(
+        '{\n'
+        '  "database": "dolt",\n'
+        '  "backend": "dolt",\n'
+        '  "dolt_mode": "embedded",\n'
+        f'  "dolt_database": "{ctx["gaph_committed_prefix"]}",\n'
+        '  "project_id": "53d541df-a20b-4647-8639-ecfded13c9d3"\n'
+        '}\n'
+    )
+    (beads / "issues.jsonl").write_text(
+        '{"_type":"issue","id":"shopsystem_knowledge-a1b",'
+        '"title":"seed","status":"open","priority":1}\n'
+    )
+    # Precondition sanity: the fixture reproduces the configured-empty-remote
+    # state GAP G's false-green fixture omitted.
+    assert "sync.remote" in (beads / "config.yaml").read_text()
+    ctx["gaph_ws"] = ws
+    ctx["gaph_beads"] = beads
+
+
+@when("the standup's beads provisioning orchestration runs")
+def gaph_run_orchestration(ctx, tmp_path):
     """Materialise the executable `_empty_remote_seed_script` for the tracker's
-    configured DOLT (`git+https://`) remote and structurally extract its
-    create-fresh-from-metadata facts + ordering (lead-vb6j / ROOT / GAP G)."""
+    configured DOLT (`git+https://`) remote and EXECUTE its create-fresh/seed
+    body against the configured-empty-remote fixture, recording
+    `.beads/config.yaml` at each step (lead-tc38 / GAP H)."""
     from bc_launcher.controller import _empty_remote_seed_script
 
-    script = _empty_remote_seed_script(ctx["gapg_dolt_url"])
-    (
-        metadata_ref,
-        create_fresh_idx,
-        adopts_committed_prefix,
-        before_remote_add,
-        before_dolt_push,
-    ) = _parse_seed_create_fresh(script)
-    ctx["gapg_script"] = script
-    ctx["gapg_metadata_ref"] = metadata_ref
-    ctx["gapg_create_fresh_idx"] = create_fresh_idx
-    ctx["gapg_adopts_committed_prefix"] = adopts_committed_prefix
-    ctx["gapg_before_remote_add"] = before_remote_add
-    ctx["gapg_before_dolt_push"] = before_dolt_push
-    # The seed establishes a prefixed local DB create-fresh BEFORE its seed only
-    # when the create-fresh step exists, references metadata.json, adopts the
-    # committed prefix, and is ordered before both the remote-add and the push.
-    ctx["gapg_create_fresh_before_seed"] = (
-        create_fresh_idx != -1
-        and metadata_ref
-        and adopts_committed_prefix
-        and before_remote_add
-        and before_dolt_push
+    script = _empty_remote_seed_script(ctx["gaph_dolt_url"])
+    probe = tmp_path / "gaph_probe"
+    probe.mkdir()
+    result = _run_gaph_seed_body(script, ctx["gaph_ws"], probe)
+    assert result.returncode == 0, (
+        f"seed body execution failed: {result.stderr!r} (lead-tc38 / GAP H)"
+    )
+    ctx["gaph_script"] = script
+    ctx["gaph_probe"] = probe
+    ctx["gaph_at_init"] = probe / "at_init.yaml"
+    ctx["gaph_at_remote_add"] = probe / "at_remote_add.yaml"
+    ctx["gaph_at_push"] = probe / "at_push.yaml"
+
+
+@then(
+    'the standup FIRST unconfigures "sync.remote" by removing the "sync.remote" '
+    'line from ".beads/config.yaml", so that "bd init -p <prefix>" adopting the '
+    'committed metadata.json issue_prefix create-freshes a PREFIXED local dolt '
+    'database rather than attempting to CLONE the configured empty remote and '
+    'hard-failing'
+)
+def gaph_unconfigures_before_init(ctx):
+    """EXECUTED (lead-tc38 / GAP H): at `bd init -p` time the `sync.remote` line
+    must be GONE from `.beads/config.yaml`, so create-fresh runs with NO remote
+    configured and does NOT clone the empty remote and hard-fail 'contains no
+    Dolt data'.
+
+    RED teeth: pre-fix the seed never unconfigures sync.remote, so at `bd init`
+    time the line is still present and this assertion FAILS."""
+    at_init = ctx["gaph_at_init"]
+    assert at_init.exists(), (
+        "the seed body never reached `bd init` (lead-tc38 / GAP H)"
+    )
+    assert "sync.remote" not in at_init.read_text(), (
+        "sync.remote was STILL configured when `bd init -p` ran — `bd init` "
+        "would CLONE the empty remote and hard-fail 'contains no Dolt data' "
+        "(GAP G's false-green: init ran WITH the remote configured); the seed "
+        "must unconfigure sync.remote from .beads/config.yaml BEFORE bd init "
+        "(lead-tc38 / GAP H)"
+    )
+    # The create-fresh still adopts the COMMITTED prefix from metadata.json.
+    (metadata_ref, cf_idx, adopts_committed_prefix, _b_add, _b_push) = (
+        _parse_seed_create_fresh(ctx["gaph_script"])
+    )
+    assert metadata_ref and cf_idx != -1 and adopts_committed_prefix, (
+        "the create-fresh must still adopt the committed metadata.json "
+        "issue_prefix via `bd init -p \"$...\"` (lead-tc38 / GAP H)"
     )
 
 
 @then(
-    "the standup first establishes a PREFIXED local dolt database create-fresh "
-    'from the committed ".beads/metadata.json", adopting that committed '
-    "issue_prefix rather than one derived from the BC name, BEFORE it seeds the "
-    "remote"
+    'the standup THEN restores the "sync.remote" line, runs "bd dolt remote add '
+    'origin" against the git+https url, and "bd dolt push" so the tracker remote '
+    'carries Dolt data with "refs/dolt/*" refs present'
 )
-def gapg_create_fresh_before_seed(ctx):
-    """The REAL `_empty_remote_seed_script` must FIRST establish a PREFIXED
-    local dolt DB create-fresh from the committed `.beads/metadata.json`
-    (adopting the committed issue_prefix, NOT a BC-name-derived one), ordered
-    BEFORE the dolt remote is added and BEFORE `bd dolt push` (lead-vb6j / ROOT
-    / GAP G).
-
-    RED teeth: pre-fix the seed script has NO create-fresh-from-metadata step
-    (`bd bootstrap` clone-hard-fails the empty remote and no prefixed local DB
-    is established before the push), so `create_fresh_idx == -1` /
-    `metadata_ref` is False and these assertions FAIL; post-fix they pass.
-    """
-    assert ctx["gapg_metadata_ref"], (
-        "The real _empty_remote_seed_script must read the committed "
-        "`.beads/metadata.json` as the create-fresh prefix source, so the "
-        "create-fresh adopts the COMMITTED issue_prefix (lead-vb6j / ROOT / "
-        f"GAP G); script={ctx['gapg_script']!r}"
+def gaph_restores_then_seeds(ctx):
+    """EXECUTED (lead-tc38 / GAP H): by the time the dolt remote is (re)configured
+    and pushed, the `sync.remote` line must be back in `.beads/config.yaml`, and
+    the seed configures the git+https dolt remote and pushes refs/dolt/*."""
+    at_remote_add = ctx["gaph_at_remote_add"]
+    at_push = ctx["gaph_at_push"]
+    assert at_remote_add.exists(), (
+        "the seed body never reached `bd dolt remote add` (lead-tc38 / GAP H)"
     )
-    assert ctx["gapg_create_fresh_idx"] != -1, (
-        "The real _empty_remote_seed_script must establish a PREFIXED local "
-        "dolt DB create-fresh (`bd init`) — distinct from `bd bootstrap`, "
-        "which clones the configured remote and hard-fails 'contains no Dolt "
-        f"data' on an empty one (lead-vb6j / ROOT / GAP G); script="
-        f"{ctx['gapg_script']!r}"
+    assert at_push.exists(), (
+        "the seed body never reached `bd dolt push` (lead-tc38 / GAP H)"
     )
-    assert ctx["gapg_adopts_committed_prefix"], (
-        "The create-fresh must adopt the COMMITTED issue_prefix (a shell var "
-        "populated from `.beads/metadata.json`, `bd init -p \"$...\"`), NOT a "
-        "hard-coded BC-name-derived literal (lead-vb6j / ROOT / GAP G)"
+    assert _GAPH_SYNC_REMOTE_LINE in at_remote_add.read_text(), (
+        "sync.remote was NOT restored before `bd dolt remote add` — the seed "
+        "must restore the captured sync.remote line after bd init (lead-tc38 / "
+        "GAP H)"
     )
-    assert ctx["gapg_before_remote_add"], (
-        "The create-fresh must be ordered BEFORE `bd dolt remote add origin` — "
-        "the local DB is create-fresh'd with the dolt remote NOT yet "
-        "configured, so bd creates fresh instead of cloning the empty remote "
-        "(lead-vb6j / ROOT / GAP G)"
+    assert _GAPH_SYNC_REMOTE_LINE in at_push.read_text(), (
+        "sync.remote was NOT restored before `bd dolt push` (lead-tc38 / GAP H)"
     )
-    assert ctx["gapg_before_dolt_push"], (
-        "The create-fresh must be ordered BEFORE the `bd dolt push` seed step, "
-        "so the seed pushes a PREFIXED database (lead-vb6j / ROOT / GAP G)"
+    # The seed configures the git+https DOLT remote and pushes, verifying
+    # refs/dolt/* land.
+    script = ctx["gaph_script"]
+    assert f"bd dolt remote add origin {ctx['gaph_dolt_url']}" in script, (
+        "the seed must add the git+https dolt remote origin (lead-tc38 / GAP H); "
+        f"script={script!r}"
     )
-
-
-@then(
-    'the standup then seeds that prefixed local database to the tracker remote '
-    'with "bd dolt push", so the tracker remote carries Dolt data with '
-    '"refs/dolt/*" refs present'
-)
-def gapg_seeds_prefixed_db(ctx):
-    """After the create-fresh, the seed must `bd dolt push` the now-prefixed
-    local DB to the tracker remote and verify refs/dolt/* land (lead-vb6j /
-    ROOT / GAP G).  Because the REAL script establishes the create-fresh BEFORE
-    the push, its outcome models as refs/dolt/* present."""
-    script = ctx["gapg_script"]
     assert "bd dolt push" in script, (
-        "The seed must `bd dolt push` the prefixed local DB to the tracker "
-        f"remote (lead-vb6j / ROOT / GAP G); script={script!r}"
+        "the seed must `bd dolt push` to seed refs/dolt/* (lead-tc38 / GAP H)"
     )
     assert re.search(r"git ls-remote \S+ 'refs/dolt/\*'", script), (
-        "The seed must verify refs/dolt/* land on the tracker remote after the "
-        f"push (lead-vb6j / ROOT / GAP G); script={script!r}"
+        "the seed must verify refs/dolt/* land on the tracker remote (lead-tc38 "
+        "/ GAP H)"
     )
-    real = _model_create_fresh_seed_outcome(ctx["gapg_create_fresh_before_seed"])
-    assert real["dolt_refs_seeded"] == "present", (
-        "Because the REAL seed establishes a prefixed local DB create-fresh "
-        "BEFORE `bd dolt push`, its seed must land refs/dolt/* present; it "
-        f"models as {real['dolt_refs_seeded']!r} (lead-vb6j / ROOT / GAP G)"
-    )
-
-
-@then(
-    'the retried "bd bootstrap" exits zero rather than hard-failing the '
-    'empty-remote clone with "contains no Dolt data"'
-)
-def gapg_retried_bootstrap_zero(ctx):
-    """Because the seed seeds a PREFIXED database (create-fresh before push),
-    the retried `bd bootstrap` clones a NON-empty, prefixed remote and exits
-    zero instead of hard-failing 'contains no Dolt data' (lead-vb6j / ROOT /
-    GAP G).
-
-    RED teeth: pre-fix the real script lacks the create-fresh-before-seed step,
-    so its outcome models as bootstrap nonzero and this assertion FAILS."""
-    real = _model_create_fresh_seed_outcome(ctx["gapg_create_fresh_before_seed"])
-    assert real["bootstrap_exit"] == "zero", (
-        "The retried `bd bootstrap` must exit zero because the seed established "
-        "a prefixed local DB create-fresh before pushing; the real seed models "
-        f"bootstrap_exit {real['bootstrap_exit']!r} (lead-vb6j / ROOT / GAP G)"
+    # Net effect: the unconfigure is transient — the final on-disk config.yaml
+    # carries the restored sync.remote line.
+    assert _GAPH_SYNC_REMOTE_LINE in (ctx["gaph_beads"] / "config.yaml").read_text(), (
+        "after the seed the sync.remote line must be restored on disk "
+        "(lead-tc38 / GAP H)"
     )
 
 
@@ -16208,26 +16274,43 @@ def gapg_retried_bootstrap_zero(ctx):
     'yields an id of the form "<prefix>-<n>" carrying the committed '
     'issue_prefix rather than failing "issue_prefix config is missing"'
 )
-def gapg_bd_create_prefixed(ctx):
-    """Because the retried bootstrap clones the prefixed seeded remote, the new
-    BC's local bd carries the committed prefix, so `bd create` yields a
+def gaph_bd_create_prefixed(ctx):
+    """Because the create-fresh ran with sync.remote UNCONFIGURED (so it
+    create-fresh'd a PREFIXED local dolt DB instead of clone-hard-failing) and
+    the seed then pushed that prefixed DB, `bd create` after standup yields a
     `<prefix>-<n>` id instead of failing 'issue_prefix config is missing'
-    (lead-vb6j / ROOT / GAP G).
-
-    RED teeth: pre-fix the real script lacks the create-fresh-before-seed step,
-    so the seed pushes a prefix-less DB and `bd create` models as
-    'issue_prefix-config-missing', failing this assertion."""
-    real = _model_create_fresh_seed_outcome(ctx["gapg_create_fresh_before_seed"])
-    assert real["bd_create"] == "prefixed-id", (
+    (lead-tc38 / GAP H)."""
+    sync_remote_at_init = "sync.remote" in ctx["gaph_at_init"].read_text()
+    outcome = _model_gaph_bd_init_outcome(sync_remote_at_init)
+    assert outcome["bd_create"] == "prefixed-id", (
         "After standup `bd create` must yield a `<prefix>-<n>` id carrying the "
-        "committed issue_prefix; because the real seed establishes a prefixed "
-        "create-fresh before the push it models as "
-        f"{real['bd_create']!r} (lead-vb6j / ROOT / GAP G)"
+        "committed issue_prefix; because the create-fresh ran with sync.remote "
+        f"unconfigured it models as {outcome['bd_create']!r} (lead-tc38 / GAP H)"
     )
-    # The committed prefix the create-fresh adopts comes from metadata.json, not
-    # a name-derived literal.
-    assert ctx["gapg_adopts_committed_prefix"], (
-        "The `<prefix>` `bd create` carries must be the COMMITTED issue_prefix "
-        "adopted from `.beads/metadata.json`, not a BC-name-derived one "
-        "(lead-vb6j / ROOT / GAP G)"
+
+
+@then(
+    'as the negative control, had "bd init -p" instead been run WHILE '
+    '"sync.remote" was still configured to the empty remote, it would attempt a '
+    'dolt clone and hard-fail "contains no Dolt data" — the exact pre-fix '
+    'real-launch failure this unconfigure-before-init ordering exists to avoid'
+)
+def gaph_negative_control(ctx):
+    """Negative control (lead-tc38 / GAP H): the executed at-init state proves
+    sync.remote is UNCONFIGURED when `bd init` runs — which is exactly what
+    averts the clone-hard-fail.  The reference model confirms the counterfactual:
+    had `bd init -p` run WHILE sync.remote was still configured, it would
+    clone-hard-fail 'contains no Dolt data' (the pre-fix real-launch failure)."""
+    # POSITIVE (executed): sync.remote is gone at init time, so init create-fresh's.
+    assert "sync.remote" not in ctx["gaph_at_init"].read_text(), (
+        "the executed at-init state must show sync.remote UNCONFIGURED "
+        "(lead-tc38 / GAP H)"
+    )
+    assert _model_gaph_bd_init_outcome(False)["bd_init"] == "create-fresh"
+    # NEGATIVE (counterfactual model): with sync.remote still configured, bd init
+    # would clone the empty remote and hard-fail.
+    assert _model_gaph_bd_init_outcome(True)["bd_init"] == "clone-hard-fail", (
+        "the negative control: `bd init -p` run WHILE sync.remote configured "
+        "would clone the empty remote and hard-fail 'contains no Dolt data' "
+        "(lead-tc38 / GAP H)"
     )

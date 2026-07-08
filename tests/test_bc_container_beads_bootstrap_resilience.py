@@ -349,8 +349,9 @@ def test_lead_tc38_unconfigure_ordering_in_seed_script_string(tmp_path):
     script = _empty_remote_seed_script(
         "git+https://github.com/dstengle/shopsystem-knowledge-beads.git"
     )
-    # The unconfigure removes the sync.remote line from .beads/config.yaml.
-    assert "sync.remote" in script and "config.yaml" in script, (
+    # The unconfigure removes the sync.remote line from .beads/config.yaml. The
+    # runtime script carries the sed regex form `sync\.remote` (escaped dot).
+    assert r"sync\.remote" in script and "config.yaml" in script, (
         "seed script must reference unconfiguring sync.remote in "
         ".beads/config.yaml before bd init (lead-tc38 / GAP H)"
     )
