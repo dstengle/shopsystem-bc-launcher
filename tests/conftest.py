@@ -16314,3 +16314,160 @@ def gaph_negative_control(ctx):
         "would clone the empty remote and hard-fail 'contains no Dolt data' "
         "(lead-tc38 / GAP H)"
     )
+
+
+# ===========================================================================
+# lead-b3f0 — ADR-058 AMENDED: fabro-engage REDESIGN.  THREE superseding
+# scenarios correcting the pinned-but-broken fabro engage lifecycle:
+#   A @scenario_hash:24d94274b9cbc2b0 — the engage invokes `fabro run
+#     dispatcher.toml` (the .toml entrypoint applies provider=local so the
+#     sandbox comes up IN-PROCESS), NOT the bare `dispatcher.fabro` graph def
+#     (which would bypass [environments.local], default to the docker sandbox,
+#     and fail 0s at /var/run/docker.sock in the docker-less bc-base).
+#   B @scenario_hash:a5e16a192f755768 — dispatcher.fabro is a NATIVE cyclic
+#     poll-loop (start->poll->dispatch->wait->poll), each loop node a native
+#     script= node, NO long-running `shop-msg watch` node, NO LLM/agent node.
+#   C @scenario_hash:6088da7e9e4c4e59 — the native dispatch node materializes a
+#     per-child .toml carrying the CONCRETE work id in a [run.environment.env]
+#     WORK_ID overlay and spawns `fabro run child.toml --detach` (NOT -I WORK_ID,
+#     which does not reach the child's native script= env).
+#
+# FIDELITY: A binds to the REAL launcher's ACTUAL recorded engage argv
+# (controller.launch over FakeDockerDriver); B/C bind structurally to the REAL
+# committed dispatcher.fabro / dispatcher.toml asset bytes (reusing the ky63
+# quote-aware DOT parser).  Never a model.  (Supersedes/retires bf9f8c9d7f2865e3
+# and reconciles 30fd5f2079f1c433 / cacccc52ba0b0766 to the .toml engage argv.)
+# ===========================================================================
+
+
+def _b3f0_dispatcher_toml_text():
+    """The REAL committed dispatcher.toml bytes (the poured .toml entrypoint),
+    via the launcher's own def-asset root."""
+    path = _ky63_def_asset_root() / "dispatcher.toml"
+    assert path.is_file(), (
+        f"the poured dispatcher.toml entrypoint is ABSENT at {path}; the .toml "
+        "entrypoint must ship in the launcher's fabro-def bundle (ADR-058)"
+    )
+    return path.read_text()
+
+
+# --- Given (A): fabro launch, no --work-id suffix (scenario A wording) --------
+
+@given(parsers.parse(
+    'bc-container launch is run for BC name "{bc_name}" on the fabro '
+    'orchestrator launch path selected by "--orchestrator fabro"'))
+def b3f0_launch_fabro(bc_name, ctx, fake_driver, controller, tmp_path):
+    _odd9_drive_fabro_launch(bc_name, ctx, fake_driver, controller, tmp_path,
+                             work_id=None)
+
+
+# --- Given (A): container running with BOTH the .toml entrypoint + .fabro -----
+
+@given(parsers.parse(
+    'the container "{container_name}" is running with the self-contained fabro '
+    'def set POURED by shop-templates into "{def_dir}", including both the '
+    '"dispatcher.toml" entrypoint and the "dispatcher.fabro" graph def it '
+    'applies, and the bc-base container has NO docker daemon reachable at '
+    '"{sock}"'))
+def b3f0_container_running_toml_entrypoint(container_name, def_dir, sock, ctx,
+                                           fake_driver):
+    assert fake_driver.is_running(container_name), (
+        f"Expected {container_name!r} to be running after the fabro-path launch."
+    )
+    ctx["container_name"] = container_name
+    ctx["b3f0_sock"] = sock
+
+
+# --- When (A): inspect the engage + the poured dispatcher.toml entrypoint -----
+
+@when(parsers.parse(
+    'the engage the launcher issues and the poured "dispatcher.toml" '
+    "entrypoint are inspected structurally, without a live docker daemon, a "
+    "running fabro server, or a reachable agent-vault"))
+def b3f0_inspect_engage_and_toml(ctx):
+    ctx["b3f0_dispatcher_toml"] = _b3f0_dispatcher_toml_text()
+
+
+# --- Then (A): the engage invokes `fabro run dispatcher.toml`, not the .fabro -
+
+@then(parsers.parse(
+    'AFTER the readiness barrier passes the engage the launcher issues invokes '
+    '"{run_argv}" — the ".toml" entrypoint, NOT the bare "dispatcher.fabro" '
+    'graph def — so the run enters through the ".toml" rather than the ".fabro" '
+    "directly"))
+def b3f0_engage_runs_toml(run_argv, ctx):
+    assert run_argv == "fabro run dispatcher.toml"
+    call = _cadr_fabro_engage_call(ctx)
+    assert call is not None, (
+        "the fabro-path launcher did not emit a fabro engage exec; "
+        f"exec_calls: {[c.command[:3] for c in _cadr_exec_calls(ctx)]!r}"
+    )
+    script = call.command[2]
+    # The engage enters through the .toml entrypoint (provider=local in-process),
+    # not the bare .fabro graph def (which defaults to the docker sandbox).
+    assert "fabro run dispatcher.toml" in script, (
+        f"the engage must invoke `fabro run dispatcher.toml`; script:\n{script}"
+    )
+    # It must NOT run the bare `fabro run dispatcher.fabro` graph def directly
+    # (the exact pre-fix offline failure).
+    assert not re.search(r"fabro run dispatcher\.fabro(?!\.)", script), (
+        "the engage must NOT run the bare `fabro run dispatcher.fabro` graph "
+        f"def directly (it would fall to the docker sandbox); script:\n{script}"
+    )
+
+
+# --- Then (A): the poured dispatcher.toml applies provider = local ------------
+
+@then(parsers.parse(
+    'the poured "dispatcher.toml" applies "{provider_line}" so the fabro '
+    'sandbox comes up IN-PROCESS in the bc-base container ("{ready}") and every '
+    "native node of the dispatcher graph executes in-process with no docker "
+    'sandbox and no connection attempt to "{sock}"'))
+def b3f0_toml_provider_local(provider_line, ready, sock, ctx):
+    toml = ctx.get("b3f0_dispatcher_toml") or _b3f0_dispatcher_toml_text()
+    # The .toml entrypoint carries an [environments.local] provider = "local"
+    # block — that is what brings the sandbox up IN-PROCESS (no docker sock).
+    assert "[environments.local]" in toml, (
+        "the dispatcher.toml must declare an [environments.local] environment; "
+        f"toml:\n{toml}"
+    )
+    assert re.search(r'provider\s*=\s*"local"', toml), (
+        f"the dispatcher.toml must apply {provider_line!r} (provider = \"local\") "
+        f"so the sandbox comes up in-process; toml:\n{toml}"
+    )
+    # The .toml BINDS the dispatcher.fabro graph def (it "applies" it).
+    assert re.search(r'graph\s*=\s*"dispatcher\.fabro"', toml), (
+        "the dispatcher.toml must apply the dispatcher.fabro graph def "
+        f"([workflow] graph = \"dispatcher.fabro\"); toml:\n{toml}"
+    )
+
+
+# --- Then (A): negative control — the bare .fabro would fall to docker --------
+
+@then(parsers.parse(
+    'as the negative control, had the engage instead run the bare "fabro run '
+    'dispatcher.fabro" (the ".fabro" graph def DIRECTLY), the run would BYPASS '
+    'the "{env_block}" provider, DEFAULT to the docker-sandbox executor, and — '
+    "because the bc-base container has no docker daemon — fail in 0s connecting "
+    'to "{sock}" and EXIT before the dispatcher ever watches the inbox, which '
+    'is the exact pre-fix offline failure this ".toml"-entrypoint engage exists '
+    "to avoid"))
+def b3f0_negative_control_bare_fabro(env_block, sock, ctx):
+    # STRUCTURAL negative control: the engage the launcher ACTUALLY issued enters
+    # through the .toml (which applies [environments.local] provider=local), so
+    # it does NOT take the bare-.fabro docker-sandbox path.
+    call = _cadr_fabro_engage_call(ctx)
+    assert call is not None
+    script = call.command[2]
+    assert not re.search(r"fabro run dispatcher\.fabro(?!\.)", script), (
+        "the engage must NOT run the bare `fabro run dispatcher.fabro`; that "
+        f"bare graph-def run is the docker-sandbox negative control; script:\n{script}"
+    )
+    # And the .toml the engage DOES enter through is what supplies the
+    # [environments.local] provider=local that averts the docker-sock failure.
+    toml = ctx.get("b3f0_dispatcher_toml") or _b3f0_dispatcher_toml_text()
+    assert env_block == "[environments.local]"
+    assert env_block in toml and re.search(r'provider\s*=\s*"local"', toml), (
+        f"the .toml entrypoint must carry {env_block!r} provider=local so the "
+        f"sandbox is in-process and never connects to {sock!r}; toml:\n{toml}"
+    )

@@ -53,6 +53,17 @@ Feature: bc-container launch --orchestrator {tmux|fabro} selects the engage tier
     And the launcher issues the persistent "fabro run dispatcher.fabro -I BC_NAME=shopsystem-messaging" engage with its working directory set to the project dir "/workspace/.fabro", NOT "/workspace", so fabro resolves the poured "dispatcher.fabro" (and its sibling "workflow.fabro") rather than failing "workflow not found: /workspace/workflow.fabro"
     And as the observable result a fresh clone-path "--orchestrator fabro" launch REACHES the fabro engage successfully — the in-container fabro server comes up and the "fabro run" engage resolves the poured def — instead of crashing at server auth bootstrap or def resolution as the un-provisioned clone path currently does (ADR-058 bundled fix, lead-l4iw)
 
+  @scenario_hash:24d94274b9cbc2b0 @bc:shopsystem-bc-launcher
+  Scenario: the fabro engage invokes "fabro run dispatcher.toml" so the local provider applies and node execution runs in-process, with a negative control that running the bare ".fabro" falls to the docker sandbox
+    Given the shopsystem-bc-launcher BC is installed
+    And bc-container launch is run for BC name "shopsystem-messaging" on the fabro orchestrator launch path selected by "--orchestrator fabro"
+    And the container "bc-shopsystem-messaging" is running with the self-contained fabro def set POURED by shop-templates into "/workspace/.fabro/", including both the "dispatcher.toml" entrypoint and the "dispatcher.fabro" graph def it applies, and the bc-base container has NO docker daemon reachable at "/var/run/docker.sock"
+    And the launcher's idempotent readiness barrier composing the messaging DB and the agent-vault broker has passed (scenario 34)
+    When the engage the launcher issues and the poured "dispatcher.toml" entrypoint are inspected structurally, without a live docker daemon, a running fabro server, or a reachable agent-vault
+    Then AFTER the readiness barrier passes the engage the launcher issues invokes "fabro run dispatcher.toml" — the ".toml" entrypoint, NOT the bare "dispatcher.fabro" graph def — so the run enters through the ".toml" rather than the ".fabro" directly
+    And the poured "dispatcher.toml" applies "provider = local" so the fabro sandbox comes up IN-PROCESS in the bc-base container ("Sandbox: local ready") and every native node of the dispatcher graph executes in-process with no docker sandbox and no connection attempt to "/var/run/docker.sock"
+    And as the negative control, had the engage instead run the bare "fabro run dispatcher.fabro" (the ".fabro" graph def DIRECTLY), the run would BYPASS the "[environments.local]" provider, DEFAULT to the docker-sandbox executor, and — because the bc-base container has no docker daemon — fail in 0s connecting to "/var/run/docker.sock" and EXIT before the dispatcher ever watches the inbox, which is the exact pre-fix offline failure this ".toml"-entrypoint engage exists to avoid
+
   @scenario_hash:ee8f4803eb5342f0
     Scenario: bc-container launch defaults --orchestrator to tmux and leaves the existing tmux engage unchanged, starting no fabro server and issuing no fabro run
     Given the shopsystem-bc-launcher BC is installed
