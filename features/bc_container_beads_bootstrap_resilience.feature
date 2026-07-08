@@ -79,3 +79,18 @@ Feature: bc-container launch bd-bootstrap is bootstrap-resilient and never fatal
     Then the in-container tracker's functional bd dolt remote, the one "bd dolt remote list" reports and "bd bootstrap" clones from, contains no literal "ORIGIN_OWNER" segment
     And that functional bd dolt remote's owner segment equals the derived GitHub owner "<owner>" so its clone target is "<owner>/<bc>-beads"
     And "bd bootstrap" for the new BC exits zero instead of failing "Repository not found" against an "ORIGIN_OWNER/<bc>-beads" URL
+
+  @scenario_hash:6fc82a7375ed8aa9 @bc:shopsystem-bc-launcher
+  Scenario Outline: the standup's empty-remote-seed step fires for an unseeded freshly-created tracker because the empty-remote classifier recognizes the current bc-base dolt "contains no Dolt data" error as well as the legacy "no branches" error
+    Given the standup's create-absent orchestration has created the tracker repo "<owner>/<bc>-beads" with "gh repo create --add-readme", so it exists with a git README branch but carries no Dolt refs
+    And in that state the in-container "bd bootstrap" fails its Dolt clone with the error text "<bootstrap_error>"
+    And the classification under observation is the standup's executable "_is_empty_remote_failure" predicate exercised on that error text, and the seed step under observation is the controller's seed-then-retry block that predicate gates, not a live standup run
+    When the standup evaluates whether that "bd bootstrap" failure is an empty/unseeded-remote failure and runs its empty-remote-seed step
+    Then the "_is_empty_remote_failure" predicate classifies "<bootstrap_error>" as an empty-remote failure, recognizing the current bc-base dolt "contains no Dolt data" text in addition to the legacy "git remote has no branches" text
+    And because the failure is classified as empty-remote, the seed step fires, git-init-and-seeds the tracker's initial Dolt data, and the retried "bd bootstrap" exits zero instead of leaving the tracker unseeded
+    And the seed firing is caused specifically by recognizing the current-dolt string, so a legacy-only classifier matching solely "git remote has no branches" would leave the seed unfired on the "contains no Dolt data" error rather than retrying unconditionally
+
+    Examples:
+      | owner    | bc                    | bootstrap_error                                                                                 |
+      | dstengle | shopsystem-knowledge  | clone failed; remote at that url contains no Dolt data                                           |
+      | dstengle | shopsystem-knowledge  | git remote has no branches: ...; initialize the repository with an initial branch/commit first  |

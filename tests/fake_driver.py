@@ -697,6 +697,15 @@ class FakeDockerDriver:
         # remote (init-and-push an initial branch/commit), after which the
         # container is recorded as seeded and bootstrap succeeds.
         self._beads_remote_empty: set[str] = set()
+        # lead-ypnz / GAP D — per-container OVERRIDE for the exact error text an
+        # EMPTY/unseeded `<bc>-beads` remote makes `bd bootstrap`'s clone fail
+        # with.  Absent means the legacy hardcoded "git remote has no branches"
+        # text.  This lets a scenario model the CURRENT bc-base dolt clone
+        # failure ("clone failed; remote at that url contains no Dolt data")
+        # that a freshly `gh repo create --add-readme`'d tracker (git README
+        # branch present, NO dolt refs) produces — so the empty-remote-seed
+        # classifier is exercised over BOTH the current and legacy error texts.
+        self._beads_remote_empty_error: dict[str, str] = {}
         # Containers whose previously-empty beads remote has been SEEDED by the
         # launcher's empty-remote init-and-push step.
         self._beads_remote_seeded: set[str] = set()
@@ -1298,6 +1307,24 @@ class FakeDockerDriver:
             self._beads_remote_empty.add(container_name)
         else:
             self._beads_remote_empty.discard(container_name)
+
+    def set_beads_bootstrap_error(
+        self, container_name: str, error_text: str
+    ) -> None:
+        """lead-ypnz / GAP D — OVERRIDE the exact error text an EMPTY/unseeded
+        `<bc>-beads` remote makes `bd bootstrap`'s clone fail with.
+
+        Models the CURRENT bc-base dolt clone failure for a freshly
+        `gh repo create --add-readme`'d tracker (git README branch present, NO
+        dolt refs): "clone failed; remote at that url contains no Dolt data".
+        The empty-remote-seed classifier the controller gates its seed step on
+        (`_is_empty_remote_failure`) must recognise this current text in
+        addition to the legacy "git remote has no branches" text, so the seed
+        fires and the retried `bd bootstrap` exits zero.  Setting this also
+        marks the container's remote EMPTY so the failure is produced.
+        """
+        self._beads_remote_empty.add(container_name)
+        self._beads_remote_empty_error[container_name] = error_text
 
     def set_beads_remote_seed_fails(
         self, container_name: str, fails: bool = True
@@ -2522,6 +2549,14 @@ class FakeDockerDriver:
                 container_name in self._beads_remote_empty
                 and container_name not in self._beads_remote_seeded
             ):
+                # lead-ypnz / GAP D — emit the per-container OVERRIDE error text
+                # when one is configured (e.g. the CURRENT bc-base dolt "clone
+                # failed; remote at that url contains no Dolt data"), else the
+                # legacy "git remote has no branches" text.  The controller's
+                # empty-remote-seed classifier must recognise BOTH.
+                override = self._beads_remote_empty_error.get(container_name)
+                if override is not None:
+                    return subprocess.CompletedProcess(command, 1, "", override + "\n")
                 return subprocess.CompletedProcess(
                     command, 1, "",
                     "dolt clone git+https://github.com/dstengle/"

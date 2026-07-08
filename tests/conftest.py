@@ -7435,6 +7435,252 @@ def assert_bootstrap_failure_warns_and_starts_agent(ctx, fake_driver):
 
 
 # ---------------------------------------------------------------------------
+# lead-ypnz / GAP D — the empty-remote-seed classifier is version-robust: it
+# recognises the CURRENT bc-base dolt clone failure ("clone failed; remote at
+# that url contains no Dolt data") in addition to the legacy "git remote has no
+# branches" text, so the empty-remote-seed step (the lead-5k8c seed-then-retry
+# block) FIRES for a freshly `gh repo create --add-readme`'d tracker (git
+# README branch present, NO dolt refs) and the retried `bd bootstrap` exits
+# zero.  Scenario Outline @scenario_hash:6fc82a7375ed8aa9 exercises the
+# executable `_is_empty_remote_failure` predicate + the seed-then-retry block it
+# gates over BOTH the current and legacy error texts (Examples negative
+# control: the "contains no Dolt data" row is RED against a legacy-only
+# classifier, the "git remote has no branches" row stays GREEN).  Additive to
+# ada742d33c996d34 (NOT retired).
+# ---------------------------------------------------------------------------
+
+
+def _legacy_only_empty_remote_classifier(message: str) -> bool:
+    """Reference LEGACY-ONLY empty-remote classifier (lead-ypnz negative
+    control).
+
+    This is the pre-GAP-D predicate: it matches ONLY the legacy "git remote
+    has no branches" text.  It deliberately does NOT know the current bc-base
+    dolt "contains no Dolt data" text, so the scenario can assert that the
+    seed firing on the current-dolt error is CAUSED by the version-robust
+    match — a legacy-only classifier would leave the seed unfired rather than
+    retrying unconditionally.
+    """
+    text = message.lower()
+    return "git remote has no branches" in text or (
+        "no branches" in text and "initialize" in text
+    )
+
+
+@given(parsers.parse(
+    "the standup's create-absent orchestration has created the tracker repo "
+    '"{tracker}" with "gh repo create --add-readme", so it exists with a git '
+    "README branch but carries no Dolt refs"
+))
+def gapd_created_tracker_no_dolt_refs(tracker, ctx, fake_driver, controller,
+                                      tmp_path):
+    """Set up a freshly `gh repo create --add-readme`'d `<bc>-beads` tracker:
+    the GitHub repo EXISTS (git README branch) but carries NO dolt refs — i.e.
+    an EMPTY/unseeded Dolt remote (lead-ypnz / GAP D).
+
+    Derives the concrete BC name from the tracker slug (`<owner>/<bc>-beads`)
+    and sets up the same launch fixtures the lead-5k8c empty-remote scenario
+    uses, so the full standup launch reaches the in-container `bd bootstrap`
+    step and its empty-remote-seed block.
+    """
+    owner, _, repo = tracker.partition("/")
+    assert repo.endswith("-beads"), (
+        f"tracker slug {tracker!r} must be of the form <owner>/<bc>-beads"
+    )
+    bc_name = repo[: -len("-beads")]
+    ctx["driver"] = fake_driver
+    ctx["controller"] = controller
+    ctx["bc_name"] = bc_name
+    ctx["standup_owner"] = owner
+    ctx["standup_tracker"] = tracker
+    ctx["repo_url"] = f"https://github.com/shopsystem/{bc_name}.git"
+    container_name = f"bc-{bc_name}"
+    ctx["container_name"] = container_name
+    # Default credential_home with all standard credential dirs/files (mirrors
+    # the shared "BC is installed" given).
+    credential_home = tmp_path / "fake_home"
+    credential_home.mkdir(parents=True, exist_ok=True)
+    (credential_home / ".claude").mkdir(parents=True, exist_ok=True)
+    (credential_home / ".config" / "gh").mkdir(parents=True, exist_ok=True)
+    gitconfig = credential_home / ".gitconfig"
+    if not gitconfig.exists():
+        gitconfig.write_text("")
+    ctx["credential_home"] = credential_home
+    # Committed prefix so the post-seed retry bootstrap derives a usable
+    # issue_prefix (mirrors the lead-5k8c / lead-7jc2 idiom).
+    fake_driver.set_committed_beads_prefix(container_name, "bclaunch")
+    ctx["committed_beads_prefix"] = "bclaunch"
+    # Repo EXISTS but its Dolt remote is EMPTY/unseeded (no dolt refs).
+    fake_driver.set_beads_remote_empty(container_name, True)
+
+
+@given(parsers.parse(
+    'in that state the in-container "bd bootstrap" fails its Dolt clone with '
+    'the error text "{bootstrap_error}"'
+))
+def gapd_bootstrap_fails_with_error(bootstrap_error, ctx, fake_driver):
+    """Model the initial in-container `bd bootstrap` failing its Dolt clone
+    with the exact `<bootstrap_error>` text (lead-ypnz / GAP D).
+
+    For the current-dolt Examples row this is
+    "clone failed; remote at that url contains no Dolt data"; for the legacy
+    row it is the "git remote has no branches" text.  The controller's
+    empty-remote-seed classifier must recognise both.
+    """
+    container_name = ctx["container_name"]
+    fake_driver.set_beads_bootstrap_error(container_name, bootstrap_error)
+    ctx["bootstrap_error"] = bootstrap_error
+
+
+@given(parsers.parse(
+    'the classification under observation is the standup\'s executable '
+    '"_is_empty_remote_failure" predicate exercised on that error text, and '
+    "the seed step under observation is the controller's seed-then-retry block "
+    "that predicate gates, not a live standup run"
+))
+def gapd_classification_under_observation(ctx):
+    """Documents the abstraction level under observation (lead-ypnz / GAP D):
+    the executable `_is_empty_remote_failure` predicate and the controller's
+    seed-then-retry block it gates.  No additional state — the launch When step
+    exercises exactly that block through the fake driver."""
+    ctx["gapd_observation"] = "predicate+seed-then-retry-block"
+
+
+@when(parsers.parse(
+    'the standup evaluates whether that "bd bootstrap" failure is an '
+    "empty/unseeded-remote failure and runs its empty-remote-seed step"
+))
+def gapd_run_standup_seed_evaluation(ctx, fake_driver, controller, tmp_path):
+    """Run the standup launch so the controller execs `bd bootstrap`, evaluates
+    `_is_empty_remote_failure` on the failure, and runs its seed-then-retry
+    block (lead-ypnz / GAP D)."""
+    import yaml as _yaml
+    bc_name = ctx["bc_name"]
+    manifest_path = tmp_path / "bc-manifest.yaml"
+    manifest_path.write_text(_yaml.dump({
+        "product": "shopsystem product",
+        "bcs": [{"name": bc_name, "remote": ctx["repo_url"], "role": "bc"}],
+    }))
+    result = controller.launch(
+        bc_name=bc_name,
+        repo_url=ctx["repo_url"],
+        manifest_path=manifest_path,
+        credential_home=ctx.get("credential_home"),
+    )
+    ctx["result"] = result
+    ctx["container_name"] = f"bc-{bc_name}"
+
+
+@then(parsers.parse(
+    'the "_is_empty_remote_failure" predicate classifies "{bootstrap_error}" '
+    "as an empty-remote failure, recognizing the current bc-base dolt "
+    '"contains no Dolt data" text in addition to the legacy "git remote has '
+    'no branches" text'
+))
+def gapd_predicate_classifies_empty_remote(bootstrap_error, ctx):
+    """The executable `_is_empty_remote_failure` predicate must classify the
+    error text as an empty-remote failure (lead-ypnz / GAP D).
+
+    RED teeth: for the current-dolt row ("...contains no Dolt data") the
+    legacy-only classifier returns False, so a pre-fix predicate leaves this
+    assertion failing; post-fix (version-robust match) it returns True.
+    """
+    from bc_launcher.controller import _is_empty_remote_failure
+    assert _is_empty_remote_failure(bootstrap_error) is True, (
+        "`_is_empty_remote_failure` must classify the bd-bootstrap clone "
+        f"failure {bootstrap_error!r} as an empty-remote failure (lead-ypnz: "
+        "recognise the current bc-base dolt 'contains no Dolt data' text in "
+        "addition to the legacy 'git remote has no branches' text); it did not"
+    )
+
+
+@then(parsers.parse(
+    "because the failure is classified as empty-remote, the seed step fires, "
+    "git-init-and-seeds the tracker's initial Dolt data, and the retried "
+    '"bd bootstrap" exits zero instead of leaving the tracker unseeded'
+))
+def gapd_seed_fires_and_bootstrap_exits_zero(ctx, fake_driver):
+    """The controller's seed-then-retry block must FIRE (seed the empty remote)
+    and the retried `bd bootstrap` must exit zero, provisioning the working set
+    (lead-ypnz / GAP D).
+
+    RED teeth: on the current-dolt row a legacy-only classifier leaves the seed
+    UNFIRED, so the remote stays unseeded and the working set is never
+    provisioned.
+    """
+    container_name = ctx["container_name"]
+    seed_calls = [
+        c for c in fake_driver.exec_calls
+        if c.container == container_name
+        and _is_empty_remote_seed_command(c.command)
+    ]
+    assert seed_calls, (
+        "The empty-remote-seed step must FIRE for the classified empty-remote "
+        f"failure (lead-ypnz); no seed step ran. exec calls on "
+        f"{container_name!r}: "
+        f"{[c.command for c in fake_driver.exec_calls if c.container == container_name]!r}"
+    )
+    assert fake_driver.beads_remote_seeded(container_name), (
+        "The empty beads dolt remote must end up SEEDED after the seed step "
+        f"git-init-and-seeds the tracker's initial Dolt data (lead-ypnz); "
+        f"container={container_name!r}"
+    )
+    assert fake_driver.beads_working_set_provisioned(container_name), (
+        "The retried `bd bootstrap` must exit zero and provision the working "
+        f"set after the seed (lead-ypnz); container={container_name!r}. A "
+        "legacy-only classifier that failed to recognise the current-dolt "
+        "error would leave the tracker unseeded and unprovisioned."
+    )
+
+
+@then(parsers.parse(
+    "the seed firing is caused specifically by recognizing the current-dolt "
+    'string, so a legacy-only classifier matching solely "git remote has no '
+    'branches" would leave the seed unfired on the "contains no Dolt data" '
+    "error rather than retrying unconditionally"
+))
+def gapd_seed_firing_caused_by_current_dolt_recognition(ctx):
+    """Negative control (lead-ypnz / GAP D): tie the seed firing to the
+    version-robust recognition of the current-dolt string, NOT to unconditional
+    retry.
+
+    A legacy-only classifier returns False for the current bc-base dolt
+    "contains no Dolt data" error (so it would leave the seed UNFIRED) while
+    returning True for the legacy "git remote has no branches" error; the
+    actual version-robust predicate classifies BOTH as empty-remote, which is
+    why the seed fired for this row.
+    """
+    from bc_launcher.controller import _is_empty_remote_failure
+    current_dolt_error = "clone failed; remote at that url contains no Dolt data"
+    legacy_error = (
+        "git remote has no branches: ...; initialize the repository with an "
+        "initial branch/commit first"
+    )
+    # The legacy-only classifier is BLIND to the current-dolt string (so it
+    # would leave the seed UNFIRED on that error) but still recognises the
+    # legacy string — a row-independent static fact that makes the negative
+    # control non-vacuous.
+    assert _legacy_only_empty_remote_classifier(current_dolt_error) is False, (
+        "the legacy-only classifier must NOT recognise the current bc-base "
+        "dolt 'contains no Dolt data' error (else the negative control is "
+        "vacuous)"
+    )
+    assert _legacy_only_empty_remote_classifier(legacy_error) is True, (
+        "the legacy-only classifier must still recognise the legacy 'git "
+        "remote has no branches' error"
+    )
+    # THIS row's error was recognised by the REAL (version-robust) predicate —
+    # which is what gated the seed firing, NOT an unconditional retry.  For the
+    # current-dolt row this recognition is exactly the version-robust addition
+    # the legacy-only classifier lacks; for the legacy row both classifiers
+    # agree.
+    assert _is_empty_remote_failure(ctx["bootstrap_error"]) is True, (
+        "the seed firing must be gated by the real predicate recognising this "
+        f"row's error {ctx['bootstrap_error']!r}, not an unconditional retry"
+    )
+
+
+# ---------------------------------------------------------------------------
 # lead-7jc2 — ABSENT-repo provisioning: standing up a new BC must CREATE its
 # absent `<bc>-beads` GitHub tracker repo (with an initial branch/commit) and
 # ADD + SEED its Dolt remote before `bd bootstrap` can succeed.  Extends the
