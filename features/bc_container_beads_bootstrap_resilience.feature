@@ -118,3 +118,13 @@ Feature: bc-container launch bd-bootstrap is bootstrap-resilient and never fatal
     And the standup THEN restores the "sync.remote" line, runs "bd dolt remote add origin" against the git+https url, and "bd dolt push" so the tracker remote carries Dolt data with "refs/dolt/*" refs present
     And after standup "bd create" run in the new BC's workspace exits zero and yields an id of the form "<prefix>-<n>" carrying the committed issue_prefix rather than failing "issue_prefix config is missing"
     And as the negative control, had "bd init -p" instead been run WHILE "sync.remote" was still configured to the empty remote, it would attempt a dolt clone and hard-fail "contains no Dolt data" — the exact pre-fix real-launch failure this unconfigure-before-init ordering exists to avoid
+
+  @scenario_hash:7c245031122e41bb @bc:shopsystem-bc-launcher
+  Scenario: the empty-remote seed clears any partial ".beads/embeddeddolt" left by the failed bootstrap before "bd init -p" so the create-fresh runs, with a negative control that leaving it aborts the create-fresh under the "|| true" mask
+    Given a new BC is stood up via "create-bc" whose beads tracker remote is EMPTY of Dolt data, so the standup's preceding "bd bootstrap" empty-remote clone FAILS and leaves a PARTIAL ".beads/embeddeddolt" on disk
+    And the standup has unconfigured "sync.remote" ahead of its create-fresh "bd init -p <prefix>" per GAP H (lead-tc38, @scenario_hash:5351a4a8071b594f)
+    When the create-bc standup's empty-remote seed orchestration runs its create-fresh ordering
+    Then the seed FIRST clears the partial state by removing ".beads/embeddeddolt" (via "rm -rf .beads/embeddeddolt", or equivalently by running "bd init --force") BEFORE it runs "bd init -p <prefix>"
+    And "bd init -p <prefix>" then CREATE-FRESHES a prefixed local dolt database adopting the committed issue_prefix rather than aborting "database already exists; use bd init --force"
+    And the standup then seeds that prefixed local database with "bd dolt push" so the tracker remote carries Dolt data with "refs/dolt/*" refs present and the fatal "git ls-remote refs/dolt" verify passes rather than driving the seed to exit 1
+    And as the negative control, had the seed left the partial ".beads/embeddeddolt" in place, "bd init -p" would ABORT "database already exists" — a failure MASKED by the "|| true" — so the create-fresh would never run, "bd dolt push" would seed nothing, and the fatal verify would fail, which is the exact pre-fix offline failure this clear-before-init ordering exists to avoid
