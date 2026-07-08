@@ -57,14 +57,17 @@ from tests.fake_driver import FakeDockerDriver
 
 BC_NAME = "shopsystem-messaging"
 
-# The 17 def-root-relative paths the bundle MUST ship (acceptance criterion
+# The 18 def-root-relative paths the bundle MUST ship (acceptance criterion
 # 0).  Enumerated independently of the source constant so a change to
 # FABRO_DEF_FILES that drops or renames a file fails this test loudly.
 # lead-odd9 / ADR-058 D2 added the reactive dispatcher def (dispatcher.fabro +
-# dispatcher.toml) alongside the UNCHANGED ADR-051 workflow.fabro child def.
+# dispatcher.toml) alongside the UNCHANGED ADR-051 workflow.fabro child def;
+# lead-3zzu / ADR-058 Amendment 2 added dispatch_acp_agent.py, the NON-LLM ACP
+# script-agent the dispatcher's backend="acp" `dispatch` node drives.
 EXPECTED_DEF_FILES = (
     "dispatcher.fabro",
     "dispatcher.toml",
+    "dispatch_acp_agent.py",
     "workflow.fabro",
     "workflow.toml",
     "project.toml",

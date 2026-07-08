@@ -674,10 +674,15 @@ FABRO_DEF_ASSET_SUBDIR = "assets/fabro-def"
 # def (dispatcher.fabro + its dispatcher.toml run config) alongside the
 # UNCHANGED ADR-051 workflow.fabro child def, so the poured /workspace/.fabro/
 # is runnable as `fabro run dispatcher.fabro` (the persistent engage) with the
-# workflow.fabro child fanned out per work item at runtime.
+# workflow.fabro child fanned out per work item at runtime.  lead-3zzu / ADR-058
+# Amendment 2 adds dispatch_acp_agent.py -- the NON-LLM ACP script-agent the
+# dispatcher's backend="acp" `dispatch` node drives (acp.command="python3
+# dispatch_acp_agent.py") -- so the idempotent context-in/decisions-out dispatch
+# is poured alongside the graph it belongs to.
 FABRO_DEF_FILES: tuple[str, ...] = (
     "dispatcher.fabro",
     "dispatcher.toml",
+    "dispatch_acp_agent.py",
     "workflow.fabro",
     "workflow.toml",
     "project.toml",
