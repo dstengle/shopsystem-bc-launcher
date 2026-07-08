@@ -28,7 +28,7 @@ Feature: bc-container launch --orchestrator {tmux|fabro} selects the engage tier
   send-keys / `claude` engage on that path, the tmux-default engage, and the
   launch-parity surfaces — never to a model.
 
-  @scenario_hash:084afc3b004e9a6e @bc:shopsystem-bc-launcher
+  @scenario_hash:a6bb4ad0512f2b11 @bc:shopsystem-bc-launcher
     Scenario: bc-container launch --orchestrator fabro starts the ephemeral in-container fabro server and runs ONE persistent reactive dispatcher def as the engage step, requiring no launch-time work id and running no tmux engage on that path
     Given the shopsystem-bc-launcher BC is installed
     And bc-container launch is run for BC name "shopsystem-messaging" on the fabro orchestrator launch path selected by "--orchestrator fabro" with no "--work-id" supplied

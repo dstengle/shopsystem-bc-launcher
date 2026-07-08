@@ -14681,12 +14681,13 @@ def cadr_no_fabro_on_default(ctx):
 # ~/.fabro server config + run cwd).
 #
 # Pins:
-#   @scenario_hash:30fd5f2079f1c433 — engage-tier SELECTION + parity (dispatcher
-#       engage, no launch-time work id, --work-id ignored no-op); argv
-#       reconciled to `fabro run dispatcher.toml` (scenario A supersedes the
-#       old `dispatcher.fabro` argv; lead-4muh formalizes the re-pin).
-#   @scenario_hash:cacccc52ba0b0766 — the bundled clone-path server-config
-#       provisioning + run-cwd fix (lead-l4iw); argv reconciled to
+#   30fd5f2079f1c433 (RE-PINNED a6bb4ad0512f2b11) — engage-tier SELECTION +
+#       parity (dispatcher engage, no launch-time work id, --work-id ignored
+#       no-op); argv reconciled to `fabro run dispatcher.toml` (scenario A
+#       supersedes the old `dispatcher.fabro` argv; lead-4muh formalizes the
+#       re-pin).
+#   cacccc52ba0b0766 (RE-PINNED a4726855a22f83d3) — the bundled clone-path
+#       server-config provisioning + run-cwd fix (lead-l4iw); argv reconciled to
 #       `fabro run dispatcher.toml` (scenario A; lead-4muh formalizes).
 #
 # FIDELITY: every assertion binds to the REAL launcher's ACTUAL recorded exec
