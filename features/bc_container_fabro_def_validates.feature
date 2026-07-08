@@ -60,3 +60,14 @@ Feature: a launched bc-base BC carries a self-contained VALID fabro loop def (le
     And the "dispatch" node then spawns that child DETACHED by issuing "fabro run child.toml --detach", so children run in PARALLEL isolated per WORK_ID and the dispatch node does not block on them before the "wait -> poll" back-edge
     And the spawned child runs the UNCHANGED ADR-051 child def, and the concrete "WORK_ID=W" from the "[run.environment.env]" overlay REACHES that child's native "script=" node env so the child acts on its own work id (BC-proven: a detached child ran with child-ran-WORK_ID delivered via the env overlay)
     And as the negative control, had the dispatch instead passed the work id as "-I WORK_ID=W" (the ADR-058 mechanism), that value would NOT reach the child's native "script=" node env — the exact delivery gap this "[run.environment.env]" overlay exists to close, and the reason no Haiku "launch" node is needed
+
+  @scenario_hash:7709a671bdfaddb7 @bc:shopsystem-bc-launcher
+  Scenario: the poured dispatcher's dispatch node is an ACP-backed agent node carrying backend="acp" and an acp.command or acp.config attr, wired to receive the poll context and return dispatch decisions, not a native command node
+    Given the shopsystem-bc-launcher BC is installed
+    And the container "bc-shopsystem-messaging" is running with the self-contained fabro def set POURED by shop-templates into "/workspace/.fabro/", including the "dispatcher.fabro" graph def the "dispatcher.toml" entrypoint applies
+    When the poured "dispatcher.fabro" def's "dispatch" node is inspected structurally, without a live docker daemon, a running fabro server, or a reachable agent-vault
+    Then the "dispatch" node is an ACP-backed AGENT node carrying "backend=acp" together with an "acp.command" attr (a shell such as "python3 <dispatch_acp_agent.py>") OR an "acp.config" attr (a JSON stdio config), so fabro drives it through the agent-client-protocol backend
+    And the "dispatch" node is NOT a native "script="/parallelogram command node, so the pre-fix context-blind command dispatch is absent
+    And the "dispatch" node is wired to RECEIVE the incoming context yielded by the "poll" node — the pending inbox work ids plus the in-flight run state — as its input
+    And the "dispatch" node is wired to RETURN structured dispatch DECISIONS as its output, which the loop consumes to spawn children, so the dispatch step both reads context and emits decisions rather than blindly re-acting on raw work ids each cycle
+

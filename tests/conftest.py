@@ -16843,3 +16843,144 @@ def b3f0_negative_control_i_workid(i_form, env_table, ctx):
         "no Haiku `launch` node is needed: the env-overlay delivery lets a NATIVE "
         "dispatch node do what previously required an agent"
     )
+
+
+# ===========================================================================
+# lead-3zzu — ADR-058 Amendment 2: the dispatcher's `dispatch` node becomes an
+# ACP-backed NON-LLM SCRIPT-AGENT (backend="acp" + acp.command/acp.config) so it
+# is CONTEXT-BLIND no longer.  Unlike the pre-fix native command node (which
+# re-fired for every still-pending work id each ~6s poll cycle, duplicate-
+# spawning a slow child onto the shared per-WORK_ID worktree), the ACP node
+# RECEIVES the poll context (pending ids + in-flight run state) and RETURNS
+# structured dispatch DECISIONS: SKIP a work id whose child is still in flight
+# (idempotency), SPAWN a work id with no live child (exactly once).  Zero-token
+# holds because the ACP agent is a NON-LLM python SCRIPT (Fabro injects no model
+# creds), NOT because the loop has no agent node.  Binds structurally to the
+# REAL committed dispatcher.fabro `dispatch` node body AND to the directly unit-
+# testable decision contract of the poured dispatch_acp_agent.py.  Never a model.
+#   acpkind   @scenario_hash:7709a671bdfaddb7
+#   idemp     @scenario_hash:713d01c4f4dfd107
+#   delivery  @scenario_hash:f38ab66672151669
+# ===========================================================================
+import importlib.util as _l3zzu_importlib_util
+import inspect as _l3zzu_inspect
+
+_L3ZZU_STEP = {
+    'acp_when': 'the poured "dispatcher.fabro" def\'s "dispatch" node is inspected structurally, without a live docker daemon, a running fabro server, or a reachable agent-vault',
+    'acp_then_kind': 'the "dispatch" node is an ACP-backed AGENT node carrying "backend=acp" together with an "acp.command" attr (a shell such as "python3 <dispatch_acp_agent.py>") OR an "acp.config" attr (a JSON stdio config), so fabro drives it through the agent-client-protocol backend',
+    'acp_then_notnative': 'the "dispatch" node is NOT a native "script="/parallelogram command node, so the pre-fix context-blind command dispatch is absent',
+    'acp_then_receive': 'the "dispatch" node is wired to RECEIVE the incoming context yielded by the "poll" node — the pending inbox work ids plus the in-flight run state — as its input',
+    'acp_then_return': 'the "dispatch" node is wired to RETURN structured dispatch DECISIONS as its output, which the loop consumes to spawn children, so the dispatch step both reads context and emits decisions rather than blindly re-acting on raw work ids each cycle',
+}
+
+
+def _l3zzu_dispatch_body(ctx):
+    graph = ctx.get("l3zzu_graph") or _b3f0_dispatcher_graph_text()
+    nodes = _ky63_parse_nodes(graph)
+    assert "dispatch" in nodes, "dispatcher.fabro missing the `dispatch` node"
+    return nodes["dispatch"]
+
+
+def _l3zzu_load_acp_agent():
+    """Import the poured NON-LLM ACP dispatch script-agent module from the
+    fabro-def asset root.  Its decision contract (decide / DispatchTracker /
+    materialize_child_config / spawn_command) is directly unit-testable because
+    it is a plain python script, not an LLM: feed it context, assert decisions.
+    """
+    path = _ky63_def_asset_root() / "dispatch_acp_agent.py"
+    assert path.is_file(), (
+        f"the NON-LLM ACP dispatch script-agent is ABSENT at {path}; the ACP "
+        "dispatch node's acp.command must point at a poured dispatch_acp_agent.py "
+        "(ADR-058 Amendment 2, lead-3zzu)"
+    )
+    spec = _l3zzu_importlib_util.spec_from_file_location("dispatch_acp_agent", path)
+    mod = _l3zzu_importlib_util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+# --- When (acpkind): inspect the poured dispatch node structurally ------------
+
+@when(_L3ZZU_STEP['acp_when'])
+def l3zzu_inspect_dispatch_node(ctx):
+    ctx["l3zzu_graph"] = _b3f0_dispatcher_graph_text()
+
+
+# --- Then (acpkind): the dispatch node is an ACP-backed agent node ------------
+
+@then(_L3ZZU_STEP['acp_then_kind'])
+def l3zzu_dispatch_is_acp(ctx):
+    body = _l3zzu_dispatch_body(ctx)
+    # backend="acp": fabro drives the node through the agent-client-protocol
+    # backend (v0.11.1 JSON-RPC over stdio), not the native command executor.
+    assert re.search(r'backend\s*=\s*"acp"', body), (
+        f'the `dispatch` node must carry backend="acp"; body:\n{body}'
+    )
+    # exactly one of acp.command (a shell) OR acp.config (a JSON stdio config)
+    # names the external ACP process fabro launches.
+    assert ("acp.command" in body) or ("acp.config" in body), (
+        "the ACP dispatch node must carry an acp.command (shell such as "
+        '"python3 dispatch_acp_agent.py") OR an acp.config (JSON stdio config) '
+        f"attr; body:\n{body}"
+    )
+
+
+# --- Then (acpkind): the dispatch node is NOT a native command node -----------
+
+@then(_L3ZZU_STEP['acp_then_notnative'])
+def l3zzu_dispatch_not_native(ctx):
+    body = _l3zzu_dispatch_body(ctx)
+    # The pre-fix context-blind native command dispatch is ABSENT: the ACP node
+    # is neither a `script=` node nor a `shape=parallelogram` command node.
+    assert "script=" not in body, (
+        "the ACP dispatch node must NOT be a native `script=` command node "
+        f"(the pre-fix context-blind dispatch must be absent); body:\n{body}"
+    )
+    assert "shape=parallelogram" not in body, (
+        "the ACP dispatch node must NOT be a native shape=parallelogram command "
+        f"node; body:\n{body}"
+    )
+
+
+# --- Then (acpkind): wired to RECEIVE the poll context as input ---------------
+
+@then(_L3ZZU_STEP['acp_then_receive'])
+def l3zzu_dispatch_receives_context(ctx):
+    graph = ctx.get("l3zzu_graph") or _b3f0_dispatcher_graph_text()
+    # The poll -> dispatch edge feeds the ACP node the context poll yielded.
+    pairs = {(s, d) for s, d, _a in _b3f0_dispatcher_edges(graph)}
+    assert ("poll", "dispatch") in pairs, (
+        "the ACP dispatch node must be wired to receive the poll context via a "
+        f"poll -> dispatch edge; edges={pairs!r}"
+    )
+    # Its decision contract RECEIVES the pending work ids AND the in-flight run
+    # state as its two inputs (context-in).
+    mod = _l3zzu_load_acp_agent()
+    assert hasattr(mod, "decide"), (
+        "the ACP agent must expose a `decide` decision contract (context-in / "
+        "decisions-out)"
+    )
+    params = list(_l3zzu_inspect.signature(mod.decide).parameters)
+    assert len(params) >= 2, (
+        "decide must RECEIVE the pending inbox work ids AND the in-flight run "
+        f"state as its input; signature params: {params!r}"
+    )
+
+
+# --- Then (acpkind): wired to RETURN structured decisions as output -----------
+
+@then(_L3ZZU_STEP['acp_then_return'])
+def l3zzu_dispatch_returns_decisions(ctx):
+    mod = _l3zzu_load_acp_agent()
+    decisions = mod.decide(["lead-a1"], set())
+    assert isinstance(decisions, list) and decisions, (
+        "decide must RETURN a structured list of dispatch decisions (decisions-out)"
+    )
+    d = decisions[0]
+    assert isinstance(d, dict) and "work_id" in d and "action" in d, (
+        "each returned decision must be a structured {work_id, action} record "
+        f"the loop consumes to spawn children; got: {d!r}"
+    )
+    assert d["action"] in ("SPAWN", "SKIP"), (
+        f"a decision's action must be SPAWN or SKIP; got {d['action']!r}"
+    )
