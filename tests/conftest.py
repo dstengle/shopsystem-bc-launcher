@@ -16125,3 +16125,224 @@ def b3f0_negative_control_bare_fabro(env_block, sock, ctx):
         f"the .toml entrypoint must carry {env_block!r} provider=local so the "
         f"sandbox is in-process and never connects to {sock!r}; toml:\n{toml}"
     )
+
+
+# ===========================================================================
+# lead-b3f0 scenario B (@scenario_hash:a5e16a192f755768): the poured
+# dispatcher.fabro is a NATIVE cyclic poll-loop (start->poll->dispatch->wait->
+# poll, the wait->poll back-edge forming the cycle).  poll/dispatch/wait are
+# each a native script= node (parallelogram, no LLM); there is NO long-running
+# `shop-msg watch` node and NO LLM/agent node anywhere in the loop, so the
+# steady-state loop spends ZERO model tokens.  Binds structurally to the REAL
+# committed dispatcher.fabro asset bytes (reusing the ky63 quote-aware DOT
+# parser).  Never a model.
+# ===========================================================================
+
+_B3F0_DISPATCHER_NODES = {"start", "end", "poll", "dispatch", "wait"}
+
+
+def _b3f0_dispatcher_graph_text():
+    """The REAL committed dispatcher.fabro bytes (the poured graph def), via the
+    launcher's own def-asset root."""
+    path = _ky63_def_asset_root() / "dispatcher.fabro"
+    assert path.is_file(), (
+        f"the poured dispatcher.fabro graph def is ABSENT at {path}; the native "
+        "poll-loop dispatcher def must ship in the launcher's fabro-def bundle "
+        "(ADR-058 AMENDED)"
+    )
+    return path.read_text()
+
+
+def _b3f0_dispatcher_edges(graph: str):
+    """[(src, dst, attr_block)] for edges between dispatcher nodes, quote-aware
+    and comment-stripped (mirrors _ky63_parse_edges, filtered to the dispatcher
+    node set)."""
+    lc = _ky63_strip_line_comments(graph)
+    inner = lc[lc.index("{") + 1:lc.rindex("}")]
+    edges = []
+    for m in re.finditer(r"\b([A-Za-z_]\w*)\s*->\s*([A-Za-z_]\w*)", inner):
+        src, dst = m.group(1), m.group(2)
+        k = m.end()
+        while k < len(inner) and inner[k] in " \t\n":
+            k += 1
+        attr = ""
+        if k < len(inner) and inner[k] == "[":
+            depth = 0
+            inq = False
+            j = k
+            while j < len(inner):
+                c = inner[j]
+                if inq:
+                    if c == "\\":
+                        j += 2
+                        continue
+                    if c == '"':
+                        inq = False
+                else:
+                    if c == '"':
+                        inq = True
+                    elif c == "[":
+                        depth += 1
+                    elif c == "]":
+                        depth -= 1
+                        if depth == 0:
+                            attr = inner[k:j + 1]
+                            break
+                j += 1
+        if src in _B3F0_DISPATCHER_NODES and dst in _B3F0_DISPATCHER_NODES:
+            edges.append((src, dst, attr))
+    return edges
+
+
+def _b3f0_native_body(nodes, name):
+    """Assert node ``name`` is a NATIVE script= node (parallelogram, no LLM) and
+    return its attr body."""
+    assert name in nodes, f"dispatcher.fabro missing native node {name!r}"
+    body = nodes[name]
+    assert "script=" in body, f"the {name!r} node must be a NATIVE script= node; body:\n{body}"
+    assert "shape=parallelogram" in body, (
+        f"the {name!r} node must be shape=parallelogram (native); body:\n{body}"
+    )
+    assert "prompt=" not in body and "class=" not in body, (
+        f"the {name!r} node must have NO LLM (no prompt=/class=); body:\n{body}"
+    )
+    return body
+
+
+# --- Given (B): container running with the poured native poll-loop def --------
+
+@given(parsers.parse(
+    'the container "{container_name}" is running with the self-contained fabro '
+    'def set POURED by shop-templates into "{def_dir}", including the '
+    '"dispatcher.fabro" graph def the "dispatcher.toml" entrypoint applies'))
+def b3f0_container_running_polloop(container_name, def_dir, ctx, fake_driver,
+                                   controller, tmp_path):
+    _odd9_drive_fabro_launch(_ODD9_BC, ctx, fake_driver, controller, tmp_path,
+                             work_id=None)
+    assert fake_driver.is_running(container_name), (
+        f"Expected {container_name!r} to be running after the fabro-path launch."
+    )
+    ctx["container_name"] = container_name
+
+
+# --- When (B): inspect the poured dispatcher.fabro structurally ---------------
+
+@when(parsers.parse(
+    'the poured "dispatcher.fabro" def is inspected structurally, without a '
+    "live docker daemon, a running fabro server, or a reachable agent-vault"))
+def b3f0_inspect_dispatcher_fabro(ctx):
+    ctx["b3f0_dispatcher_graph"] = _b3f0_dispatcher_graph_text()
+
+
+def _b3f0_graph(ctx):
+    return ctx.get("b3f0_dispatcher_graph") or _b3f0_dispatcher_graph_text()
+
+
+# --- Then (B): the native cyclic poll-loop shape -----------------------------
+
+@then(parsers.parse(
+    'the "dispatcher.fabro" is a CYCLIC graph whose loop is "{loop}", the '
+    '"wait -> poll" edge being the BACK-EDGE that forms the cycle, so the run '
+    "persists by cycling poll->dispatch->wait->poll rather than blocking on a "
+    "single long-running watch"))
+def b3f0_cyclic_polloop(loop, ctx):
+    assert loop == "start -> poll -> dispatch -> wait -> poll"
+    graph = _b3f0_graph(ctx)
+    nodes = _ky63_parse_nodes(graph)
+    for n in ("start", "poll", "dispatch", "wait"):
+        assert n in nodes, f"dispatcher.fabro missing node {n!r}"
+    edges = _b3f0_dispatcher_edges(graph)
+    pairs = {(s, d) for s, d, a in edges}
+    for want in (("start", "poll"), ("poll", "dispatch"), ("dispatch", "wait"),
+                 ("wait", "poll")):
+        assert want in pairs, f"missing {want[0]} -> {want[1]} edge; edges={pairs!r}"
+    # The wait -> poll BACK-EDGE is what makes the graph cyclic and unconditional
+    # (it always loops back to poll).
+    wait_poll = [a for s, d, a in edges if (s, d) == ("wait", "poll")]
+    assert wait_poll and "outcome=failed" not in wait_poll[0], (
+        "wait -> poll must be the UNCONDITIONAL back-edge that forms the cycle"
+    )
+    # Genuinely CYCLIC: poll is reachable from wait and wait from poll (via
+    # dispatch), so the run persists cycling rather than blocking on a watch.
+    assert ("wait", "poll") in pairs and ("poll", "dispatch") in pairs
+
+
+# --- Then (B): poll is a native non-blocking pending-inbox lister -------------
+
+@then(parsers.parse(
+    'the "poll" node is a NATIVE "script=" node with no LLM that lists the '
+    'current pending inbox via "{pending_cmd}" and yields the concrete pending '
+    "work ids, returning promptly rather than blocking"))
+def b3f0_poll_native(pending_cmd, ctx):
+    graph = _b3f0_graph(ctx)
+    nodes = _ky63_parse_nodes(graph)
+    body = _b3f0_native_body(nodes, "poll")
+    # The poured def is BC-GENERIC: BC_NAME arrives via [run.environment.env], so
+    # the node names the base command parameterized by $BC_NAME.
+    pending_base = pending_cmd.replace(" shopsystem-messaging", "")
+    assert pending_base in body and "$BC_NAME" in body, (
+        f"the poll node must list pending inbox via {pending_base!r} "
+        f"(parameterized by $BC_NAME); body:\n{body}"
+    )
+    # Returns PROMPTLY: it must NOT block on a long-running `shop-msg watch`.
+    assert "shop-msg watch" not in body, (
+        f"the poll node must return promptly (NO long-running `shop-msg watch`); "
+        f"body:\n{body}"
+    )
+
+
+# --- Then (B): dispatch is a native node acting on the poll ids ---------------
+
+@then(parsers.parse(
+    'the "dispatch" node is a NATIVE "script=" node with no LLM that acts on '
+    'the pending work ids from "poll"'))
+def b3f0_dispatch_native(ctx):
+    graph = _b3f0_graph(ctx)
+    nodes = _ky63_parse_nodes(graph)
+    _b3f0_native_body(nodes, "dispatch")
+
+
+# --- Then (B): wait is a native short-sleep node before the back-edge ---------
+
+@then(parsers.parse(
+    'the "wait" node is a NATIVE "script=" node with no LLM that sleeps a short '
+    'interval before the back-edge returns to "poll"'))
+def b3f0_wait_native(ctx):
+    graph = _b3f0_graph(ctx)
+    nodes = _ky63_parse_nodes(graph)
+    body = _b3f0_native_body(nodes, "wait")
+    assert "sleep" in body, (
+        f"the wait node must sleep a short interval before the back-edge; body:\n{body}"
+    )
+
+
+# --- Then (B): no watch node, no LLM/agent node anywhere in the loop ----------
+
+@then(parsers.parse(
+    'the def contains NO long-running "shop-msg watch" node and NO LLM/agent '
+    'node (no Haiku "launch" node and no other model-backed node) anywhere in '
+    "the loop, so the steady-state loop consumes NO model tokens and tokens are "
+    "spent only on the child's actual work"))
+def b3f0_no_watch_no_llm(ctx):
+    graph = _b3f0_graph(ctx)
+    nodes = _ky63_parse_nodes(graph)
+    # NO long-running `shop-msg watch` node anywhere in the def.
+    assert "shop-msg watch" not in graph, (
+        "the native poll-loop must contain NO long-running `shop-msg watch` "
+        f"node; graph:\n{graph}"
+    )
+    # NO `launch` node (the retired Haiku agent) — the loop nodes are exactly the
+    # native poll/dispatch/wait (+ terminals).
+    assert "launch" not in nodes, (
+        "the native poll-loop must contain NO Haiku `launch` agent node"
+    )
+    # NO LLM/agent node ANYWHERE: no node carries a prompt=/class=, and the graph
+    # declares no model_stylesheet / model binding (zero steady-state tokens).
+    for name, body in nodes.items():
+        assert "prompt=" not in body and "class=" not in body, (
+            f"loop node {name!r} must be NATIVE (no LLM prompt=/class=); body:\n{body}"
+        )
+    assert "model_stylesheet" not in graph and re.search(r"model\s*:", graph) is None, (
+        "the native poll-loop must declare NO model binding (no model_stylesheet "
+        f"/ model:), so the steady-state loop spends zero model tokens; graph:\n{graph}"
+    )

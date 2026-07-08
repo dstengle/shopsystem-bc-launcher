@@ -38,3 +38,14 @@ Feature: a launched bc-base BC carries a self-contained VALID fabro loop def (le
     Then it exits zero and reports zero diagnostics
     And the def is a self-contained bc-shop Implementer->Reviewer loop graph per ADR-051: the graph file is present, every node body the graph references is present in the def alongside it so the loop is runnable from the def alone, the Reviewer node is the sole node that can emit a gated work_done on the success path, and every fallible node carries an explicit unconditional failsafe edge to a halt or blocked-emit sink so a failed node never advances to the SUCCEEDED terminal
     And the def's native fabro vault holds only the value "__PLACEHOLDER__" for each of its provider-key and token slots, with no real credential present in the def (ADR-049), so that any real credential the loop uses is sourced from the agent-vault surface baked in S1 and never from the fabro vault
+
+  @scenario_hash:a5e16a192f755768 @bc:shopsystem-bc-launcher
+  Scenario: the poured dispatcher def is a native cyclic poll-loop with poll, dispatch and wait as native script nodes, a back-edge from wait to poll, no long-running watch node, and no LLM node in the loop
+    Given the shopsystem-bc-launcher BC is installed
+    And the container "bc-shopsystem-messaging" is running with the self-contained fabro def set POURED by shop-templates into "/workspace/.fabro/", including the "dispatcher.fabro" graph def the "dispatcher.toml" entrypoint applies
+    When the poured "dispatcher.fabro" def is inspected structurally, without a live docker daemon, a running fabro server, or a reachable agent-vault
+    Then the "dispatcher.fabro" is a CYCLIC graph whose loop is "start -> poll -> dispatch -> wait -> poll", the "wait -> poll" edge being the BACK-EDGE that forms the cycle, so the run persists by cycling poll->dispatch->wait->poll rather than blocking on a single long-running watch
+    And the "poll" node is a NATIVE "script=" node with no LLM that lists the current pending inbox via "shop-msg pending inbox --bc shopsystem-messaging" and yields the concrete pending work ids, returning promptly rather than blocking
+    And the "dispatch" node is a NATIVE "script=" node with no LLM that acts on the pending work ids from "poll"
+    And the "wait" node is a NATIVE "script=" node with no LLM that sleeps a short interval before the back-edge returns to "poll"
+    And the def contains NO long-running "shop-msg watch" node and NO LLM/agent node (no Haiku "launch" node and no other model-backed node) anywhere in the loop, so the steady-state loop consumes NO model tokens and tokens are spent only on the child's actual work
