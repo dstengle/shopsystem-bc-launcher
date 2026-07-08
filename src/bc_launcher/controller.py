@@ -233,6 +233,27 @@ def _create_absent_tracker_repo_script(beads_repo_slug: str) -> str:
     )
 
 
+# lead-3mez / GAP A — the absent-repo tracker-provisioning exec above runs
+# `gh repo create` through the container's agent-vault proxy (HTTPS_PROXY +
+# broker CA + AGENT_VAULT_*, all wired at `docker run` time).  gh will not
+# even attempt the request without a non-empty token in its env: with no
+# GH_TOKEN it exits non-zero ("gh auth login" / "populate GH_TOKEN") BEFORE
+# the proxy can substitute the real GITHUB_TOKEN on the wire.  Empirically
+# proven (David's 2026-07-07 shopsystem-knowledge standup): re-running the
+# exact in-container script with GH_TOKEN=dummy created the repo.  So the exec
+# only needs a non-empty PLACEHOLDER; the broker rides the wire.  Mirrors the
+# FABRO_SERVER_INSTALL_GH_TOKEN idiom (ADR-049 D1: no real cred literal).
+TRACKER_PROVISION_GH_TOKEN = "gh-dummy-agent-vault-rides-the-wire"
+
+
+def _tracker_provision_exec_env() -> dict[str, str]:
+    """The extra exec env pinned on the absent-repo `gh repo create` provisioning
+    exec (lead-3mez / GAP A): a non-empty GH_TOKEN placeholder so gh
+    authenticates through the already-wired agent-vault proxy instead of
+    exiting non-zero for lack of a token."""
+    return {"GH_TOKEN": TRACKER_PROVISION_GH_TOKEN}
+
+
 def _empty_remote_seed_script(beads_remote_url: str) -> str:
     """Shell to INITIALIZE an empty `<bc>-beads` Dolt remote (lead-5k8c).
 
@@ -2503,6 +2524,12 @@ class BcContainerController:
                     ["bash", "-lc",
                      _create_absent_tracker_repo_script(beads_repo_slug)],
                     user=AGENT_CONTAINER_USER,
+                    # lead-3mez / GAP A: carry a non-empty GH_TOKEN placeholder
+                    # so `gh repo create` authenticates through the agent-vault
+                    # proxy (which substitutes the real GITHUB_TOKEN on the
+                    # wire) instead of exiting non-zero with "gh auth login" /
+                    # "populate GH_TOKEN" and never creating the tracker repo.
+                    env=_tracker_provision_exec_env(),
                 )
                 if create_result.returncode == 0:
                     out_lines.append(
