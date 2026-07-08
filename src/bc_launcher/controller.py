@@ -288,6 +288,21 @@ def _empty_remote_seed_script(beads_remote_url: str) -> str:
     `bd dolt push` runs.  Only the raw-git ops need the plain scheme; the
     `bd dolt remote add origin` keeps the `git+https://` DOLT remote URL — that
     is the correct scheme for bd's own dolt tooling.
+
+    lead-tc38 / GAP H (ROOT, supersedes GAP G) — UNCONFIGURE-BEFORE-INIT.  The
+    GAP G create-fresh `bd init -p <prefix>` ran WHILE `sync.remote` was STILL
+    configured in `.beads/config.yaml` to the derived `<owner>/<bc>-beads`
+    remote, which EXISTS but is EMPTY of Dolt data.  With `sync.remote`
+    configured, `bd init` (like `bd bootstrap`) CLONES that empty remote and
+    HARD-FAILS "Error 1105: clone failed; remote at that url contains no Dolt
+    data", so the create-fresh never happens (GAP G's test false-greened
+    because its fixture omitted this configured-empty-remote precondition;
+    confirmed in a real in-container launch, v0.3.56).  So the create-fresh is
+    wrapped: capture the scaffolded `sync.remote` line, REMOVE it from
+    `.beads/config.yaml` so `bd init -p` create-freshes a PREFIXED local dolt DB
+    with NO remote configured (does NOT clone), then RESTORE the line before the
+    `bd dolt remote add origin` + `bd dolt push` seed configures the git+https
+    dolt remote and seeds refs/dolt/*.
     """
     # Strip the `git+` transport prefix so RAW git accepts the URL; the dolt
     # remote itself keeps the original `git+https://` scheme below.
@@ -342,7 +357,32 @@ def _empty_remote_seed_script(beads_remote_url: str) -> str:
         "gapg_id=$(grep -o '\"id\"[[:space:]]*:[[:space:]]*\"[^\"]*\"' "
         ".beads/issues.jsonl | head -1 | sed 's/.*\"\\([^\"]*\\)\"$/\\1/'); "
         "gapg_prefix=\"${gapg_id%-*}\"; fi; "
+        # lead-tc38 / GAP H (ROOT, supersedes GAP G) — UNCONFIGURE sync.remote
+        # BEFORE the `bd init -p` create-fresh, then RESTORE it before the dolt
+        # seed.  GAP G ran `bd init -p` WHILE `sync.remote` was STILL configured
+        # in `.beads/config.yaml` to the derived `<owner>/<bc>-beads` remote —
+        # which EXISTS (GAP B resolved its owner + `create-absent` gh-created it)
+        # but is EMPTY of Dolt data.  With `sync.remote` configured, `bd init`
+        # (like `bd bootstrap`) CLONES that empty remote and HARD-FAILS
+        # "Error 1105: clone failed; remote at that url contains no Dolt data" —
+        # so the create-fresh never happens, `bd dolt push` seeds a prefix-less
+        # / empty DB, and `bd create` after standup fails "issue_prefix config is
+        # missing".  GAP G's structural test false-greened because its fixture
+        # OMITTED this configured-empty-remote precondition; confirmed in a real
+        # in-container launch (v0.3.56).  So: capture the scaffolded `sync.remote`
+        # line, remove it from `.beads/config.yaml` so `bd init -p` create-freshes
+        # a PREFIXED local dolt DB with NO remote configured (does NOT clone),
+        # then restore the line before `bd dolt remote add`/`bd dolt push` seed
+        # refs/dolt/* against the git+https dolt remote.
+        "gaph_remote_line=$(grep -E '^sync\\.remote' .beads/config.yaml "
+        "2>/dev/null | head -1 || true); "
+        "sed -i '/^sync\\.remote/d' .beads/config.yaml 2>/dev/null || true; "
         "BD_NON_INTERACTIVE=1 bd init -p \"$gapg_prefix\" >/dev/null 2>&1 || true; "
+        # Restore the captured sync.remote line now that the fresh PREFIXED local
+        # dolt DB exists, so the dolt seed below (and later `bd bootstrap` /
+        # `bd create`) again see the configured tracker remote.
+        "if [ -n \"$gaph_remote_line\" ]; then "
+        "printf '%s\\n' \"$gaph_remote_line\" >> .beads/config.yaml; fi; "
         # Point the local bd working set at the now-initialized DOLT remote
         # (git+https:// — bd's own tooling handles that scheme) and push the
         # create-fresh'd PREFIXED embedded-Dolt working set up.  THIS is the step
