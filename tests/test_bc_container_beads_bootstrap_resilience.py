@@ -365,3 +365,228 @@ def test_lead_tc38_unconfigure_ordering_in_seed_script_string(tmp_path):
         f"init@{i_init}, remote_add@{i_remote_add}, push@{i_push} "
         "(lead-tc38 / GAP H)"
     )
+
+
+# ---------------------------------------------------------------------------
+# lead-372r / GAP I (ROOT, additive to GAP H 5351a4a8071b594f — UNCHANGED) —
+# the seed script must CLEAR any PARTIAL `.beads/embeddeddolt` left by the
+# failed `bd bootstrap` empty-remote clone BEFORE `bd init -p <prefix>`, so the
+# create-fresh actually runs instead of aborting "database already exists; use
+# bd init --force" (a failure MASKED by the `|| true` on `bd init`).
+#
+# ROOT (in-container v0.3.57): GAP H unconfigures sync.remote before the
+# create-fresh `bd init -p ... || true`, but at LAUNCH the PRECEDING failed
+# `bd bootstrap` empty-remote clone LEAVES a PARTIAL `.beads/embeddeddolt` on
+# disk.  `bd init -p` then ABORTS "database already exists; use bd init
+# --force" — MASKED by `|| true` — so the create-fresh NEVER happens, the
+# subsequent `bd dolt push` seeds nothing, and the fatal `git ls-remote
+# refs/dolt` verify fails -> seed exit 1 -> BC offline.  The lead's manual test
+# worked ONLY because it `rm -rf .beads/embeddeddolt` first; the launch does
+# not.  (GAP H's fixture OMITTED the partial-embeddeddolt precondition, so its
+# executed test false-greened over this ordering.)
+#
+# This RED test REPLICATES that precondition — a fixture whose
+# `.beads/embeddeddolt` already EXISTS (the exact partial state the failed
+# bootstrap leaves) — and EXECUTES the seed body with `bd` STUBBED to FAITHFULLY
+# mimic real bd: `bd init` ABORTS non-zero ("database already exists") when
+# `.beads/embeddeddolt` is present, and CREATE-FRESHES (writing a CREATED_FRESH
+# marker) only when it is absent.  It snapshots, at `bd init` time, whether the
+# partial DB was cleared, and asserts the executed ordering: clear <
+# `bd init -p` < `bd dolt remote add` < `bd dolt push`.  The negative control
+# (the scenario's last And) is bound to REAL code: the same seed body with only
+# the clear NEUTRALIZED leaves the partial DB in place, so the stubbed `bd init`
+# aborts under `|| true`, the create-fresh never runs, and `bd dolt push` seeds
+# nothing — the exact pre-fix offline failure.
+# ---------------------------------------------------------------------------
+
+# The clear-before-init statement GAP I adds to `_empty_remote_seed_script`:
+# removes any PARTIAL `.beads/embeddeddolt` the failed bootstrap left, BEFORE
+# `bd init -p` runs, so the create-fresh is not aborted under the `|| true` mask.
+_CLEAR_PARTIAL_STMT = "rm -rf .beads/embeddeddolt"
+
+
+def _write_partial_embeddeddolt_fixture(tmp_path):
+    """Materialize the GAP I precondition GAP H omitted: the CONFIGURED-empty-
+    remote `.beads` tree (config.yaml sync.remote + real-shaped metadata.json /
+    issues.jsonl) PLUS a PARTIAL `.beads/embeddeddolt` directory — the exact
+    on-disk state the preceding failed `bd bootstrap` empty-remote clone leaves
+    behind at launch."""
+    beads = _write_configured_empty_remote_fixture(tmp_path)
+    # The partial embedded-Dolt working set the failed clone left behind — a
+    # directory that already EXISTS, so an un-cleared `bd init -p` aborts
+    # "database already exists".
+    partial = beads / "embeddeddolt"
+    partial.mkdir()
+    (partial / "PARTIAL_FROM_FAILED_CLONE").write_text("half-written dolt state\n")
+    return beads
+
+
+def _run_seed_body_gapi(fragment: str, workspace, probe_dir):
+    """Execute the create-fresh/seed body in ``workspace`` with ``bd`` stubbed
+    to FAITHFULLY mimic real bd's partial-DB behavior: `bd init` ABORTS non-zero
+    ("database already exists; use bd init --force") when `.beads/embeddeddolt`
+    is present, and CREATE-FRESHES (mkdir + CREATED_FRESH marker) only when it
+    is absent.  Each observed sub-command records probe state so the test can
+    assert the EXECUTED clear -> init -> seed ordering rather than mere string
+    presence."""
+    prelude = (
+        f'PROBE="{probe_dir}"; '
+        'bd() { '
+        # `bd init` — faithful partial-DB semantics.  Under the real `|| true`
+        # mask a non-zero return does NOT abort the seed, so the mask is what
+        # lets the pre-fix bug slip through silently.
+        '  if [ "$1" = "init" ]; then '
+        '    if [ -d .beads/embeddeddolt ]; then '
+        '      printf present-aborted > "$PROBE/at_init"; '
+        '      echo "database already exists; use bd init --force" >&2; '
+        '      return 1; '
+        '    fi; '
+        '    mkdir -p .beads/embeddeddolt; '
+        '    : > .beads/embeddeddolt/CREATED_FRESH; '
+        '    printf absent-created > "$PROBE/at_init"; '
+        '    return 0; '
+        '  fi; '
+        # `bd dolt push` — records whether it had a create-fresh'd DB to seed.
+        '  if [ "$1" = "dolt" ] && [ "$2" = "push" ]; then '
+        '    if [ -f .beads/embeddeddolt/CREATED_FRESH ]; then '
+        '      printf seeded > "$PROBE/at_push"; '
+        '    else printf nothing > "$PROBE/at_push"; fi; '
+        '    return 0; '
+        '  fi; '
+        '  return 0; '
+        '}; '
+    )
+    return subprocess.run(
+        ["bash", "-c", prelude + fragment],
+        cwd=str(workspace),
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_lead_372r_seed_clears_partial_embeddeddolt_before_bd_init(tmp_path):
+    """EXECUTED: with a PARTIAL `.beads/embeddeddolt` present (the state the
+    failed bootstrap leaves), the seed body must have REMOVED it BY the time
+    `bd init -p` runs, so the create-fresh actually runs (writing CREATED_FRESH)
+    instead of aborting "database already exists" under `|| true`, and the
+    subsequent `bd dolt push` seeds that create-fresh'd DB (lead-372r / GAP I)."""
+    from bc_launcher.controller import _empty_remote_seed_script
+
+    beads = _write_partial_embeddeddolt_fixture(tmp_path)
+    probe = tmp_path / "probe"
+    probe.mkdir()
+
+    # Precondition sanity: the fixture reproduces the partial-embeddeddolt state
+    # the failed bootstrap leaves — the precondition GAP H's fixture omitted.
+    assert (beads / "embeddeddolt").is_dir(), (
+        "fixture must carry a PARTIAL .beads/embeddeddolt — the precondition "
+        "the failed bd bootstrap leaves that GAP H's fixture omitted "
+        "(lead-372r / GAP I)"
+    )
+
+    fragment = _seed_body_fragment(
+        _empty_remote_seed_script(
+            "git+https://github.com/dstengle/shopsystem-knowledge-beads.git"
+        )
+    )
+    _run_seed_body_gapi(fragment, tmp_path, probe)
+
+    at_init = probe / "at_init"
+    at_push = probe / "at_push"
+    assert at_init.exists(), "seed body never reached `bd init`"
+
+    # (1) CLEAR-BEFORE-INIT: at `bd init -p` time the partial `.beads/embeddeddolt`
+    #     must be GONE, so the create-fresh runs instead of aborting "database
+    #     already exists" under the `|| true` mask.
+    assert at_init.read_text() == "absent-created", (
+        "the partial .beads/embeddeddolt was STILL present when `bd init -p` "
+        "ran — `bd init` ABORTS 'database already exists; use bd init --force', "
+        "a failure MASKED by `|| true`, so the create-fresh never runs; the "
+        "seed must remove .beads/embeddeddolt BEFORE bd init (lead-372r / GAP I)"
+    )
+
+    # (2) The create-fresh actually happened (CREATED_FRESH written by the stub
+    #     only on the non-aborting create-fresh path).
+    assert (beads / "embeddeddolt" / "CREATED_FRESH").exists(), (
+        "the create-fresh never ran — `bd init -p` aborted under `|| true` "
+        "because the partial DB was left in place (lead-372r / GAP I)"
+    )
+
+    # (3) `bd dolt push` then seeded THAT create-fresh'd DB rather than nothing.
+    assert at_push.exists() and at_push.read_text() == "seeded", (
+        "`bd dolt push` seeded nothing — with the create-fresh aborted there was "
+        "no prefixed DB to push, so refs/dolt/* never land and the fatal verify "
+        "fails -> seed exit 1 -> BC offline (lead-372r / GAP I)"
+    )
+
+
+def test_lead_372r_negative_control_leaving_partial_aborts_create_fresh(tmp_path):
+    """NEGATIVE CONTROL bound to REAL code: the same seed body with ONLY the
+    clear-before-init NEUTRALIZED leaves the partial `.beads/embeddeddolt` in
+    place, so the stubbed `bd init -p` ABORTS "database already exists" under
+    `|| true`, the create-fresh never runs, and `bd dolt push` seeds nothing —
+    the exact pre-fix offline failure the clear-before-init ordering averts
+    (lead-372r / GAP I)."""
+    from bc_launcher.controller import _empty_remote_seed_script
+
+    beads = _write_partial_embeddeddolt_fixture(tmp_path)
+    probe = tmp_path / "probe"
+    probe.mkdir()
+
+    script = _empty_remote_seed_script(
+        "git+https://github.com/dstengle/shopsystem-knowledge-beads.git"
+    )
+    # The clear is load-bearing: prove the seed carries it, then reconstruct the
+    # pre-fix ordering by neutralizing exactly that statement.
+    assert _CLEAR_PARTIAL_STMT in script, (
+        "seed script must clear the partial .beads/embeddeddolt with "
+        f"{_CLEAR_PARTIAL_STMT!r} (lead-372r / GAP I)"
+    )
+    prefix_fix_fragment = _seed_body_fragment(script).replace(
+        _CLEAR_PARTIAL_STMT, ":", 1
+    )
+    _run_seed_body_gapi(prefix_fix_fragment, tmp_path, probe)
+
+    # With the clear neutralized the partial DB survives, so bd init aborts...
+    assert (probe / "at_init").read_text() == "present-aborted", (
+        "negative control: with the clear neutralized the partial DB must still "
+        "be present at `bd init` time, aborting the create-fresh (lead-372r)"
+    )
+    # ...the create-fresh never runs (no CREATED_FRESH marker)...
+    assert not (beads / "embeddeddolt" / "CREATED_FRESH").exists(), (
+        "negative control: the aborted create-fresh must NOT write CREATED_FRESH "
+        "(lead-372r / GAP I)"
+    )
+    # ...and bd dolt push seeds nothing — the pre-fix offline failure.
+    assert (probe / "at_push").read_text() == "nothing", (
+        "negative control: with no create-fresh'd DB, `bd dolt push` seeds "
+        "nothing and the fatal verify fails -> seed exit 1 -> BC offline "
+        "(lead-372r / GAP I)"
+    )
+
+
+def test_lead_372r_clear_partial_ordering_in_seed_script_string(tmp_path):
+    """Structural backstop for the EXECUTED clear-before-init test: in the seed
+    script the `rm -rf .beads/embeddeddolt` clear must appear AFTER the
+    sync.remote unconfigure and BEFORE `bd init -p` (which is before
+    `bd dolt remote add`/`bd dolt push`) (lead-372r / GAP I)."""
+    from bc_launcher.controller import _empty_remote_seed_script
+
+    script = _empty_remote_seed_script(
+        "git+https://github.com/dstengle/shopsystem-knowledge-beads.git"
+    )
+    assert _CLEAR_PARTIAL_STMT in script, (
+        "seed script must reference clearing the partial .beads/embeddeddolt "
+        "before bd init (lead-372r / GAP I)"
+    )
+    i_unconfigure = script.index("config.yaml")
+    i_clear = script.index(_CLEAR_PARTIAL_STMT)
+    i_init = script.index("bd init")
+    i_remote_add = script.index("bd dolt remote add")
+    i_push = script.index("bd dolt push")
+    assert i_unconfigure < i_clear < i_init < i_remote_add < i_push, (
+        "ordering must be unconfigure(config.yaml) < clear(rm -rf "
+        ".beads/embeddeddolt) < bd init < bd dolt remote add < bd dolt push; "
+        f"got config.yaml@{i_unconfigure}, clear@{i_clear}, init@{i_init}, "
+        f"remote_add@{i_remote_add}, push@{i_push} (lead-372r / GAP I)"
+    )

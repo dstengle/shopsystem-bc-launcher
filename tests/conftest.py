@@ -15970,6 +15970,326 @@ def gaph_negative_control(ctx):
     )
 
 
+# ---------------------------------------------------------------------------
+# lead-372r / GAP I (ROOT, additive to GAP H 5351a4a8071b594f — UNCHANGED) —
+# the empty-remote seed must CLEAR any PARTIAL `.beads/embeddeddolt` left by the
+# failed `bd bootstrap` empty-remote clone BEFORE the create-fresh
+# `bd init -p <prefix>`, so the create-fresh actually runs instead of aborting
+# "database already exists; use bd init --force" (a failure MASKED by the
+# `|| true` on `bd init`).
+#
+# ROOT (in-container v0.3.57): GAP H unconfigures sync.remote before the
+# create-fresh, but at LAUNCH the PRECEDING failed `bd bootstrap` empty-remote
+# clone LEAVES a PARTIAL `.beads/embeddeddolt`.  `bd init -p` then ABORTS under
+# the `|| true` mask, so the create-fresh never happens, `bd dolt push` seeds
+# nothing, and the fatal `git ls-remote refs/dolt` verify fails -> seed exit 1
+# -> BC offline.  GAP H's executed test false-greened because its fixture
+# omitted the partial-embeddeddolt precondition.
+#
+# These steps materialise that precondition — a `.beads` tree whose
+# `.beads/embeddeddolt` ALREADY EXISTS — and EXECUTE the seed's create-fresh/seed
+# body with `bd` STUBBED to FAITHFULLY mimic real bd (init ABORTS non-zero when
+# `.beads/embeddeddolt` is present, CREATE-FRESHES writing a CREATED_FRESH marker
+# only when absent), asserting the EXECUTED clear -> init -> seed ordering.  The
+# negative control is bound to REAL code: the same seed body with only the clear
+# NEUTRALIZED leaves the partial DB in place, so `bd init` aborts under `|| true`
+# and the create-fresh never runs.  Scenario @scenario_hash:7c245031122e41bb.
+# ---------------------------------------------------------------------------
+
+_GAPI_SYNC_REMOTE_LINE = (
+    'sync.remote: "git+https://github.com/dstengle/shopsystem-knowledge-beads.git"'
+)
+# The clear-before-init statement GAP I adds to `_empty_remote_seed_script`.
+_GAPI_CLEAR_STMT = "rm -rf .beads/embeddeddolt"
+
+
+def _gapi_stub_prelude(probe_dir):
+    """A `bd` stub that FAITHFULLY mimics real bd's partial-DB behavior: `bd
+    init` ABORTS non-zero ("database already exists; use bd init --force") when
+    `.beads/embeddeddolt` is present, and CREATE-FRESHES (mkdir + CREATED_FRESH
+    marker) only when absent; each observed sub-command records probe state so
+    the EXECUTED clear -> init -> seed ordering can be asserted (lead-372r)."""
+    return (
+        f'PROBE="{probe_dir}"; '
+        'bd() { '
+        '  if [ "$1" = "init" ]; then '
+        '    if [ -d .beads/embeddeddolt ]; then '
+        '      printf present-aborted > "$PROBE/at_init"; '
+        '      echo "database already exists; use bd init --force" >&2; '
+        '      return 1; '
+        '    fi; '
+        '    mkdir -p .beads/embeddeddolt; '
+        '    : > .beads/embeddeddolt/CREATED_FRESH; '
+        '    printf absent-created > "$PROBE/at_init"; '
+        '    return 0; '
+        '  fi; '
+        '  if [ "$1" = "dolt" ] && [ "$2" = "push" ]; then '
+        '    if [ -f .beads/embeddeddolt/CREATED_FRESH ]; then '
+        '      printf seeded > "$PROBE/at_push"; '
+        '    else printf nothing > "$PROBE/at_push"; fi; '
+        '    return 0; '
+        '  fi; '
+        '  return 0; '
+        '}; '
+    )
+
+
+def _gapi_run_seed_body(script, workspace, probe_dir):
+    """Execute the seed's create-fresh/seed body (committed-prefix extraction
+    through the dolt seed, minus the live `git ls-remote` verify tail) against a
+    fixture whose `.beads/embeddeddolt` already exists, with `bd` stubbed to the
+    faithful partial-DB behavior (lead-372r / GAP I)."""
+    start = script.index("gapg_prefix=")
+    end = script.index("git ls-remote", start)
+    fragment = script[start:end]
+    return subprocess.run(
+        ["bash", "-c", _gapi_stub_prelude(probe_dir) + fragment],
+        cwd=str(workspace),
+        capture_output=True,
+        text=True,
+    )
+
+
+@given(
+    'a new BC is stood up via "create-bc" whose beads tracker remote is EMPTY '
+    'of Dolt data, so the standup\'s preceding "bd bootstrap" empty-remote clone '
+    'FAILS and leaves a PARTIAL ".beads/embeddeddolt" on disk'
+)
+def gapi_partial_embeddeddolt_fixture(ctx, tmp_path):
+    """Materialise the GAP I precondition GAP H omitted (lead-372r): the
+    configured-empty-remote `.beads` tree PLUS a PARTIAL `.beads/embeddeddolt`
+    directory — the exact on-disk state the preceding failed `bd bootstrap`
+    empty-remote clone leaves behind at launch."""
+    owner, bc = "dstengle", "shopsystem-knowledge"
+    ctx["gapi_dolt_url"] = f"git+https://github.com/{owner}/{bc}-beads.git"
+    ctx["gapi_committed_prefix"] = "shopsystem_knowledge"
+
+    ws = tmp_path / "gapi_ws"
+    beads = ws / ".beads"
+    beads.mkdir(parents=True)
+    (beads / "config.yaml").write_text(
+        "# Beads Configuration File\n"
+        "# the tracker remote line follows\n"
+        "\n"
+        + _GAPI_SYNC_REMOTE_LINE + "\n"
+    )
+    (beads / "metadata.json").write_text(
+        '{\n'
+        '  "database": "dolt",\n'
+        '  "backend": "dolt",\n'
+        '  "dolt_mode": "embedded",\n'
+        f'  "dolt_database": "{ctx["gapi_committed_prefix"]}",\n'
+        '  "project_id": "53d541df-a20b-4647-8639-ecfded13c9d3"\n'
+        '}\n'
+    )
+    (beads / "issues.jsonl").write_text(
+        '{"_type":"issue","id":"shopsystem_knowledge-a1b",'
+        '"title":"seed","status":"open","priority":1}\n'
+    )
+    # The PARTIAL embedded-Dolt working set the failed clone left behind — a
+    # directory that already EXISTS, so an un-cleared `bd init -p` aborts.
+    partial = beads / "embeddeddolt"
+    partial.mkdir()
+    (partial / "PARTIAL_FROM_FAILED_CLONE").write_text("half-written dolt state\n")
+    assert (beads / "embeddeddolt").is_dir(), (
+        "fixture must carry a PARTIAL .beads/embeddeddolt — the precondition the "
+        "failed bd bootstrap leaves that GAP H's fixture omitted (lead-372r)"
+    )
+    ctx["gapi_ws"] = ws
+    ctx["gapi_beads"] = beads
+
+
+@given(
+    'the standup has unconfigured "sync.remote" ahead of its create-fresh '
+    '"bd init -p <prefix>" per GAP H (lead-tc38, @scenario_hash:5351a4a8071b594f)'
+)
+def gapi_gaph_unconfigure_intact(ctx):
+    """GAP H (5351a4a8071b594f, UNCHANGED) is in place: the seed still
+    unconfigures `sync.remote` from `.beads/config.yaml` BEFORE the create-fresh
+    `bd init -p`.  GAP I builds ON that, additively (lead-372r)."""
+    from bc_launcher.controller import _empty_remote_seed_script
+
+    script = _empty_remote_seed_script(ctx["gapi_dolt_url"])
+    assert r"sync\.remote" in script and "config.yaml" in script, (
+        "GAP H's sync.remote unconfigure must remain in the seed (lead-372r)"
+    )
+    assert script.index("config.yaml") < script.index("bd init"), (
+        "GAP H unconfigure must still precede bd init (lead-372r)"
+    )
+    ctx["gapi_script"] = script
+
+
+@when(
+    "the create-bc standup's empty-remote seed orchestration runs its "
+    "create-fresh ordering"
+)
+def gapi_run_orchestration(ctx, tmp_path):
+    """EXECUTE the seed's create-fresh/seed body against the partial-embeddeddolt
+    fixture, with `bd` stubbed to faithfully abort on a present partial DB
+    (lead-372r / GAP I)."""
+    script = ctx.get("gapi_script")
+    if script is None:
+        from bc_launcher.controller import _empty_remote_seed_script
+
+        script = _empty_remote_seed_script(ctx["gapi_dolt_url"])
+        ctx["gapi_script"] = script
+    probe = tmp_path / "gapi_probe"
+    probe.mkdir()
+    result = _gapi_run_seed_body(script, ctx["gapi_ws"], probe)
+    assert result.returncode == 0, (
+        f"seed body execution failed: {result.stderr!r} (lead-372r / GAP I)"
+    )
+    ctx["gapi_probe"] = probe
+    ctx["gapi_at_init"] = probe / "at_init"
+    ctx["gapi_at_push"] = probe / "at_push"
+
+
+@then(
+    'the seed FIRST clears the partial state by removing ".beads/embeddeddolt" '
+    '(via "rm -rf .beads/embeddeddolt", or equivalently by running '
+    '"bd init --force") BEFORE it runs "bd init -p <prefix>"'
+)
+def gapi_clears_before_init(ctx):
+    """EXECUTED (lead-372r / GAP I): at `bd init -p` time the partial
+    `.beads/embeddeddolt` must be GONE, so the create-fresh runs instead of
+    aborting "database already exists" under the `|| true` mask.
+
+    RED teeth: pre-fix the seed never clears the partial DB, so at `bd init`
+    time it is still present and the stubbed init records `present-aborted`."""
+    at_init = ctx["gapi_at_init"]
+    assert at_init.exists(), "the seed body never reached `bd init` (lead-372r)"
+    assert at_init.read_text() == "absent-created", (
+        "the partial .beads/embeddeddolt was STILL present when `bd init -p` "
+        "ran — `bd init` ABORTS 'database already exists; use bd init --force', "
+        "a failure MASKED by `|| true`, so the create-fresh never runs; the seed "
+        "must remove .beads/embeddeddolt BEFORE bd init (lead-372r / GAP I)"
+    )
+    # Structural: the clear appears AFTER the GAP H unconfigure and BEFORE bd init.
+    script = ctx["gapi_script"]
+    assert _GAPI_CLEAR_STMT in script, (
+        f"seed must clear the partial DB with {_GAPI_CLEAR_STMT!r} (lead-372r)"
+    )
+    assert (
+        script.index("config.yaml")
+        < script.index(_GAPI_CLEAR_STMT)
+        < script.index("bd init")
+    ), (
+        "ordering must be unconfigure(config.yaml) < clear(rm -rf "
+        ".beads/embeddeddolt) < bd init (lead-372r / GAP I)"
+    )
+
+
+@then(
+    '"bd init -p <prefix>" then CREATE-FRESHES a prefixed local dolt database '
+    'adopting the committed issue_prefix rather than aborting "database already '
+    'exists; use bd init --force"'
+)
+def gapi_create_freshes(ctx):
+    """EXECUTED (lead-372r / GAP I): because the partial DB was cleared, the
+    stubbed `bd init -p` CREATE-FRESHES (writing CREATED_FRESH) adopting the
+    committed prefix, rather than aborting 'database already exists'."""
+    assert (ctx["gapi_beads"] / "embeddeddolt" / "CREATED_FRESH").exists(), (
+        "the create-fresh never ran — `bd init -p` aborted under `|| true` "
+        "because the partial DB was left in place (lead-372r / GAP I)"
+    )
+    # The create-fresh still adopts the COMMITTED prefix from metadata.json.
+    script = ctx["gapi_script"]
+    assert 'bd init -p "$gapg_prefix"' in script, (
+        "the create-fresh must adopt the committed prefix via "
+        "`bd init -p \"$gapg_prefix\"` (lead-372r / GAP I)"
+    )
+
+
+@then(
+    'the standup then seeds that prefixed local database with "bd dolt push" so '
+    'the tracker remote carries Dolt data with "refs/dolt/*" refs present and '
+    'the fatal "git ls-remote refs/dolt" verify passes rather than driving the '
+    "seed to exit 1"
+)
+def gapi_seeds_and_verifies(ctx):
+    """EXECUTED (lead-372r / GAP I): `bd dolt push` seeds THAT create-fresh'd DB
+    (not nothing), and the seed carries the fatal `git ls-remote refs/dolt`
+    verify that now passes rather than driving the seed to exit 1."""
+    at_push = ctx["gapi_at_push"]
+    assert at_push.exists() and at_push.read_text() == "seeded", (
+        "`bd dolt push` seeded nothing — with the create-fresh aborted there was "
+        "no prefixed DB to push, so refs/dolt/* never land and the fatal verify "
+        "fails -> seed exit 1 -> BC offline (lead-372r / GAP I)"
+    )
+    script = ctx["gapi_script"]
+    assert "bd dolt push" in script, (
+        "the seed must `bd dolt push` to seed refs/dolt/* (lead-372r / GAP I)"
+    )
+    assert re.search(r"git ls-remote \S+ 'refs/dolt/\*'", script), (
+        "the seed must carry the fatal git ls-remote refs/dolt verify "
+        "(lead-372r / GAP I)"
+    )
+
+
+@then(
+    'as the negative control, had the seed left the partial ".beads/embeddeddolt" '
+    'in place, "bd init -p" would ABORT "database already exists" — a failure '
+    'MASKED by the "|| true" — so the create-fresh would never run, "bd dolt '
+    'push" would seed nothing, and the fatal verify would fail, which is the '
+    "exact pre-fix offline failure this clear-before-init ordering exists to avoid"
+)
+def gapi_negative_control(ctx, tmp_path):
+    """NEGATIVE CONTROL bound to REAL code (lead-372r / GAP I): the same seed
+    body with ONLY the clear-before-init NEUTRALIZED leaves the partial
+    `.beads/embeddeddolt` in place, so the stubbed `bd init -p` ABORTS under
+    `|| true`, the create-fresh never runs, and `bd dolt push` seeds nothing —
+    the exact pre-fix offline failure the clear-before-init ordering averts."""
+    owner, bc = "dstengle", "shopsystem-knowledge"
+    ws = tmp_path / "gapi_neg_ws"
+    beads = ws / ".beads"
+    beads.mkdir(parents=True)
+    (beads / "config.yaml").write_text(
+        "# Beads Configuration File\n\n" + _GAPI_SYNC_REMOTE_LINE + "\n"
+    )
+    (beads / "metadata.json").write_text(
+        '{\n  "dolt_database": "shopsystem_knowledge"\n}\n'
+    )
+    (beads / "issues.jsonl").write_text(
+        '{"_type":"issue","id":"shopsystem_knowledge-a1b","title":"seed"}\n'
+    )
+    partial = beads / "embeddeddolt"
+    partial.mkdir()
+    (partial / "PARTIAL_FROM_FAILED_CLONE").write_text("half-written\n")
+
+    script = ctx["gapi_script"]
+    assert _GAPI_CLEAR_STMT in script, (
+        f"seed must carry the clear {_GAPI_CLEAR_STMT!r} to neutralize "
+        "(lead-372r / GAP I)"
+    )
+    start = script.index("gapg_prefix=")
+    end = script.index("git ls-remote", start)
+    prefix_fix_fragment = script[start:end].replace(_GAPI_CLEAR_STMT, ":", 1)
+    probe = tmp_path / "gapi_neg_probe"
+    probe.mkdir()
+    subprocess.run(
+        ["bash", "-c", _gapi_stub_prelude(probe) + prefix_fix_fragment],
+        cwd=str(ws),
+        capture_output=True,
+        text=True,
+    )
+    # With the clear neutralized the partial DB survives -> bd init aborts...
+    assert (probe / "at_init").read_text() == "present-aborted", (
+        "negative control: with the clear neutralized the partial DB must still "
+        "be present at `bd init` time, aborting the create-fresh (lead-372r)"
+    )
+    # ...the create-fresh never runs...
+    assert not (beads / "embeddeddolt" / "CREATED_FRESH").exists(), (
+        "negative control: the aborted create-fresh must NOT write CREATED_FRESH "
+        "(lead-372r / GAP I)"
+    )
+    # ...and bd dolt push seeds nothing — the pre-fix offline failure.
+    assert (probe / "at_push").read_text() == "nothing", (
+        "negative control: with no create-fresh'd DB `bd dolt push` seeds "
+        "nothing and the fatal verify fails -> seed exit 1 -> BC offline "
+        "(lead-372r / GAP I)"
+    )
+
+
 # ===========================================================================
 # lead-b3f0 — ADR-058 AMENDED: fabro-engage REDESIGN.  THREE superseding
 # scenarios correcting the pinned-but-broken fabro engage lifecycle:
