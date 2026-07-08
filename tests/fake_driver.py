@@ -95,6 +95,34 @@ def _is_repo_create_command(command: list[str]) -> bool:
     return False
 
 
+def _is_origin_owner_writeback_command(command: list[str]) -> bool:
+    """Return True if ``command`` is the launcher's ORIGIN_OWNER writeback step.
+
+    lead-r34c / GAP B.  The BC's scaffolded beads tracker config is pushed with
+    the literal ``ORIGIN_OWNER`` placeholder (correct at scaffold time — no
+    origin owner is known yet).  BEFORE `bd bootstrap` runs, the in-container
+    standup must RESOLVE that placeholder to the derived GitHub owner (parsed
+    from the container's `/workspace` git origin) and WRITE it into BOTH the
+    `.beads` config sync.remote AND the functional bd dolt remote, so the
+    bootstrap clone target is `<owner>/<bc>-beads` and no `ORIGIN_OWNER`
+    segment survives.  The writeback runs as a login-shell script and is
+    recognised by its `remote get-url origin` owner-derivation combined with
+    the `ORIGIN_OWNER` placeholder rewrite; distinct from the bd bootstrap,
+    empty-remote seed, and absent-repo create steps (which this must NOT
+    claim — none carries both tokens).
+    """
+    if (
+        len(command) >= 3
+        and command[0] == "bash"
+        and command[1] in ("-lc", "-c")
+    ):
+        script = command[2]
+        if "bd bootstrap" in script:
+            return False
+        return "remote get-url origin" in script and "ORIGIN_OWNER" in script
+    return False
+
+
 @dataclass
 class ExecCall:
     """Records one exec_run or exec_interactive call.
@@ -686,6 +714,22 @@ class FakeDockerDriver:
         # Containers whose previously-absent `<bc>-beads` tracker repo has been
         # CREATED by the launcher's absent-repo provisioning step.
         self._beads_repo_created: set[str] = set()
+        # lead-r34c / GAP B — containers whose scaffolded functional bd dolt
+        # remote still carries the literal ORIGIN_OWNER placeholder (pushed at
+        # scaffold time when no origin owner was known).  While the placeholder
+        # survives, `bd dolt remote list` reports an ORIGIN_OWNER owner segment
+        # and `bd bootstrap`'s clone target is ORIGIN_OWNER/<bc>-beads, failing
+        # "Repository not found".  The launcher's resolve-and-writeback step
+        # rewrites the functional remote to the derived owner before bootstrap.
+        self._beads_remote_owner_placeholder: set[str] = set()
+        # The GitHub owner the container's /workspace git origin resolves to
+        # (models `git -C /workspace remote get-url origin`); the writeback step
+        # derives the functional remote's owner segment from it.
+        self._container_origin_owner: dict[str, str] = {}
+        # The owner segment currently on the functional bd dolt remote (what
+        # `bd dolt remote list` reports).  Set by the writeback step to the
+        # derived owner once ORIGIN_OWNER has been resolved.
+        self._beads_functional_remote_owner: dict[str, str] = {}
 
     # --- Setup helpers (called by step definitions) ---
 
@@ -1290,6 +1334,39 @@ class FakeDockerDriver:
         """True once the launcher's absent-repo provisioning step has CREATED
         the previously-absent `<bc>-beads` tracker repo (lead-7jc2)."""
         return container_name in self._beads_repo_created
+
+    def set_beads_remote_owner_placeholder(
+        self, container_name: str, origin_owner: str
+    ) -> None:
+        """Model the BC's scaffolded functional bd dolt remote carrying the
+        literal ORIGIN_OWNER placeholder (lead-r34c / GAP B).
+
+        Pushed at scaffold time when no origin owner was known yet.  While the
+        placeholder survives, `bd dolt remote list` reports an ORIGIN_OWNER
+        owner segment and `bd bootstrap`'s clone target is
+        ORIGIN_OWNER/<bc>-beads (fails "Repository not found").  ``origin_owner``
+        is the owner the container's /workspace git origin resolves to — the
+        launcher's resolve-and-writeback step must derive it and rewrite the
+        functional remote to it before bootstrap.
+        """
+        self._beads_remote_owner_placeholder.add(container_name)
+        self._container_origin_owner[container_name] = origin_owner
+        self._beads_functional_remote_owner[container_name] = "ORIGIN_OWNER"
+
+    def beads_functional_remote_owner(self, container_name: str) -> str:
+        """The owner segment currently on the functional bd dolt remote — what
+        `bd dolt remote list` reports and `bd bootstrap` clones from (lead-r34c
+        / GAP B).  "ORIGIN_OWNER" until the launcher's writeback step resolves
+        it to the derived owner."""
+        return self._beads_functional_remote_owner.get(container_name, "")
+
+    def beads_functional_remote_url(self, container_name: str) -> str:
+        """The full functional bd dolt remote URL `bd dolt remote list` reports
+        (lead-r34c / GAP B), built from the current owner segment."""
+        owner = self._beads_functional_remote_owner.get(container_name, "")
+        if not owner:
+            return ""
+        return f"git+https://github.com/{owner}/{container_name}-beads.git"
 
     def committed_beads_prefix(self, container_name: str) -> str:
         """Return the committed prefix the cloned repo's registry carries."""
@@ -2360,6 +2437,31 @@ class FakeDockerDriver:
         # so a subsequent `bd bootstrap` fails "git remote has no branches"
         # until the empty-remote seed step initializes it — exactly the
         # existing lead-5k8c seed path.
+        # lead-r34c / GAP B — the launcher's ORIGIN_OWNER writeback step.  It
+        # RESOLVES the derived owner from the container's /workspace git origin
+        # and WRITES it into the .beads config sync.remote + the functional bd
+        # dolt remote BEFORE bd bootstrap, so no literal ORIGIN_OWNER survives
+        # and the clone target becomes <owner>/<bc>-beads.  The modelled effect:
+        # the functional remote's owner segment becomes the container's derived
+        # origin owner and the ORIGIN_OWNER placeholder is cleared.
+        if _is_origin_owner_writeback_command(command):
+            owner = self._container_origin_owner.get(container_name, "")
+            if owner:
+                self._beads_functional_remote_owner[container_name] = owner
+                self._beads_remote_owner_placeholder.discard(container_name)
+                return subprocess.CompletedProcess(
+                    command, 0,
+                    f"resolved ORIGIN_OWNER -> {owner} in .beads config and "
+                    "functional bd dolt remote\n",
+                    "",
+                )
+            # No derivable origin owner (unconfigured) — the writeback cannot
+            # resolve; the placeholder survives and bootstrap will still fail.
+            return subprocess.CompletedProcess(
+                command, 1, "",
+                "could not resolve owner from /workspace git origin\n",
+            )
+
         if _is_repo_create_command(command):
             self._beads_repo_created.add(container_name)
             self._beads_repo_absent.discard(container_name)
@@ -2387,6 +2489,18 @@ class FakeDockerDriver:
             )
 
         if is_bd_bootstrap_command(command):
+            # lead-r34c / GAP B — while the functional bd dolt remote still
+            # carries the scaffolded ORIGIN_OWNER placeholder (the standup did
+            # NOT resolve it to the derived owner before bootstrap), the clone
+            # target is ORIGIN_OWNER/<bc>-beads and fails "Repository not found"
+            # — the exact David-2026-07-07 standup failure GAP B closes.
+            if container_name in self._beads_remote_owner_placeholder:
+                return subprocess.CompletedProcess(
+                    command, 1, "",
+                    "dolt clone git+https://github.com/ORIGIN_OWNER/"
+                    f"{container_name}-beads.git: Repository not found; the "
+                    "remote repository does not exist\n",
+                )
             # lead-7jc2 — an ABSENT `<bc>-beads` GitHub tracker repo makes the
             # bootstrap clone fail "Repository not found" (a strictly earlier
             # failure than an empty-but-existing remote) UNTIL the launcher's
@@ -2450,6 +2564,21 @@ class FakeDockerDriver:
                 f"{CONTAINER_WORKSPACE}/.beads/issues.jsonl\n",
                 "",
             )
+
+        # Simulate `bd dolt remote list` — lead-r34c / GAP B.  Reports the
+        # functional bd dolt remote (the one bd bootstrap clones from), keyed
+        # off the current owner segment.  Before the launcher's writeback step
+        # the owner segment is the scaffolded ORIGIN_OWNER placeholder; after it
+        # is the derived GitHub owner.  Recognised in bare and login-shell form.
+        if command[:4] == ["bd", "dolt", "remote", "list"] or (
+            len(command) >= 3
+            and command[0] == "bash"
+            and command[1] in ("-lc", "-c")
+            and "bd dolt remote list" in command[2]
+        ):
+            url = self.beads_functional_remote_url(container_name)
+            listing = f"origin {url}\n" if url else ""
+            return subprocess.CompletedProcess(command, 0, listing, "")
 
         # Simulate bd dolt pull — lead-ezzr revert-teeth.  This is the
         # SUPERSEDED mechanism's first step.  It pre-creates an EMPTY bd-created
