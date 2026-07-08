@@ -28,7 +28,7 @@ Feature: bc-container launch --orchestrator {tmux|fabro} selects the engage tier
   send-keys / `claude` engage on that path, the tmux-default engage, and the
   launch-parity surfaces — never to a model.
 
-  @scenario_hash:30fd5f2079f1c433 @bc:shopsystem-bc-launcher
+  @scenario_hash:084afc3b004e9a6e @bc:shopsystem-bc-launcher
     Scenario: bc-container launch --orchestrator fabro starts the ephemeral in-container fabro server and runs ONE persistent reactive dispatcher def as the engage step, requiring no launch-time work id and running no tmux engage on that path
     Given the shopsystem-bc-launcher BC is installed
     And bc-container launch is run for BC name "shopsystem-messaging" on the fabro orchestrator launch path selected by "--orchestrator fabro" with no "--work-id" supplied
@@ -36,12 +36,12 @@ Feature: bc-container launch --orchestrator {tmux|fabro} selects the engage tier
     And the launcher's idempotent readiness barrier composing the messaging DB and the agent-vault broker has passed (scenario 34)
     When the engage step the launcher issues on the fabro orchestrator path is inspected structurally, without a live docker daemon, a running fabro server, or a reachable agent-vault
     Then AFTER the readiness barrier passes the launcher starts an ephemeral in-container fabro server running "provider=local" in the foreground with no web UI bound to a local 127.0.0.1 socket, issuing the argv "fabro server start --foreground --no-web", so the loop runs headless inside the one bc-base container and nothing is orchestrated outside it
-    And the launcher invokes "fabro run dispatcher.fabro -I BC_NAME=shopsystem-messaging" against that server as the ONE persistent engage step, carrying only the constant BC_NAME into the run via the def's "[run.environment.env]" and supplying NO "-I WORK_ID", so the reactive dispatcher def poured into "/workspace/.fabro/" owns the container's lifecycle and discovers work ids at runtime rather than running one-shot on a launch-time work id (ADR-058 D1 correcting ADR-050 D3)
+    And the launcher invokes "fabro run dispatcher.toml -I BC_NAME=shopsystem-messaging" against that server as the ONE persistent engage step, carrying only the constant BC_NAME into the run via the def's "[run.environment.env]" and supplying NO "-I WORK_ID", so the reactive dispatcher def poured into "/workspace/.fabro/" owns the container's lifecycle and discovers work ids at runtime rather than running one-shot on a launch-time work id (ADR-058 D1 correcting ADR-050 D3)
     And no "--work-id" is required at the fabro launch interface and any "--work-id" passed on the fabro path is an ignored no-op, exactly like the tmux path which takes no work id at launch, restoring the interface half of launch parity (ADR-058 D6)
     And no tmux "agent" send-keys session and no "claude" engage is started on this path, the engage tier being REPLACED by the fabro run-graph entry rather than added alongside it (ADR-050 D3)
     And the container, credential-proxy, postgres DSN and shop-msg mailbox surfaces are unchanged from the tmux path, only the engage tier differing (ADR-050 D1/D2 launch parity)
 
-  @scenario_hash:cacccc52ba0b0766 @bc:shopsystem-bc-launcher
+  @scenario_hash:a4726855a22f83d3 @bc:shopsystem-bc-launcher
     Scenario: a fresh clone-path --orchestrator fabro launch provisions the ~/.fabro server config and runs fabro from /workspace/.fabro, so the fabro engage bootstraps successfully instead of crashing at server auth or def resolution
     Given the shopsystem-bc-launcher BC is installed
     And bc-container launch is run for BC name "shopsystem-messaging" on the fabro orchestrator launch path selected by "--orchestrator fabro" in a FRESH CLONE-PATH container with NO host-home "~/.fabro" mount and no interactively pre-configured fabro home
@@ -50,7 +50,7 @@ Feature: bc-container launch --orchestrator {tmux|fabro} selects the engage tier
     When the launcher's recorded fabro engage steps — the server config it provisions, the "fabro server start" argv, and the working directory of the "fabro run" engage — are inspected structurally, without a live docker daemon, a running fabro server, or a reachable agent-vault
     Then BEFORE starting the server the launcher provisions a VALID server config at "~/.fabro/settings.toml" (the file "fabro server start" reads), e.g. by running "fabro install --non-interactive --skip-llm --github-strategy token", and that file contains a "[server.auth]" table with "methods" set, a "SESSION_SECRET" of exactly 64 hexadecimal characters, and a "FABRO_DEV_TOKEN" of the form "fabro_dev_" followed by 64 hexadecimal characters (NOT a bare hex token), so "fabro server start --foreground --no-web" starts successfully rather than dying at "server.auth.methods: field is required"
     And this provisioned "~/.fabro/settings.toml" server config is DISTINCT from "/workspace/.fabro/settings.toml", the PROJECT LLM settings the launcher already writes — the project settings are NOT the server config and do not by themselves satisfy "fabro server start", so the launcher writes BOTH the project "/workspace/.fabro/settings.toml" and the server "~/.fabro/settings.toml"
-    And the launcher issues the persistent "fabro run dispatcher.fabro -I BC_NAME=shopsystem-messaging" engage with its working directory set to the project dir "/workspace/.fabro", NOT "/workspace", so fabro resolves the poured "dispatcher.fabro" (and its sibling "workflow.fabro") rather than failing "workflow not found: /workspace/workflow.fabro"
+    And the launcher issues the persistent "fabro run dispatcher.toml -I BC_NAME=shopsystem-messaging" engage with its working directory set to the project dir "/workspace/.fabro", NOT "/workspace", so fabro resolves the poured "dispatcher.toml" (and the "dispatcher.fabro" / "workflow.fabro" it applies) rather than failing "workflow not found: /workspace/dispatcher.toml"
     And as the observable result a fresh clone-path "--orchestrator fabro" launch REACHES the fabro engage successfully — the in-container fabro server comes up and the "fabro run" engage resolves the poured def — instead of crashing at server auth bootstrap or def resolution as the un-provisioned clone path currently does (ADR-058 bundled fix, lead-l4iw)
 
   @scenario_hash:24d94274b9cbc2b0 @bc:shopsystem-bc-launcher

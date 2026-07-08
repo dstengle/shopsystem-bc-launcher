@@ -14673,22 +14673,24 @@ def cadr_no_fabro_on_default(ctx):
 # ===========================================================================
 # lead-odd9 — ADR-058: the fabro engage is corrected from the ONE-SHOT
 # `fabro run workflow.fabro -I BC_NAME -I WORK_ID` (retired) to ONE persistent
-# reactive-cyclic `fabro run dispatcher.fabro -I BC_NAME=<bc>` engage, plus the
-# bundled clone-path bootstrap (valid ~/.fabro server config + run cwd).
+# reactive engage.  lead-b3f0 (ADR-058 AMENDED, scenario A
+# @scenario_hash:24d94274b9cbc2b0) further corrects the engage ENTRY to the
+# `dispatcher.toml` ENTRYPOINT (`fabro run dispatcher.toml -I BC_NAME=<bc>`,
+# which applies provider=local so the sandbox is in-process), NOT the bare
+# `dispatcher.fabro` graph def.  Plus the bundled clone-path bootstrap (valid
+# ~/.fabro server config + run cwd).
 #
 # Pins:
 #   @scenario_hash:30fd5f2079f1c433 — engage-tier SELECTION + parity (dispatcher
-#       engage, no launch-time work id, --work-id ignored no-op).
-#   @scenario_hash:bf9f8c9d7f2865e3 — the poured dispatcher.fabro cyclic-graph
-#       contract (start/watch/launch/end + reactive cycle).
+#       engage, no launch-time work id, --work-id ignored no-op); argv
+#       reconciled to `fabro run dispatcher.toml` (scenario A supersedes the
+#       old `dispatcher.fabro` argv; lead-4muh formalizes the re-pin).
 #   @scenario_hash:cacccc52ba0b0766 — the bundled clone-path server-config
-#       provisioning + run-cwd fix (lead-l4iw).
+#       provisioning + run-cwd fix (lead-l4iw); argv reconciled to
+#       `fabro run dispatcher.toml` (scenario A; lead-4muh formalizes).
 #
 # FIDELITY: every assertion binds to the REAL launcher's ACTUAL recorded exec
-# calls (controller.launch over FakeDockerDriver) and to the REAL committed
-# dispatcher.fabro asset bytes — never a model.  The dispatcher.fabro structural
-# leg reuses the ky63 quote-aware DOT parser (_ky63_parse_nodes /
-# _ky63_parse_edges).
+# calls (controller.launch over FakeDockerDriver) — never a model.
 # ===========================================================================
 
 from bc_launcher.controller import (  # noqa: E402
@@ -14814,14 +14816,17 @@ def odd9_inspect_engage_steps(ctx):
     'lifecycle and discovers work ids at runtime rather than running one-shot '
     "on a launch-time work id (ADR-058 D1 correcting ADR-050 D3)"))
 def odd9_run_dispatcher(run_argv, env_table, def_dir, ctx):
-    assert run_argv == "fabro run dispatcher.fabro -I BC_NAME=shopsystem-messaging"
+    # lead-b3f0 / scenario A (@scenario_hash:24d94274b9cbc2b0): the engage argv
+    # is reconciled from the bare `dispatcher.fabro` graph def to the
+    # `dispatcher.toml` ENTRYPOINT (provider=local, in-process).
+    assert run_argv == "fabro run dispatcher.toml -I BC_NAME=shopsystem-messaging"
     call = _cadr_fabro_engage_call(ctx)
     assert call is not None, (
         "the fabro-path launcher did not emit a fabro engage exec; "
         f"exec_calls: {[c.command[:3] for c in _cadr_exec_calls(ctx)]!r}"
     )
     script = call.command[2]
-    # The ONE persistent dispatcher engage: `fabro run dispatcher.fabro
+    # The ONE persistent dispatcher engage: `fabro run dispatcher.toml
     # -I BC_NAME=<bc>` — no -I WORK_ID, no one-shot workflow.fabro run.
     assert run_argv in script, (
         f"launcher engage script must issue {run_argv!r}; got {script!r}"
@@ -14979,14 +14984,15 @@ def odd9_both_settings_distinct(server_settings, project_settings,
 @then(parsers.parse(
     'the launcher issues the persistent "{run_argv}" engage with its working '
     'directory set to the project dir "{proj_dir}", NOT "{workspace}", so '
-    'fabro resolves the poured "dispatcher.fabro" (and its sibling '
-    '"workflow.fabro") rather than failing "workflow not found: '
-    '/workspace/workflow.fabro"'))
+    'fabro resolves the poured "dispatcher.toml" (and the "dispatcher.fabro" / '
+    '"workflow.fabro" it applies) rather than failing "workflow not found: '
+    '/workspace/dispatcher.toml"'))
 def odd9_run_cwd(run_argv, proj_dir, workspace, ctx):
     call = _cadr_fabro_engage_call(ctx)
     assert call is not None
     script = call.command[2]
-    assert run_argv == "fabro run dispatcher.fabro -I BC_NAME=shopsystem-messaging"
+    # lead-b3f0 / scenario A: argv reconciled to the `dispatcher.toml` entrypoint.
+    assert run_argv == "fabro run dispatcher.toml -I BC_NAME=shopsystem-messaging"
     assert run_argv in script, (
         f"the engage must issue {run_argv!r}; script:\n{script}"
     )
@@ -14994,14 +15000,14 @@ def odd9_run_cwd(run_argv, proj_dir, workspace, ctx):
     cd_pos = script.find(f"cd {proj_dir}")
     if cd_pos == -1:
         cd_pos = script.find(f"cd '{proj_dir}'")
-    run_pos = script.find("fabro run dispatcher.fabro")
+    run_pos = script.find("fabro run dispatcher.toml")
     assert cd_pos != -1 and cd_pos < run_pos, (
         f"the engage must `cd {proj_dir}` BEFORE `fabro run` so the poured def "
         f"resolves; script:\n{script}"
     )
     # It must NOT resolve the WORKDIR-root path the clone-path bug produced.
-    assert f"{workspace}/dispatcher.fabro" not in script, (
-        f"the engage must NOT resolve {workspace}/dispatcher.fabro; script:\n{script}"
+    assert f"{workspace}/dispatcher.toml" not in script, (
+        f"the engage must NOT resolve {workspace}/dispatcher.toml; script:\n{script}"
     )
     assert f"{workspace}/workflow.fabro" not in script, (
         f"the engage must NOT resolve {workspace}/workflow.fabro; script:\n{script}"
@@ -15023,362 +15029,9 @@ def odd9_reaches_engage(flag, ctx):
     assert _cadr_fabro_server_calls(ctx), "fabro server start must be present"
     assert _cadr_fabro_run_calls(ctx), "fabro run must be present"
     call = _cadr_fabro_engage_call(ctx)
-    assert "fabro run dispatcher.fabro" in call.command[2], (
-        "the engage must resolve the poured dispatcher.fabro def"
-    )
-
-
-# ===========================================================================
-# lead-odd9 — @scenario_hash:bf9f8c9d7f2865e3: the poured dispatcher.fabro
-# CYCLIC-GRAPH contract (ADR-058 D2/D3/D5).  Binds structurally to the REAL
-# committed dispatcher.fabro asset bytes via the launcher's own def-asset root,
-# reusing the ky63 quote-aware DOT parser (_ky63_parse_nodes) plus a dispatcher-
-# node-set edge parser.
-# ===========================================================================
-
-_ODD9_DISPATCHER_NODES = {"start", "end", "watch", "launch"}
-
-
-def _odd9_dispatcher_graph_text():
-    """The REAL committed dispatcher.fabro bytes (the poured def), via the
-    launcher's own def-asset root."""
-    path = _ky63_def_asset_root() / "dispatcher.fabro"
-    assert path.is_file(), (
-        f"the poured dispatcher.fabro asset is ABSENT at {path}; the reactive "
-        "dispatcher def must ship in the launcher's fabro-def bundle (ADR-058 D2)"
-    )
-    return path.read_text()
-
-
-def _odd9_dispatcher_edges(graph: str):
-    """[(src, dst, attr_block)] for edges between dispatcher nodes, quote-aware
-    and comment-stripped (mirrors _ky63_parse_edges but filtered to the
-    dispatcher node set)."""
-    lc = _ky63_strip_line_comments(graph)
-    inner = lc[lc.index("{") + 1:lc.rindex("}")]
-    edges = []
-    for m in re.finditer(r"\b([A-Za-z_]\w*)\s*->\s*([A-Za-z_]\w*)", inner):
-        src, dst = m.group(1), m.group(2)
-        k = m.end()
-        while k < len(inner) and inner[k] in " \t\n":
-            k += 1
-        attr = ""
-        if k < len(inner) and inner[k] == "[":
-            depth = 0
-            inq = False
-            j = k
-            while j < len(inner):
-                c = inner[j]
-                if inq:
-                    if c == "\\":
-                        j += 2
-                        continue
-                    if c == '"':
-                        inq = False
-                else:
-                    if c == '"':
-                        inq = True
-                    elif c == "[":
-                        depth += 1
-                    elif c == "]":
-                        depth -= 1
-                        if depth == 0:
-                            attr = inner[k:j + 1]
-                            break
-                j += 1
-        if src in _ODD9_DISPATCHER_NODES and dst in _ODD9_DISPATCHER_NODES:
-            edges.append((src, dst, attr))
-    return edges
-
-
-# --- Given: container running with dispatcher.fabro + workflow.fabro poured ---
-
-@given(parsers.parse(
-    'the container "{container_name}" is running with the self-contained fabro '
-    'def set POURED by shop-templates into "{def_dir}" at launch, including '
-    '"dispatcher.fabro" and the UNCHANGED ADR-051 "workflow.fabro" child def'))
-def odd9_container_running_dispatcher(container_name, def_dir, ctx, fake_driver):
-    assert fake_driver.is_running(container_name), (
-        f"Expected {container_name!r} to be running after the fabro-path launch."
-    )
-    ctx["container_name"] = container_name
-
-
-# --- When (bf9f) -------------------------------------------------------------
-
-@when(parsers.parse(
-    'the engage the launcher issues and the poured "dispatcher.fabro" def are '
-    "inspected structurally, without a live docker daemon, a running fabro "
-    "server, or a reachable agent-vault"))
-def odd9_inspect_engage_and_dispatcher(ctx):
-    ctx["odd9_dispatcher_graph"] = _odd9_dispatcher_graph_text()
-
-
-def _odd9_graph(ctx):
-    return ctx.get("odd9_dispatcher_graph") or _odd9_dispatcher_graph_text()
-
-
-# --- Then (bf9f): the ONE persistent dispatcher engage -----------------------
-
-@then(parsers.parse(
-    'AFTER the readiness barrier passes the launcher issues ONE persistent '
-    '"{run_argv}" as the engage, carrying only the constant BC_NAME via '
-    '"{env_table}" and supplying NO "-I WORK_ID" and requiring NO "--work-id", '
-    "so that one run is the reactive dispatcher owning the container's "
-    "lifecycle and discovering work ids at runtime (ADR-058 D1)"))
-def odd9_bf9f_persistent_engage(run_argv, env_table, ctx):
-    assert run_argv == "fabro run dispatcher.fabro -I BC_NAME=shopsystem-messaging"
-    call = _cadr_fabro_engage_call(ctx)
-    assert call is not None, "the fabro-path launcher did not emit an engage exec"
-    script = call.command[2]
-    assert run_argv in script, (
-        f"the engage must issue the ONE persistent {run_argv!r}; script:\n{script}"
-    )
-    assert "WORK_ID" not in script, (
-        f"the persistent dispatcher engage must carry NO -I WORK_ID; script:\n{script}"
-    )
-    # Only ONE fabro run in the engage (the persistent dispatcher), not a
-    # one-shot child run.
-    assert script.count("fabro run ") == 1, (
-        f"the engage must issue exactly ONE persistent `fabro run`; script:\n{script}"
-    )
-
-
-# --- Then (bf9f): the CYCLIC graph shape -------------------------------------
-
-@then(parsers.parse(
-    'the poured "dispatcher.fabro" is a CYCLIC graph with exactly one start '
-    'terminal "start" ("{start_shape}") and exactly one shutdown terminal '
-    '"end" ("{end_shape}"), whose edges are "start -> watch", the '
-    'unconditional "watch -> launch", the conditional "watch -> end" '
-    '("{cond}"), and the back-edge "launch -> watch" that forms the cycle, so '
-    "the run persists — cycling watch->launch->watch — until shutdown (ADR-058 "
-    "D2)"))
-def odd9_bf9f_cyclic_graph(start_shape, end_shape, cond, ctx):
-    graph = _odd9_graph(ctx)
-    nodes = _ky63_parse_nodes(graph)
-    for n in ("start", "end", "watch", "launch"):
-        assert n in nodes, f"dispatcher.fabro missing node {n!r}"
-    # Exactly one start terminal (Mdiamond) and one shutdown terminal (Msquare).
-    assert start_shape in nodes["start"], (
-        f"'start' must be {start_shape!r}; body: {nodes['start']!r}"
-    )
-    assert end_shape in nodes["end"], (
-        f"'end' must be {end_shape!r}; body: {nodes['end']!r}"
-    )
-    assert graph.count("shape=Mdiamond") == 1, "exactly one start terminal"
-    assert graph.count("shape=Msquare") == 1, "exactly one shutdown terminal"
-
-    edges = _odd9_dispatcher_edges(graph)
-    edge_pairs = {(s, d) for s, d, a in edges}
-    assert ("start", "watch") in edge_pairs, "missing start -> watch"
-    assert ("watch", "launch") in edge_pairs, "missing watch -> launch"
-    assert ("watch", "end") in edge_pairs, "missing watch -> end"
-    assert ("launch", "watch") in edge_pairs, "missing the launch -> watch cycle back-edge"
-
-    # watch -> launch is UNCONDITIONAL (the success WAKE); watch -> end is the
-    # conditional shutdown edge.
-    watch_launch = [a for s, d, a in edges if (s, d) == ("watch", "launch")]
-    assert watch_launch and "outcome=failed" not in watch_launch[0], (
-        "watch -> launch must be UNCONDITIONAL (the success WAKE edge)"
-    )
-    # The DOT attribute quotes the value (condition="outcome=failed"); the
-    # meaningful, quote-independent token is outcome=failed (cond is the
-    # gherkin's unquoted condition=outcome=failed).
-    assert "outcome=failed" in cond
-    watch_end = [a for s, d, a in edges if (s, d) == ("watch", "end")]
-    assert watch_end and "outcome=failed" in watch_end[0], (
-        "watch -> end must be the conditional shutdown edge (outcome=failed); "
-        f"got {watch_end!r}"
-    )
-    # The cycle: launch -> watch is unconditional (always loops back).
-    launch_watch = [a for s, d, a in edges if (s, d) == ("launch", "watch")]
-    assert launch_watch and "outcome=failed" not in launch_watch[0], (
-        "launch -> watch (the cycle back-edge) must be UNCONDITIONAL"
-    )
-    # It is genuinely CYCLIC: watch is reachable from launch and vice-versa.
-    assert ("launch", "watch") in edge_pairs and ("watch", "launch") in edge_pairs
-
-
-# --- Then (bf9f): the native watch node --------------------------------------
-
-@then(parsers.parse(
-    'the "watch" node is a NATIVE "script=" node with no LLM that on entry '
-    'FIRST drains "{drain_cmd}" non-blockingly and exits 0 immediately when it '
-    "is non-empty (startup / catch-up drain of messages arrived between "
-    'sessions or while launch was busy), ELSE blocks on "{watch_cmd}", SKIPS '
-    'the leading "{sentinel}" sentinel and exits 0 on the first real event '
-    "line as a WAKE, and exits nonzero when the watch stream CLOSES, taking "
-    'the "watch -> end" shutdown edge (ADR-058 D2/D5)'))
-def odd9_bf9f_watch_native(drain_cmd, watch_cmd, sentinel, ctx):
-    graph = _odd9_graph(ctx)
-    nodes = _ky63_parse_nodes(graph)
-    body = nodes["watch"]
-    # NATIVE: a script= node (parallelogram), with NO agent class / prompt.
-    assert "script=" in body, "the watch node must be a NATIVE script= node"
-    assert "shape=parallelogram" in body, "the watch node must be shape=parallelogram (native)"
-    assert "prompt=" not in body and "class=" not in body, (
-        "the watch node must have NO LLM (no prompt=/class=)"
-    )
-    # The poured def is BC-GENERIC: BC_NAME arrives via the [run.environment.env]
-    # overlay, so the node body carries the base command parameterized by
-    # $BC_NAME, not the concrete BC name in the gherkin illustration.  Bind to
-    # the base command (drain_cmd / watch_cmd with the concrete BC name stripped)
-    # and require the $BC_NAME parameterization.
-    drain_base = drain_cmd.replace(" shopsystem-messaging", "")
-    watch_base = watch_cmd.replace(" shopsystem-messaging", "")
-    assert "$BC_NAME" in body, (
-        f"the watch node must be parameterized by $BC_NAME (env overlay); body:\n{body}"
-    )
-    # FIRST the non-blocking catch-up drain, THEN the blocking watch.
-    drain_pos = body.find(drain_base)
-    watch_pos = body.find(watch_base)
-    assert drain_pos != -1, f"watch node must drain {drain_base!r}; body:\n{body}"
-    assert watch_pos != -1, f"watch node must block on {watch_base!r}; body:\n{body}"
-    assert drain_pos < watch_pos, (
-        "watch must FIRST drain pending inbox non-blockingly, THEN block on "
-        f"shop-msg watch; body:\n{body}"
-    )
-    # Skips the leading READY sentinel and wakes on the first real event line.
-    # `grep -m1 -v '^READY$'` matches (exit 0) the first non-READY line (WAKE)
-    # and exits nonzero if the stream closes with only READY / nothing.
-    assert sentinel in body, f"watch must reference the {sentinel!r} sentinel; body:\n{body}"
-    assert "grep -m1" in body and "-v" in body, (
-        "watch must SKIP the READY sentinel and WAKE on the first real event "
-        f"line via `grep -m1 -v` (exit 0 on match; nonzero on stream close); "
-        f"body:\n{body}"
-    )
-
-
-# --- Then (bf9f): the Haiku launch agent node --------------------------------
-
-@then(parsers.parse(
-    'the "launch" node is a HAIKU-powered AGENT node pinned to "{model}" via '
-    'the graph "model_stylesheet", which reads the AUTHORITATIVE pending set '
-    'from "{pending_cmd}" (the no-matching-outbox, consumption-robust source) '
-    'and per pending work id W spawns ONE detached child by issuing "{spawn}", '
-    "writing the CONCRETE WORK_ID into that child's env overlay because "
-    '"-I" does not reach the child\'s native "script=" node env (ADR-058 D3, '
-    "proof design caveat)"))
-def odd9_bf9f_launch_agent(model, pending_cmd, spawn, ctx):
-    graph = _odd9_graph(ctx)
-    nodes = _ky63_parse_nodes(graph)
-    body = nodes["launch"]
-    # AGENT (not native): carries a prompt= and an agent class=, and is NOT a
-    # native parallelogram script= node.  (The prompt PROSE may mention the
-    # child's native "script=" env, so bind to the structural native marker
-    # shape=parallelogram, not to the substring "script=".)
-    assert "prompt=" in body, "the launch node must be an AGENT (prompt=)"
-    assert 'class="' in body, "the launch node must carry an agent class="
-    assert "shape=parallelogram" not in body, (
-        "the launch node must be an AGENT, not a native parallelogram script= node"
-    )
-    assert not re.search(r'(^|[,\s])script\s*=\s*"', body), (
-        "the launch node must NOT declare a native script= attribute"
-    )
-    # Pinned to claude-haiku-4-5 via the graph model_stylesheet.
-    m = re.search(r'model_stylesheet\s*=\s*"([^"]*)"', graph)
-    assert m is not None, "dispatcher.fabro must declare a model_stylesheet"
-    assert model in m.group(1), (
-        f"the launch node must be pinned to {model!r} via model_stylesheet; got "
-        f"{m.group(1)!r}"
-    )
-    # Reads the authoritative pending set.  The poured def is BC-GENERIC, so
-    # the prompt names the base command parameterized by $BC_NAME rather than
-    # the concrete BC name in the gherkin illustration.
-    pending_base = pending_cmd.replace(" shopsystem-messaging", "")
-    assert pending_base in body and "$BC_NAME" in body, (
-        f"the launch node must read the authoritative pending set via "
-        f"{pending_base!r} (parameterized by $BC_NAME); body:\n{body}"
-    )
-    # Spawns one detached workflow.fabro child per pending work id, with -I
-    # BC_NAME + -I WORK_ID + --parent + --detach.
-    for frag in ("fabro run workflow.fabro", "-I BC_NAME=", "-I WORK_ID=",
-                 "--parent", "--detach"):
-        assert frag in body, (
-            f"the launch node's child spawn must carry {frag!r}; body:\n{body}"
-        )
-    # Writes the concrete WORK_ID into the child's env overlay ([run.environment.
-    # env]) because -I does not reach the child's native script= env.
-    assert "[run.environment.env]" in body, (
-        "the launch node must write the concrete WORK_ID into each child's env "
-        f"overlay ([run.environment.env]); body:\n{body}"
-    )
-
-
-# --- Then (bf9f): each child is the unchanged workflow.fabro, parallel --------
-
-@then(parsers.parse(
-    'each spawned child is the UNCHANGED ADR-051 "workflow.fabro" def running '
-    "as a distinct parent-linked run isolated by its own per-run WORK_ID, so "
-    "multiple children run in PARALLEL with no shared work-id file and one "
-    "child = one work item = one work_done (ADR-058 D3/D4, ADR-051 intact)"))
-def odd9_bf9f_child_unchanged(ctx):
-    graph = _odd9_graph(ctx)
-    nodes = _ky63_parse_nodes(graph)
-    body = nodes["launch"]
-    # The child def the launch node spawns is workflow.fabro (the ADR-051 def).
-    assert "fabro run workflow.fabro" in body
-    # workflow.fabro is present in the def bundle and UNCHANGED (byte-identical
-    # to the committed asset — the launcher does not spawn a mutated child).
-    wf = _ky63_def_asset_root() / "workflow.fabro"
-    assert wf.is_file(), "the ADR-051 workflow.fabro child def must ship in the bundle"
-    # Parent-linked + per-run isolation are expressed by --parent and the
-    # per-child -I WORK_ID / env-overlay WORK_ID (no shared work-id file).
-    assert "--parent" in body and "-I WORK_ID=" in body
-
-
-# --- Then (bf9f): launch does not wait; failure isolation via back-edge -------
-
-@then(parsers.parse(
-    "the launch node does NOT wait on the children and takes the "
-    'unconditional "launch -> watch" back-edge, so a failed, crashed or '
-    "bad-dispatch child is isolated to its own detached run and does NOT "
-    "terminate the dispatcher, which keeps cycling and re-attempts any "
-    'still-pending work id from the authoritative "pending inbox" source on '
-    "the next cycle (ADR-058 D5)"))
-def odd9_bf9f_no_wait_backedge(ctx):
-    graph = _odd9_graph(ctx)
-    edges = _odd9_dispatcher_edges(graph)
-    edge_pairs = {(s, d) for s, d, a in edges}
-    # The unconditional back-edge is what makes a failed detached child
-    # non-fatal: the dispatcher always loops launch -> watch and re-drains the
-    # authoritative pending inbox next cycle.
-    launch_watch = [a for s, d, a in edges if (s, d) == ("launch", "watch")]
-    assert launch_watch, "missing the launch -> watch back-edge"
-    assert "outcome=failed" not in launch_watch[0], (
-        "the launch -> watch back-edge must be UNCONDITIONAL so a failed child "
-        "does not terminate the dispatcher"
-    )
-    # The detached child spawn (--detach) is what does not block the launch node.
-    body = _ky63_parse_nodes(graph)["launch"]
-    assert "--detach" in body, (
-        "the launch node must spawn children DETACHED (--detach) so it does not "
-        "wait on them"
-    )
-
-
-# --- Then (bf9f): no tmux/claude + parity ------------------------------------
-
-@then(parsers.parse(
-    'no tmux "agent" send-keys session and no "claude" engage is started on '
-    "this path, and the container, credential-proxy, postgres DSN and shop-msg "
-    "mailbox surfaces are unchanged from the tmux path, only the engage tier "
-    "differing (ADR-050 D1/D2/D3 launch parity, ADR-058 D6)"))
-def odd9_bf9f_no_tmux_parity(ctx):
-    agent_send_keys = _cadr_tmux_agent_send_keys(ctx)
-    assert agent_send_keys == [], (
-        f"fabro path must start NO tmux 'agent' send-keys; got "
-        f"{[c.command for c in agent_send_keys]!r}"
-    )
-    claude = _cadr_claude_engage_send_keys(ctx)
-    assert claude == [], (
-        f"fabro path must start NO 'claude' engage; got {[c.command for c in claude]!r}"
-    )
-    # Launch-parity: the shared launch body created + started the container
-    # identically to the tmux path.
-    assert ctx["cadr_driver"].is_running(ctx["container_name"]), (
-        "the shared launch body must have created + started the container"
+    assert "fabro run dispatcher.toml" in call.command[2], (
+        "the engage must resolve the poured dispatcher.toml entrypoint (which "
+        "applies the dispatcher.fabro graph def)"
     )
 
 
@@ -16335,8 +15988,9 @@ def gaph_negative_control(ctx):
 # FIDELITY: A binds to the REAL launcher's ACTUAL recorded engage argv
 # (controller.launch over FakeDockerDriver); B/C bind structurally to the REAL
 # committed dispatcher.fabro / dispatcher.toml asset bytes (reusing the ky63
-# quote-aware DOT parser).  Never a model.  (Supersedes/retires bf9f8c9d7f2865e3
-# and reconciles 30fd5f2079f1c433 / cacccc52ba0b0766 to the .toml engage argv.)
+# quote-aware DOT parser).  Never a model.  (Supersedes/retires the old
+# cyclic-Haiku dispatcher pin wholesale, and reconciles 30fd5f2079f1c433 /
+# cacccc52ba0b0766 to the .toml engage argv.)
 # ===========================================================================
 
 

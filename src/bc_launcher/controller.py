@@ -823,12 +823,23 @@ FABRO_BIN = "fabro"
 # Haiku launch node spawns one detached `fabro run workflow.fabro` child per
 # pending work item at RUNTIME.
 FABRO_WORKFLOW_FILE = "workflow.fabro"
-# lead-odd9 / ADR-058 D1: the launcher's PERSISTENT REACTIVE engage target. The
-# one-shot `fabro run workflow.fabro -I BC_NAME -I WORK_ID` engage is REPLACED
-# by ONE persistent `fabro run dispatcher.fabro -I BC_NAME=<bc>` (no WORK_ID):
-# the reactive-cyclic dispatcher owns the container lifecycle and discovers
-# work_ids at RUNTIME rather than running one-shot on a launch-time work id.
-FABRO_DISPATCHER_FILE = "dispatcher.fabro"
+# lead-b3f0 / ADR-058 AMENDED (scenario A @scenario_hash:24d94274b9cbc2b0): the
+# launcher's PERSISTENT REACTIVE engage target is the dispatcher's `.toml`
+# ENTRYPOINT, `dispatcher.toml`, NOT the bare `dispatcher.fabro` graph def.
+#
+# ROOT CAUSE the .toml entrypoint fixes: `fabro run dispatcher.fabro` runs the
+# `.fabro` graph def DIRECTLY, which BYPASSES the `[environments.local]`
+# provider and DEFAULTS to a Docker-sandbox executor.  The bc-base container has
+# no docker daemon, so that run fails in 0s ("Failed to connect to Docker
+# daemon: /var/run/docker.sock") and the dispatcher EXITS before it ever polls
+# the inbox — the BC comes up OFFLINE.  `fabro run dispatcher.toml` enters
+# through the `.toml`, which applies `provider = local` (its `[environments.
+# local]` block), so the sandbox comes up IN-PROCESS ("Sandbox: local ready")
+# and every native node executes in-process with no docker sock connection.  The
+# `.toml` binds `dispatcher.fabro` via its own `[workflow] graph=` and carries
+# the `[run.environment.env] BC_NAME` overlay, so `-I BC_NAME=<bc>` still
+# overrides the per-BC name at run time.
+FABRO_DISPATCHER_FILE = "dispatcher.toml"
 
 
 # lead-ze4w BUG#4: `fabro server start` reads a SERVER-level config at
