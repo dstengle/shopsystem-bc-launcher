@@ -32,14 +32,48 @@ def decide(pending_ids, in_flight):
     ``in_flight``   -- the set of work_ids whose prior child is still running and
                        has not yet emitted work_done.
 
-    Each decision is a {"work_id", "action"} record; ``action`` is "SPAWN" or
-    "SKIP".  (acpkind: every pending id is a decision; the in-flight SKIP rule is
-    the idempotency behavior.)
+    Each decision is a {"work_id", "action"} record.  IDEMPOTENCY: a work id
+    whose child is still IN FLIGHT decides "SKIP" (no second child is spawned
+    while its prior child is live, so the two cannot collide on the shared
+    per-WORK_ID git worktree); a work id with NO live child decides "SPAWN".
     """
+    in_flight = set(in_flight or ())
     decisions = []
     for wid in pending_ids:
-        decisions.append({"work_id": wid, "action": "SPAWN"})
+        action = "SKIP" if wid in in_flight else "SPAWN"
+        decisions.append({"work_id": wid, "action": action})
     return decisions
+
+
+class DispatchTracker:
+    """Tracks in-flight work_ids ACROSS poll cycles so each unstarted work id is
+    dispatched EXACTLY ONCE.
+
+    Each ``cycle`` merges the tracker's own spawned set with the poll-provided
+    in-flight run state, runs ``decide``, and records every SPAWN as now
+    in-flight -- so a work id that stays pending across cycles (a slow child,
+    Implementer->Reviewer, minutes) is SKIPped on every cycle after the first
+    rather than re-spawned into a colliding duplicate child.  This is the
+    idempotency the pre-fix context-blind native command dispatch lacked.
+    """
+
+    def __init__(self):
+        self.in_flight = set()
+
+    def cycle(self, pending_ids, observed_in_flight=None):
+        known = set(self.in_flight)
+        if observed_in_flight:
+            known |= set(observed_in_flight)
+        decisions = decide(pending_ids, known)
+        for d in decisions:
+            if d["action"] == "SPAWN":
+                self.in_flight.add(d["work_id"])
+        return decisions
+
+    def retire(self, work_id):
+        """Drop ``work_id`` from the in-flight set once its child emits
+        work_done, so a genuinely new message reusing the id can dispatch again."""
+        self.in_flight.discard(work_id)
 
 
 # --------------------------------------------------------------------------
