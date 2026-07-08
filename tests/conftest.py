@@ -7669,6 +7669,115 @@ def assert_standup_bd_create_yields_id(ctx, fake_driver):
 
 
 # ---------------------------------------------------------------------------
+# lead-3mez / GAP A — the absent-repo tracker-provisioning exec must carry a
+# non-empty GH_TOKEN placeholder in its docker-exec ENV so `gh repo create`
+# authenticates through the already-wired agent-vault proxy (the broker
+# substitutes the real GITHUB_TOKEN on the wire) instead of exiting non-zero
+# with "gh auth login" / "populate GH_TOKEN".  Additive to
+# @scenario_hash:90caf5523e7d5ce0 (NOT retired): that pin binds repo creation
+# but explicitly hedges the credential wiring; this pin (c1abb192dd2a5eae)
+# tightens the previously-unpinned provisioning-exec ENV surface.  Fidelity
+# binds to STRUCTURAL inspection of the captured `gh repo create` provisioning
+# exec's env (the docker-exec surface via the fake driver), NOT a live gh call.
+# ---------------------------------------------------------------------------
+
+@given(
+    "the BC container's agent-vault proxy is wired with HTTPS_PROXY, the "
+    "broker CA, and the AGENT_VAULT credentials, but no GitHub token is "
+    "otherwise present in the provisioning exec environment"
+)
+def standup_proxy_wired_no_ambient_token(ctx, fake_driver):
+    # Pre-state: the agent-vault proxy is fully wired at the container level
+    # (HTTPS_PROXY, broker CA, AGENT_VAULT_* are injected on `docker run`), and
+    # the absent tracker repo is what the standup must provision.  The teeth of
+    # this scenario are that the per-exec ENV of the `gh repo create` step must
+    # itself carry a non-empty GH_TOKEN placeholder — the ambient container env
+    # alone does not reach that exec (neither --env-file nor host-env GH_TOKEN
+    # does).  Mark the tracker repo absent so the create step runs.
+    container_name = f"bc-{ctx['bc_name']}"
+    fake_driver.set_beads_repo_absent(container_name, True)
+    fake_driver.set_committed_beads_prefix(container_name, "bclaunch")
+    ctx["committed_beads_prefix"] = "bclaunch"
+    ctx["container_name"] = container_name
+
+
+@when(parsers.parse(
+    'the standup runs its beads-tracker provisioning exec that invokes '
+    '"gh repo create {slug} --private --add-readme"'
+))
+def standup_runs_provisioning_exec(slug, ctx, fake_driver, controller, tmp_path):
+    import yaml as _yaml
+    bc_name = ctx["bc_name"]
+    manifest_path = tmp_path / "bc-manifest.yaml"
+    manifest_path.write_text(_yaml.dump({
+        "product": "shopsystem product",
+        "bcs": [{"name": bc_name, "remote": ctx["repo_url"], "role": "bc"}],
+    }))
+    result = controller.launch(
+        bc_name=bc_name,
+        repo_url=ctx["repo_url"],
+        manifest_path=manifest_path,
+        credential_home=ctx.get("credential_home"),
+    )
+    ctx["result"] = result
+    ctx["container_name"] = f"bc-{bc_name}"
+
+
+@then(
+    "that provisioning exec's environment sets a non-empty GH_TOKEN "
+    "placeholder so gh authenticates through the agent-vault proxy instead "
+    "of exiting non-zero with a \"gh auth login\" or \"populate GH_TOKEN\" "
+    "error"
+)
+def assert_provisioning_exec_carries_gh_token(ctx, fake_driver):
+    container_name = ctx["container_name"]
+    create_calls = [
+        c for c in fake_driver.exec_calls
+        if c.container == container_name and _is_repo_create_command(c.command)
+    ]
+    assert create_calls, (
+        "The standup must run a `gh repo create` provisioning exec; none was "
+        f"captured on {container_name!r}. exec calls: "
+        f"{[c.command for c in fake_driver.exec_calls if c.container == container_name]!r}"
+    )
+    # STRUCTURAL fidelity: every `gh repo create` provisioning exec must carry
+    # a NON-EMPTY GH_TOKEN in its per-exec docker-exec env.  Without it, gh
+    # exits non-zero ("gh auth login" / "populate GH_TOKEN") and the repo is
+    # never created — the empirically-proven failure GAP A closes.  The real
+    # GITHUB_TOKEN is substituted on the wire by the agent-vault proxy; the
+    # exec only needs a non-empty placeholder to ride that wire.
+    for c in create_calls:
+        assert c.env is not None and c.env.get("GH_TOKEN"), (
+            "The `gh repo create` provisioning exec must set a NON-EMPTY "
+            "GH_TOKEN placeholder in its env so gh authenticates through the "
+            "agent-vault proxy instead of exiting non-zero; the exec carried "
+            f"env={c.env!r} (script={c.command[2]!r})"
+        )
+
+
+@then(parsers.parse(
+    'the "gh repo create" invocation exits zero and the "{slug}" tracker '
+    'repository exists and is viewable'
+))
+def assert_gh_repo_create_exits_zero(slug, ctx, fake_driver):
+    container_name = ctx["container_name"]
+    expected_slug = _resolve_standup_tracker_slug(slug, ctx["bc_name"])
+    create_calls = [
+        c for c in fake_driver.exec_calls
+        if c.container == container_name and _is_repo_create_command(c.command)
+    ]
+    create_scripts = [c.command[2] for c in create_calls]
+    assert any(f"gh repo create {expected_slug}" in s for s in create_scripts), (
+        "The provisioning exec must target the scenario's tracker slug "
+        f"{expected_slug!r}; got create scripts={create_scripts!r}"
+    )
+    assert fake_driver.beads_repo_created(container_name), (
+        "The absent tracker repo must end up CREATED (viewable) after the "
+        f"provisioning exec; container={container_name!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
 # lead-zxtk — workspace-mount launch option + opt-in docker-socket mount
 # (scenarios 0bc8e4532c04bf72 / 9fc84c8424b2a223 / ff370a4e7e9dac5e /
 #  e177655ba09a73fa)

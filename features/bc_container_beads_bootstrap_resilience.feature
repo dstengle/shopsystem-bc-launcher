@@ -62,3 +62,11 @@ Feature: bc-container launch bd-bootstrap is bootstrap-resilient and never fatal
     And the standup flow adds the "<owner>/<bc>-beads" bd dolt remote and seeds it with an initial push so it is not an empty repository with no branches
     And the subsequent "bd bootstrap" for the new BC exits zero instead of failing with "Repository not found" or "git remote has no branches"
     And "bd create" run in the stood-up BC's workspace exits zero and yields a new issue id so its beads tracker is usable for bd-backed gated work
+
+  @scenario_hash:c1abb192dd2a5eae @bc:shopsystem-bc-launcher
+  Scenario: the BC-standup beads-tracker provisioning exec carries a GitHub token so gh repo create reaches the agent-vault proxy and the tracker repo is created
+    Given a new BC whose shop-name slug is "<bc>" is being stood up under GitHub owner "<owner>"
+    And the BC container's agent-vault proxy is wired with HTTPS_PROXY, the broker CA, and the AGENT_VAULT credentials, but no GitHub token is otherwise present in the provisioning exec environment
+    When the standup runs its beads-tracker provisioning exec that invokes "gh repo create <owner>/<bc>-beads --private --add-readme"
+    Then that provisioning exec's environment sets a non-empty GH_TOKEN placeholder so gh authenticates through the agent-vault proxy instead of exiting non-zero with a "gh auth login" or "populate GH_TOKEN" error
+    And the "gh repo create" invocation exits zero and the "<owner>/<bc>-beads" tracker repository exists and is viewable
