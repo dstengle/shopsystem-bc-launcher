@@ -303,6 +303,21 @@ def _empty_remote_seed_script(beads_remote_url: str) -> str:
     with NO remote configured (does NOT clone), then RESTORE the line before the
     `bd dolt remote add origin` + `bd dolt push` seed configures the git+https
     dolt remote and seeds refs/dolt/*.
+
+    lead-372r / GAP I (ROOT, additive to GAP H, which is UNCHANGED) —
+    CLEAR-BEFORE-INIT.  At LAUNCH the PRECEDING failed `bd bootstrap` empty-remote
+    clone LEAVES a PARTIAL `.beads/embeddeddolt` on disk.  With GAP H's
+    `sync.remote` unconfigured, the create-fresh `bd init -p <prefix>` would still
+    have run — except that partial embedded-Dolt working set makes `bd init -p`
+    ABORT "database already exists; use bd init --force", a failure MASKED by the
+    `|| true` on `bd init`.  So the create-fresh NEVER happens, the subsequent
+    `bd dolt push` seeds nothing, and the fatal `git ls-remote refs/dolt` verify
+    fails -> seed exit 1 -> BC offline (traced in-container, v0.3.57; GAP H's
+    executed test false-greened because its fixture omitted the partial-DB
+    precondition).  So immediately after the GAP H unconfigure and BEFORE
+    `bd init -p`, `rm -rf .beads/embeddeddolt` clears any partial state (equivalent
+    to `bd init --force`) so the create-fresh actually runs; `bd dolt push` then
+    seeds THAT prefixed DB and the fatal verify passes.
     """
     # Strip the `git+` transport prefix so RAW git accepts the URL; the dolt
     # remote itself keeps the original `git+https://` scheme below.
@@ -377,6 +392,20 @@ def _empty_remote_seed_script(beads_remote_url: str) -> str:
         "gaph_remote_line=$(grep -E '^sync\\.remote' .beads/config.yaml "
         "2>/dev/null | head -1 || true); "
         "sed -i '/^sync\\.remote/d' .beads/config.yaml 2>/dev/null || true; "
+        # lead-372r / GAP I (ROOT, additive to GAP H) — CLEAR-BEFORE-INIT.  At
+        # LAUNCH the PRECEDING failed `bd bootstrap` empty-remote clone LEAVES a
+        # PARTIAL `.beads/embeddeddolt` on disk.  `bd init -p` then ABORTS
+        # "database already exists; use bd init --force" — MASKED by the `|| true`
+        # below — so the create-fresh NEVER runs, the `bd dolt push` seeds
+        # nothing, and the fatal `git ls-remote refs/dolt` verify fails -> seed
+        # exit 1 -> BC offline (traced in-container, v0.3.57; GAP H's fixture
+        # omitted this partial-DB precondition so it false-greened over the
+        # ordering).  So remove any partial embedded-Dolt working set BEFORE the
+        # create-fresh, so `bd init -p` create-freshes a fresh PREFIXED local dolt
+        # DB rather than aborting under the mask.  (`rm -rf` is equivalent to
+        # `bd init --force` here; the lead's manual test only worked because it
+        # `rm -rf`'d first — the launch does not.)
+        "rm -rf .beads/embeddeddolt; "
         "BD_NON_INTERACTIVE=1 bd init -p \"$gapg_prefix\" >/dev/null 2>&1 || true; "
         # Restore the captured sync.remote line now that the fresh PREFIXED local
         # dolt DB exists, so the dolt seed below (and later `bd bootstrap` /
