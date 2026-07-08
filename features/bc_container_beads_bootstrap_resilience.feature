@@ -94,3 +94,18 @@ Feature: bc-container launch bd-bootstrap is bootstrap-resilient and never fatal
       | owner    | bc                    | bootstrap_error                                                                                 |
       | dstengle | shopsystem-knowledge  | clone failed; remote at that url contains no Dolt data                                           |
       | dstengle | shopsystem-knowledge  | git remote has no branches: ...; initialize the repository with an initial branch/commit first  |
+
+  @scenario_hash:fa1bb9d7e6653b35 @bc:shopsystem-bc-launcher
+  Scenario Outline: the empty-remote-seed's git-side push targets the plain https tracker URL and is non-fatal, so the subsequent bd dolt push seeds refs/dolt/* and the retried bd bootstrap exits zero
+    Given the standup's create-absent orchestration already created the tracker repo "<owner>/<bc>-beads" with "gh repo create --add-readme", so it exists with an initial git branch/commit but carries no refs/dolt/*
+    And the surface under observation is the executable "_empty_remote_seed_script" — the URL string it passes to "git push" and the ordering of that push relative to its "bd dolt push" step — not a live standup or GitHub run
+    And the seed script's git-side push targets the URL "<git_push_url>" for the tracker whose configured dolt remote is "git+https://github.com/<owner>/<bc>-beads.git"
+    When the empty-remote-seed step runs its git-side push and then its "bd dolt push" seed step under "set -e"
+    Then the git-side push resolves as "<git_push_result>" without raising the "remote helper 'git+https' aborted session" fatal that a raw "git+https://" scheme would raise
+    And because the git-side push is non-fatal, the seed reaches and runs its "bd dolt push" step, which is recorded as "<reaches_dolt_push>"
+    And after the seed the tracker's refs/dolt/* presence is "<dolt_refs_seeded>" and the retried "bd bootstrap" exit is "<bootstrap_exit>"
+
+    Examples:
+      | owner    | bc                    | git_push_url                                           | git_push_result             | reaches_dolt_push | dolt_refs_seeded | bootstrap_exit |
+      | dstengle | shopsystem-knowledge  | https://github.com/dstengle/shopsystem-knowledge-beads.git | redundant-noop-non-fatal    | reached-and-run   | present          | zero           |
+      | dstengle | shopsystem-knowledge  | git+https://github.com/dstengle/shopsystem-knowledge-beads.git | remote-helper-aborted-exit-128 | never-reached     | absent           | nonzero        |

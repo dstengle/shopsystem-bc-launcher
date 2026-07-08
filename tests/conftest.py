@@ -15658,3 +15658,276 @@ def then_bss3_downgrade_or_nonzero_insufficient(ctx):
     assert "exit 1" not in body, (
         "The behind resolution path can exit non-zero; it must be a no-op."
     )
+
+
+# ---------------------------------------------------------------------------
+# lead-ktl0 / GAP E — the empty-remote-seed's git-side push must target the
+# PLAIN https:// tracker URL (strip the `git+` prefix) AND be NON-FATAL, so
+# the subsequent `bd dolt push` (the step that actually seeds the Dolt data)
+# runs regardless.  Pre-fix `_empty_remote_seed_script` git-pushes to the
+# `git+https://` DOLT url, which raw git rejects ("remote helper 'git+https'
+# aborted session", exit 128); under `set -e` that FATAL push strands the seed
+# BEFORE `bd dolt push`, leaving the tracker unseeded so the retried
+# `bd bootstrap` fails "contains no Dolt data".  The surface under observation
+# is the EXECUTABLE seed-script string: the URL the git-side `git push` targets
+# and its ordering relative to `bd dolt push` — NOT a live standup/GitHub run.
+# Scenario Outline @scenario_hash:fa1bb9d7e6653b35 exercises it over two
+# Examples rows: the plain-https row (post-fix: non-fatal noop -> reaches
+# `bd dolt push` -> refs seeded/bootstrap zero) and the git+https row (pre-fix:
+# raw-git remote-helper-aborted exit-128 -> never reaches -> refs absent/
+# bootstrap nonzero).  Additive to chain predecessors (GAP D 6fc82a7375ed8aa9 /
+# ada742d33c996d34, GAP B 8ca9508bd7f5fecf, GAP A c1abb192dd2a5eae) — none
+# retired.
+# ---------------------------------------------------------------------------
+
+
+def _raw_git_scheme_aborts(url: str) -> bool:
+    """Reference model (lead-ktl0 / GAP E): raw git rejects a `git+https://`
+    scheme with the remote-helper-aborted fatal (exit 128).  The `git+https`
+    transport is a Dolt-tooling convention; passed to a RAW `git push`/
+    `git ls-remote` it errors "git: 'remote-git+https' is not a git command;
+    fatal: remote helper 'git+https' aborted session".  A plain `https://`
+    URL is accepted by raw git."""
+    return url.startswith("git+")
+
+
+def _model_seed_outcome(git_push_url: str) -> dict:
+    """Reference model of the seed script under `set -e`, keyed on the URL the
+    git-side `git push` targets (lead-ktl0 / GAP E).
+
+    A `git+https://` URL is the PRE-FIX state: raw git rejects the scheme
+    (remote-helper-aborted, exit 128) and the push is FATAL, so under `set -e`
+    the seed aborts BEFORE `bd dolt push` and the tracker is never dolt-seeded.
+    A plain `https://` URL is the POST-FIX state: the git-side push is a
+    redundant non-fatal noop (create-absent already `--add-readme`'d the
+    initial branch), so the seed reaches and runs `bd dolt push`, which seeds
+    refs/dolt/* and lets the retried `bd bootstrap` exit zero.
+    """
+    if _raw_git_scheme_aborts(git_push_url):
+        return {
+            "git_push_result": "remote-helper-aborted-exit-128",
+            "reaches_dolt_push": "never-reached",
+            "dolt_refs_seeded": "absent",
+            "bootstrap_exit": "nonzero",
+        }
+    return {
+        "git_push_result": "redundant-noop-non-fatal",
+        "reaches_dolt_push": "reached-and-run",
+        "dolt_refs_seeded": "present",
+        "bootstrap_exit": "zero",
+    }
+
+
+def _parse_seed_git_side_push(script: str):
+    """Structurally extract the git-side push facts from the executable
+    `_empty_remote_seed_script` string (lead-ktl0 / GAP E):
+
+      (url, non_fatal, before_dolt_push, ls_remote_url)
+
+    - `url`             : the URL the raw `git -C "$tmp" push "<url>" main`
+                          statement targets.
+    - `non_fatal`       : whether that push statement is non-fatal
+                          (`... || true`), so `set -e` does not abort on it.
+    - `before_dolt_push`: whether the git-side push is ordered BEFORE the
+                          `bd dolt push` seed step.
+    - `ls_remote_url`   : the URL the raw `git ls-remote <url>` verify tail
+                          targets (also a raw-git op that would abort on a
+                          `git+https://` scheme).
+    """
+    push_m = re.search(r'git -C "\$tmp" push "([^"]+)" main', script)
+    assert push_m, f"seed script has no git-side `git push` statement: {script!r}"
+    url = push_m.group(1)
+    # The push statement runs up to its `;` terminator; `|| true` inside it is
+    # what makes the push non-fatal under `set -e`.
+    push_stmt = script[push_m.start():].split(";", 1)[0]
+    non_fatal = "|| true" in push_stmt
+    dolt_push_idx = script.find("bd dolt push")
+    assert dolt_push_idx != -1, f"seed script has no `bd dolt push` step: {script!r}"
+    before_dolt_push = push_m.start() < dolt_push_idx
+    ls_m = re.search(r"git ls-remote (\S+) 'refs/dolt/\*'", script)
+    ls_remote_url = ls_m.group(1) if ls_m else None
+    return url, non_fatal, before_dolt_push, ls_remote_url
+
+
+@given(parsers.parse(
+    "the standup's create-absent orchestration already created the tracker "
+    'repo "{tracker}" with "gh repo create --add-readme", so it exists with '
+    "an initial git branch/commit but carries no refs/dolt/*"
+))
+def gape_created_tracker_no_dolt_refs(tracker, ctx):
+    """Record the freshly `gh repo create --add-readme`'d `<bc>-beads` tracker
+    (git branch/commit present, NO refs/dolt/*) whose configured DOLT remote is
+    the `git+https://` URL (lead-ktl0 / GAP E)."""
+    owner, _, repo = tracker.partition("/")
+    assert repo.endswith("-beads"), (
+        f"tracker slug {tracker!r} must be of the form <owner>/<bc>-beads"
+    )
+    ctx["gape_owner"] = owner
+    ctx["gape_bc"] = repo[: -len("-beads")]
+    ctx["gape_tracker"] = tracker
+    ctx["gape_dolt_url"] = f"git+https://github.com/{tracker}.git"
+
+
+@given(parsers.parse(
+    'the surface under observation is the executable "_empty_remote_seed_script" '
+    '— the URL string it passes to "git push" and the ordering of that push '
+    'relative to its "bd dolt push" step — not a live standup or GitHub run'
+))
+def gape_surface_under_observation(ctx):
+    """Documents the abstraction level under observation (lead-ktl0 / GAP E):
+    the executable `_empty_remote_seed_script` string — its git-side push URL
+    and the ordering of that push relative to `bd dolt push` — not a live run."""
+    ctx["gape_observation"] = "seed-script-git-push-url+ordering"
+
+
+@given(parsers.parse(
+    "the seed script's git-side push targets the URL \"{git_push_url}\" for "
+    'the tracker whose configured dolt remote is "{dolt_remote}"'
+))
+def gape_row_urls(git_push_url, dolt_remote, ctx):
+    """Bind this Examples row's candidate git-side push URL and confirm the
+    tracker's configured DOLT remote is the `git+https://` URL (lead-ktl0 /
+    GAP E)."""
+    ctx["gape_row_git_push_url"] = git_push_url
+    assert dolt_remote.startswith("git+https://"), (
+        f"the configured dolt remote must be the git+https:// URL, got "
+        f"{dolt_remote!r}"
+    )
+    assert dolt_remote == ctx["gape_dolt_url"], (
+        f"row dolt remote {dolt_remote!r} disagrees with the tracker "
+        f"{ctx['gape_dolt_url']!r}"
+    )
+
+
+@when(parsers.parse(
+    'the empty-remote-seed step runs its git-side push and then its '
+    '"bd dolt push" seed step under "set -e"'
+))
+def gape_run_seed_script(ctx):
+    """Materialize the executable `_empty_remote_seed_script` for the tracker's
+    configured DOLT (`git+https://`) remote and structurally extract its
+    git-side push facts (lead-ktl0 / GAP E)."""
+    from bc_launcher.controller import _empty_remote_seed_script
+    script = _empty_remote_seed_script(ctx["gape_dolt_url"])
+    url, non_fatal, before_dolt, ls_url = _parse_seed_git_side_push(script)
+    ctx["gape_script"] = script
+    ctx["gape_actual_push_url"] = url
+    ctx["gape_actual_non_fatal"] = non_fatal
+    ctx["gape_actual_before_dolt"] = before_dolt
+    ctx["gape_actual_ls_remote_url"] = ls_url
+
+
+@then(parsers.parse(
+    'the git-side push resolves as "{git_push_result}" without raising the '
+    '"remote helper \'git+https\' aborted session" fatal that a raw '
+    '"git+https://" scheme would raise'
+))
+def gape_push_result(git_push_result, ctx):
+    """The row's `<git_push_result>` must match the reference model of the
+    git-side push at this row's URL, AND the REAL seed script's git-side push
+    must NOT target a raw `git+https://` scheme (which would raise the
+    remote-helper-aborted fatal) — it must target the plain-https tracker URL
+    (lead-ktl0 / GAP E).
+
+    RED teeth: pre-fix `_empty_remote_seed_script` pushes to the `git+https://`
+    DOLT url, so `gape_actual_push_url` starts with `git+` and the raw-git
+    scheme abort assertion FAILS; post-fix (git+ stripped) it passes.
+    """
+    row_url = ctx["gape_row_git_push_url"]
+    assert _model_seed_outcome(row_url)["git_push_result"] == git_push_result, (
+        f"Examples row inconsistent: git-side push at {row_url!r} models as "
+        f"{_model_seed_outcome(row_url)['git_push_result']!r}, not "
+        f"{git_push_result!r}"
+    )
+    actual = ctx["gape_actual_push_url"]
+    assert not _raw_git_scheme_aborts(actual), (
+        "The real _empty_remote_seed_script git-side push must target the "
+        "PLAIN https:// tracker URL, not a raw 'git+https://' scheme that "
+        "raises \"remote helper 'git+https' aborted session\" (exit 128) under "
+        f"set -e; it targets {actual!r} (lead-ktl0 / GAP E)"
+    )
+
+
+@then(parsers.parse(
+    'because the git-side push is non-fatal, the seed reaches and runs its '
+    '"bd dolt push" step, which is recorded as "{reaches_dolt_push}"'
+))
+def gape_reaches_dolt_push(reaches_dolt_push, ctx):
+    """The row's `<reaches_dolt_push>` must match the reference model, AND the
+    REAL seed script's git-side push must be NON-FATAL and ordered BEFORE
+    `bd dolt push` so the seed actually reaches the dolt-seed step (lead-ktl0 /
+    GAP E).
+
+    RED teeth: pre-fix the git-side push is fatal (no `|| true`), so
+    `gape_actual_non_fatal` is False and this assertion FAILS; post-fix it
+    passes.
+    """
+    row_url = ctx["gape_row_git_push_url"]
+    assert _model_seed_outcome(row_url)["reaches_dolt_push"] == reaches_dolt_push, (
+        f"Examples row inconsistent: seed at {row_url!r} models reaches_dolt_push "
+        f"{_model_seed_outcome(row_url)['reaches_dolt_push']!r}, not "
+        f"{reaches_dolt_push!r}"
+    )
+    assert ctx["gape_actual_non_fatal"], (
+        "The real _empty_remote_seed_script git-side push must be NON-FATAL "
+        "(`... || true`) so a redundant/failed push does not abort the seed "
+        "under set -e before `bd dolt push` runs (lead-ktl0 / GAP E)"
+    )
+    assert ctx["gape_actual_before_dolt"], (
+        "The real _empty_remote_seed_script git-side push must be ordered "
+        "BEFORE its `bd dolt push` step (lead-ktl0 / GAP E)"
+    )
+
+
+@then(parsers.parse(
+    'after the seed the tracker\'s refs/dolt/* presence is "{dolt_refs_seeded}" '
+    'and the retried "bd bootstrap" exit is "{bootstrap_exit}"'
+))
+def gape_refs_and_bootstrap(dolt_refs_seeded, bootstrap_exit, ctx):
+    """The row's `<dolt_refs_seeded>`/`<bootstrap_exit>` must match the
+    reference model, AND — because the REAL seed script targets the plain-https
+    URL (the non-aborting scheme) with a non-fatal push — the real seed reaches
+    `bd dolt push`, so its outcome models as refs present / bootstrap zero
+    (lead-ktl0 / GAP E).
+
+    Also pins the raw `git ls-remote` verify tail off the `git+https://` scheme
+    (it would hit the identical raw-git abort under set -e).
+
+    RED teeth: pre-fix `gape_actual_push_url` is the `git+https://` DOLT url, so
+    modelling the REAL seed's outcome yields absent/nonzero and this assertion
+    FAILS; post-fix (plain-https) it yields present/zero.
+    """
+    row_url = ctx["gape_row_git_push_url"]
+    row_model = _model_seed_outcome(row_url)
+    assert row_model["dolt_refs_seeded"] == dolt_refs_seeded, (
+        f"Examples row inconsistent: seed at {row_url!r} models dolt_refs_seeded "
+        f"{row_model['dolt_refs_seeded']!r}, not {dolt_refs_seeded!r}"
+    )
+    assert row_model["bootstrap_exit"] == bootstrap_exit, (
+        f"Examples row inconsistent: seed at {row_url!r} models bootstrap_exit "
+        f"{row_model['bootstrap_exit']!r}, not {bootstrap_exit!r}"
+    )
+    # The REAL seed script's git-side push URL must lead to the seeded/zero
+    # outcome (i.e. it must NOT be the aborting git+https:// scheme).
+    real_model = _model_seed_outcome(ctx["gape_actual_push_url"])
+    assert real_model["dolt_refs_seeded"] == "present", (
+        "The real _empty_remote_seed_script must reach `bd dolt push` so "
+        "refs/dolt/* end up present; its git-side push URL "
+        f"{ctx['gape_actual_push_url']!r} models as "
+        f"{real_model['dolt_refs_seeded']!r} (lead-ktl0 / GAP E)"
+    )
+    assert real_model["bootstrap_exit"] == "zero", (
+        "The real _empty_remote_seed_script must reach `bd dolt push` so the "
+        f"retried bootstrap exits zero; its git-side push URL "
+        f"{ctx['gape_actual_push_url']!r} models bootstrap_exit "
+        f"{real_model['bootstrap_exit']!r} (lead-ktl0 / GAP E)"
+    )
+    # The raw `git ls-remote` verify tail must also avoid the git+https:// raw-
+    # git abort, or the seed's final verify would falsely fail under set -e.
+    ls_url = ctx["gape_actual_ls_remote_url"]
+    assert ls_url is not None and not _raw_git_scheme_aborts(ls_url), (
+        "The real _empty_remote_seed_script `git ls-remote` verify tail is a "
+        "raw-git op and must target the plain-https tracker URL, not the "
+        f"aborting 'git+https://' scheme; it targets {ls_url!r} (lead-ktl0 / "
+        "GAP E)"
+    )
