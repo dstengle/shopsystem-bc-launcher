@@ -16857,3 +16857,133 @@ def l3zzu_dispatch_returns_decisions(ctx):
     assert d["action"] in ("SPAWN", "SKIP"), (
         f"a decision's action must be SPAWN or SKIP; got {d['action']!r}"
     )
+
+
+# ===========================================================================
+# lead-3zzu idemp (@scenario_hash:713d01c4f4dfd107): the ACP dispatch node's
+# decision contract is IDEMPOTENT.  For a pending work id whose prior child is
+# still IN FLIGHT it decides SKIP (no second child, no per-WORK_ID worktree
+# collision); for a pending work id with NO live child it decides SPAWN (each
+# unstarted work id dispatched EXACTLY ONCE).  Negative control: the pre-fix
+# native command dispatch carried NO in-flight skip and re-dispatched every
+# still-pending id each ~6s cycle -- the exact duplicate-spawn the ACP node's
+# in-flight tracking exists to eliminate.  Binds directly to the NON-LLM
+# dispatch_acp_agent.py decision contract (decide / DispatchTracker).  Never a
+# model.
+# ===========================================================================
+
+_L3ZZU_IDEMP = {
+    'given_container': 'the container "bc-shopsystem-messaging" is running with the self-contained fabro def set POURED by shop-templates into "/workspace/.fabro/", including the "dispatcher.fabro" graph def whose "dispatch" node is the ACP-backed agent node',
+    'given_context': 'the incoming context carries a pending work id "W" AND the in-flight run state records that a prior child for "W" is still running and has not yet emitted work_done',
+    'when': 'the ACP-backed "dispatch" node\'s decision contract is inspected structurally against that context, without a live docker daemon, a running fabro server, or a reachable agent-vault',
+    'then_skip': 'the decision returned for the still-in-flight work id "W" is to SKIP re-dispatch, so NO second child is spawned for "W" while its prior child is live, and the two children cannot collide on the shared per-"W" git worktree',
+    'then_spawn': 'when the in-flight run state records NO live child for a pending work id "V", the decision returned for "V" is to SPAWN a child, so a genuinely unstarted work id is still dispatched exactly once',
+    'then_negctl': 'as the negative control, the pre-fix native command "dispatch" node carried NO in-flight skip and re-dispatched every still-pending work id each ~6s cycle — the exact duplicate-spawn the ACP node\'s in-flight tracking exists to eliminate',
+}
+
+
+# --- Given (idemp): container running with the ACP-backed dispatch node -------
+
+@given(_L3ZZU_IDEMP['given_container'])
+def l3zzu_idemp_container(ctx, fake_driver, controller, tmp_path):
+    _odd9_drive_fabro_launch(_ODD9_BC, ctx, fake_driver, controller, tmp_path,
+                             work_id=None)
+    assert fake_driver.is_running("bc-shopsystem-messaging"), (
+        "Expected bc-shopsystem-messaging to be running after the fabro-path launch."
+    )
+    ctx["l3zzu_graph"] = _b3f0_dispatcher_graph_text()
+
+
+# --- Given (idemp): the poll context — pending W with a live prior child ------
+
+@given(_L3ZZU_IDEMP['given_context'])
+def l3zzu_idemp_context(ctx):
+    # W is pending AND its prior child is still running (has not emitted
+    # work_done) -> W is in the in-flight run state.
+    ctx["l3zzu_pending"] = ["W"]
+    ctx["l3zzu_inflight"] = {"W"}
+
+
+# --- When (idemp): inspect the decision contract against that context ---------
+
+@when(_L3ZZU_IDEMP['when'])
+def l3zzu_idemp_inspect(ctx):
+    ctx["l3zzu_agent"] = _l3zzu_load_acp_agent()
+
+
+# --- Then (idemp): in-flight W -> SKIP (no second child, no collision) --------
+
+@then(_L3ZZU_IDEMP['then_skip'])
+def l3zzu_idemp_skip(ctx):
+    agent = ctx["l3zzu_agent"]
+    decisions = agent.decide(ctx["l3zzu_pending"], ctx["l3zzu_inflight"])
+    by_id = {d["work_id"]: d["action"] for d in decisions}
+    assert by_id.get("W") == "SKIP", (
+        "for a work id W whose prior child is still IN FLIGHT the ACP decision "
+        "must be SKIP re-dispatch (no second child, the two children cannot "
+        f"collide on the shared per-W worktree); decisions={decisions!r}"
+    )
+    spawns_for_w = [d for d in decisions
+                    if d["work_id"] == "W" and d["action"] == "SPAWN"]
+    assert not spawns_for_w, (
+        f"NO SPAWN may be returned for the in-flight work id W; got {spawns_for_w!r}"
+    )
+
+
+# --- Then (idemp): no live child for V -> SPAWN, exactly once -----------------
+
+@then(_L3ZZU_IDEMP['then_spawn'])
+def l3zzu_idemp_spawn(ctx):
+    agent = ctx["l3zzu_agent"]
+    # V is a genuinely unstarted work id (NO live child); W is still in flight.
+    decisions = agent.decide(["W", "V"], {"W"})
+    by_id = {d["work_id"]: d["action"] for d in decisions}
+    assert by_id.get("V") == "SPAWN", (
+        f"a pending work id V with NO live child must be SPAWNed; decisions={decisions!r}"
+    )
+    assert by_id.get("W") == "SKIP", (
+        f"the in-flight work id W stays SKIP alongside V; decisions={decisions!r}"
+    )
+    # EXACTLY ONCE: once V's child is live (tracked in-flight from the spawn), a
+    # later cycle with V still pending decides SKIP.
+    tracker = agent.DispatchTracker()
+    c1 = tracker.cycle(["W", "V"], observed_in_flight={"W"})
+    assert any(d["work_id"] == "V" and d["action"] == "SPAWN" for d in c1), (
+        f"cycle 1 must SPAWN the unstarted V; got {c1!r}"
+    )
+    c2 = tracker.cycle(["V"])  # V now tracked in-flight from cycle 1
+    assert not any(d["work_id"] == "V" and d["action"] == "SPAWN" for d in c2), (
+        "V must be dispatched EXACTLY ONCE: the tracker must SKIP V on the next "
+        f"cycle once its child is in flight; cycle-2 decisions={c2!r}"
+    )
+
+
+# --- Then (idemp): negative control — pre-fix native re-dispatched every cycle -
+
+@then(_L3ZZU_IDEMP['then_negctl'])
+def l3zzu_idemp_negctl(ctx):
+    agent = ctx["l3zzu_agent"]
+
+    # The pre-fix NATIVE command dispatch was context-blind: it re-dispatched
+    # EVERY still-pending id each cycle, carrying NO in-flight skip.  Modelled
+    # here to show the duplicate-spawn it produced.
+    def prefix_native_dispatch(pending_ids):
+        return [{"work_id": w, "action": "SPAWN"} for w in pending_ids]
+
+    pre_c1 = prefix_native_dispatch(["W"])
+    pre_c2 = prefix_native_dispatch(["W"])  # W still pending (slow child)
+    prefix_spawns = [d for d in (pre_c1 + pre_c2) if d["action"] == "SPAWN"]
+    assert len(prefix_spawns) == 2, (
+        "the pre-fix native command dispatch must re-dispatch a still-pending W "
+        f"every cycle (2 duplicate spawns across 2 cycles); got {prefix_spawns!r}"
+    )
+
+    # The ACP node's in-flight tracking ELIMINATES that duplicate-spawn: W is
+    # spawned exactly once across the same two cycles.
+    tracker = agent.DispatchTracker()
+    tracker.cycle(["W"])           # cycle 1: SPAWN W (now in flight)
+    acp_c2 = tracker.cycle(["W"])  # cycle 2: SKIP W (still in flight)
+    assert not any(d["work_id"] == "W" and d["action"] == "SPAWN" for d in acp_c2), (
+        "unlike the pre-fix native node, the ACP in-flight tracking must NOT "
+        f"re-dispatch W on the next cycle; cycle-2 decisions={acp_c2!r}"
+    )
