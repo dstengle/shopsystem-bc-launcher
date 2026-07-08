@@ -318,19 +318,30 @@ def _empty_remote_seed_script(beads_remote_url: str) -> str:
         # create-fresh ("Created fresh database with prefix") when NO remote is
         # configured (lead-pqlx); `bd init` is the create-fresh primitive that
         # likewise CREATES a fresh DB rather than cloning the configured remote.
-        # So: read the COMMITTED issue_prefix from `.beads/metadata.json`
-        # (committed-registry `issues.jsonl` fallback) — NOT the BC-name-derived
-        # one (lead-rply) — and `bd init -p` a fresh PREFIXED local dolt DB with
-        # the dolt remote NOT yet configured.  The `bd dolt remote add origin` +
-        # `bd dolt push` below then seed THAT prefixed DB, so refs/dolt/* land
-        # WITH the prefix, the retried `bd bootstrap` exits zero, and `bd create`
-        # in the new BC yields a `<prefix>-<n>` id.
+        # So: read the COMMITTED prefix and `bd init -p` a fresh PREFIXED local
+        # dolt DB with the dolt remote NOT yet configured.  The `bd dolt remote
+        # add origin` + `bd dolt push` below then seed THAT prefixed DB, so
+        # refs/dolt/* land WITH the prefix, the retried `bd bootstrap` exits
+        # zero, and `bd create` in the new BC yields a `<prefix>-<n>` id.
+        #
+        # PREFIX SOURCE (lead-vb6j follow-up).  PRIMARY: `.beads/metadata.json`
+        # `dolt_database` — real bd-written metadata.json carries `dolt_database`
+        # (e.g. `shopsystem_bc_launcher`) and NO `issue_prefix` key.  FALLBACK:
+        # the FIRST issue id in `.beads/issues.jsonl`, quote-BOUNDED and cut at
+        # its FINAL hyphen — the shell mirror of `committed_beads_prefix_from_
+        # registry` (regex `"id"\s*:\s*"([^"]+)"`, then `rsplit("-", 1)[0]`).
+        # The capture MUST be quote-bounded (`[^"]*`): a greedy `"\(.*\)-[^-]*"`
+        # bleeds across the multi-field JSONL line and yields a ~1000-char
+        # garbage prefix.  NEVER fall back to a BC-name-derived prefix (lead-rply
+        # / lead-vb6j): a cloned registry may carry a prefix the BC name does not
+        # imply.
         "gapg_prefix=$(sed -n "
-        "'s/.*\"issue_prefix\"[[:space:]]*:[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p' "
+        "'s/.*\"dolt_database\"[[:space:]]*:[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p' "
         ".beads/metadata.json | head -1); "
-        "[ -n \"$gapg_prefix\" ] || gapg_prefix=$(sed -n "
-        "'s/.*\"id\"[[:space:]]*:[[:space:]]*\"\\(.*\\)-[^-]*\".*/\\1/p' "
-        ".beads/issues.jsonl | head -1); "
+        "if [ -z \"$gapg_prefix\" ]; then "
+        "gapg_id=$(grep -o '\"id\"[[:space:]]*:[[:space:]]*\"[^\"]*\"' "
+        ".beads/issues.jsonl | head -1 | sed 's/.*\"\\([^\"]*\\)\"$/\\1/'); "
+        "gapg_prefix=\"${gapg_id%-*}\"; fi; "
         "BD_NON_INTERACTIVE=1 bd init -p \"$gapg_prefix\" >/dev/null 2>&1 || true; "
         # Point the local bd working set at the now-initialized DOLT remote
         # (git+https:// — bd's own tooling handles that scheme) and push the
