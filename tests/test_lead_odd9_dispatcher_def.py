@@ -51,12 +51,14 @@ def test_workflow_child_def_still_enrolled_unchanged():
 
 
 def test_dispatcher_is_a_cyclic_dot_digraph():
-    """Structural sanity: dispatcher.fabro is a DOT digraph carrying the
-    reactive cycle (launch -> watch back-edge)."""
+    """Structural sanity: dispatcher.fabro is a DOT digraph carrying the native
+    poll-loop reactive cycle (wait -> poll back-edge, lead-b3f0 / ADR-058
+    AMENDED @scenario_hash:a5e16a192f755768 replaced the launch -> watch
+    cyclic-Haiku back-edge)."""
     text = (_fabro_def_asset_root() / "dispatcher.fabro").read_text()
     assert "digraph BcShopDispatcher {" in text
     assert text.rstrip().endswith("}")
-    assert "launch -> watch" in text, "the reactive cycle back-edge must be present"
+    assert "wait -> poll" in text, "the reactive cycle back-edge must be present"
 
 
 def test_real_fabro_validate_accepts_dispatcher_zero_diagnostics(tmp_path):

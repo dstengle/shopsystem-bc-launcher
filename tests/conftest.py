@@ -16325,11 +16325,15 @@ def b3f0_wait_native(ctx):
     "spent only on the child's actual work"))
 def b3f0_no_watch_no_llm(ctx):
     graph = _b3f0_graph(ctx)
+    # Strip DOT `//` line comments so the EXECUTABLE graph (not the explanatory
+    # prose, which legitimately NAMES the retired `shop-msg watch` / Haiku
+    # `launch` / model constructs to say they are ABSENT) is what is asserted on.
+    executable = _ky63_strip_line_comments(graph)
     nodes = _ky63_parse_nodes(graph)
-    # NO long-running `shop-msg watch` node anywhere in the def.
-    assert "shop-msg watch" not in graph, (
+    # NO long-running `shop-msg watch` node anywhere in the executable def.
+    assert "shop-msg watch" not in executable, (
         "the native poll-loop must contain NO long-running `shop-msg watch` "
-        f"node; graph:\n{graph}"
+        f"node; executable graph:\n{executable}"
     )
     # NO `launch` node (the retired Haiku agent) — the loop nodes are exactly the
     # native poll/dispatch/wait (+ terminals).
@@ -16337,12 +16341,13 @@ def b3f0_no_watch_no_llm(ctx):
         "the native poll-loop must contain NO Haiku `launch` agent node"
     )
     # NO LLM/agent node ANYWHERE: no node carries a prompt=/class=, and the graph
-    # declares no model_stylesheet / model binding (zero steady-state tokens).
+    # declares no model_stylesheet / model: binding (zero steady-state tokens).
     for name, body in nodes.items():
         assert "prompt=" not in body and "class=" not in body, (
             f"loop node {name!r} must be NATIVE (no LLM prompt=/class=); body:\n{body}"
         )
-    assert "model_stylesheet" not in graph and re.search(r"model\s*:", graph) is None, (
+    assert "model_stylesheet" not in executable and re.search(r"model\s*:", executable) is None, (
         "the native poll-loop must declare NO model binding (no model_stylesheet "
-        f"/ model:), so the steady-state loop spends zero model tokens; graph:\n{graph}"
+        f"/ model:), so the steady-state loop spends zero model tokens; "
+        f"executable graph:\n{executable}"
     )
