@@ -109,3 +109,12 @@ Feature: bc-container launch bd-bootstrap is bootstrap-resilient and never fatal
       | owner    | bc                    | git_push_url                                           | git_push_result             | reaches_dolt_push | dolt_refs_seeded | bootstrap_exit |
       | dstengle | shopsystem-knowledge  | https://github.com/dstengle/shopsystem-knowledge-beads.git | redundant-noop-non-fatal    | reached-and-run   | present          | zero           |
       | dstengle | shopsystem-knowledge  | git+https://github.com/dstengle/shopsystem-knowledge-beads.git | remote-helper-aborted-exit-128 | never-reached     | absent           | nonzero        |
+
+  @scenario_hash:e3a0ec19298e7ce7 @bc:shopsystem-bc-launcher
+  Scenario: standing up a new BC with an empty tracker remote establishes a prefixed local dolt DB from the committed metadata.json before seeding, so the retried bootstrap exits zero and bd create yields a prefixed id
+    Given a new BC is stood up via "create-bc" whose beads tracker remote at "<owner>/<bc>-beads" exists but is empty of Dolt data, and whose committed ".beads/metadata.json" names a definite issue_prefix
+    When the standup's beads provisioning orchestration runs its bootstrap-and-seed ordering
+    Then the standup first establishes a PREFIXED local dolt database create-fresh from the committed ".beads/metadata.json", adopting that committed issue_prefix rather than one derived from the BC name, BEFORE it seeds the remote
+    And the standup then seeds that prefixed local database to the tracker remote with "bd dolt push", so the tracker remote carries Dolt data with "refs/dolt/*" refs present
+    And the retried "bd bootstrap" exits zero rather than hard-failing the empty-remote clone with "contains no Dolt data"
+    And after standup "bd create" run in the new BC's workspace exits zero and yields an id of the form "<prefix>-<n>" carrying the committed issue_prefix rather than failing "issue_prefix config is missing"

@@ -15931,3 +15931,303 @@ def gape_refs_and_bootstrap(dolt_refs_seeded, bootstrap_exit, ctx):
         f"aborting 'git+https://' scheme; it targets {ls_url!r} (lead-ktl0 / "
         "GAP E)"
     )
+
+
+# ---------------------------------------------------------------------------
+# lead-vb6j / ROOT / GAP G — create-fresh-THEN-seed ordering.  With sync.remote
+# configured (GAP B) and the tracker remote EMPTY, the in-container `bd bootstrap`
+# dolt-CLONES the empty remote and HARD-FAILS ("contains no Dolt data") instead
+# of create-fresh'ing from the committed `.beads/metadata.json`.  So at seed time
+# there is NO prefixed local dolt DB; the seed's `bd dolt push` seeds nothing /
+# a prefix-less DB; and after standup `bd create` fails "issue_prefix config is
+# missing" -> the session-start work-tracker health gate goes red -> the BC is
+# offline.  Templates reviewer (lead-pqlx) confirmed `bd bootstrap` DOES
+# create-fresh ("Created fresh database with prefix") when NO remote is
+# configured.  The FIX: the empty-remote seed must FIRST establish a PREFIXED
+# local dolt DB create-fresh from the committed `.beads/metadata.json` (adopting
+# the committed issue_prefix, NOT the BC-name-derived one) with the dolt remote
+# NOT yet configured, and THEN `bd dolt remote add origin` + `bd dolt push` that
+# prefixed DB — so refs/dolt/* seed WITH the prefix, the retried `bd bootstrap`
+# exits zero, and `bd create` yields a `<prefix>-<n>` id.
+#
+# The surface under observation is the EXECUTABLE `_empty_remote_seed_script`
+# ORCHESTRATION ORDERING (structural) — the create-fresh-from-metadata.json step
+# precedes the seed's `bd dolt push` — NOT a live GitHub/dolt run.  Mirrors the
+# GAP E (fa1bb9d7e6653b35) structural-inspection idiom.  Scenario
+# @scenario_hash:e3a0ec19298e7ce7.  Additive to chain predecessors (GAP E
+# fa1bb9d7e6653b35, GAP D 6fc82a7375ed8aa9 / ada742d33c996d34, GAP B
+# 8ca9508bd7f5fecf, GAP A c1abb192dd2a5eae) — none retired.
+# ---------------------------------------------------------------------------
+
+
+def _parse_seed_create_fresh(script: str):
+    """Structurally extract the create-fresh-from-metadata.json facts from the
+    executable `_empty_remote_seed_script` string (lead-vb6j / ROOT / GAP G):
+
+      (metadata_ref, create_fresh_idx, adopts_committed_prefix,
+       before_remote_add, before_dolt_push)
+
+    - `metadata_ref`           : whether the seed reads the committed
+                                 `.beads/metadata.json` as the create-fresh
+                                 prefix source.
+    - `create_fresh_idx`       : index of the create-fresh command (`bd init`,
+                                 which CREATES a fresh prefixed local dolt DB —
+                                 distinct from `bd bootstrap`, which CLONES the
+                                 configured remote and hard-fails on an empty
+                                 one).
+    - `adopts_committed_prefix`: whether the create-fresh adopts the COMMITTED
+                                 issue_prefix (a shell var populated FROM
+                                 `.beads/metadata.json`) rather than a
+                                 hard-coded BC-name-derived literal.
+    - `before_remote_add`      : whether the create-fresh is ordered BEFORE the
+                                 `bd dolt remote add origin` step (so the local
+                                 DB is create-fresh'd with the dolt remote NOT
+                                 yet configured).
+    - `before_dolt_push`       : whether the create-fresh is ordered BEFORE the
+                                 `bd dolt push` seed step (so the seed pushes a
+                                 PREFIXED database).
+    """
+    metadata_ref = ".beads/metadata.json" in script
+    # The create-fresh primitive: `bd init` creates a fresh prefixed local dolt
+    # DB (`bd init [-p <prefix>]`).  It does NOT clone the configured remote —
+    # unlike `bd bootstrap`, which on an empty remote hard-fails "contains no
+    # Dolt data".
+    cf_m = re.search(r"bd init\b[^;]*", script)
+    create_fresh_idx = cf_m.start() if cf_m else -1
+    remote_add_idx = script.find("bd dolt remote add")
+    dolt_push_idx = script.find("bd dolt push")
+    # Adopts the COMMITTED prefix: the create-fresh passes `-p "$<var>"` where
+    # the var is populated from `.beads/metadata.json` — NOT a name-derived
+    # literal.
+    adopts_committed_prefix = bool(
+        cf_m
+        and re.search(r'bd init\b[^;]*-p\s+"\$', cf_m.group(0))
+        and metadata_ref
+    )
+    before_remote_add = (
+        create_fresh_idx != -1
+        and remote_add_idx != -1
+        and create_fresh_idx < remote_add_idx
+    )
+    before_dolt_push = (
+        create_fresh_idx != -1
+        and dolt_push_idx != -1
+        and create_fresh_idx < dolt_push_idx
+    )
+    return (
+        metadata_ref,
+        create_fresh_idx,
+        adopts_committed_prefix,
+        before_remote_add,
+        before_dolt_push,
+    )
+
+
+def _model_create_fresh_seed_outcome(create_fresh_before_seed: bool) -> dict:
+    """Reference model of the empty-remote seed outcome, keyed on whether the
+    seed FIRST establishes a prefixed local dolt DB create-fresh from the
+    committed metadata.json BEFORE its `bd dolt push` seed step (lead-vb6j /
+    ROOT / GAP G).
+
+    create-fresh-BEFORE-seed present (POST-FIX): the seed pushes a PREFIXED
+    database, so refs/dolt/* seed WITH the prefix, the retried `bd bootstrap`
+    exits zero, and `bd create` yields a `<prefix>-<n>` id.
+
+    create-fresh-before-seed ABSENT (PRE-FIX / ROOT): `bd bootstrap` clone-hard-
+    fails the empty remote, so no prefixed local DB exists at seed time; the
+    seed's `bd dolt push` seeds nothing / a prefix-less DB, the retried
+    bootstrap hard-fails "contains no Dolt data", and `bd create` fails
+    "issue_prefix config is missing".
+    """
+    if create_fresh_before_seed:
+        return {
+            "dolt_refs_seeded": "present",
+            "bootstrap_exit": "zero",
+            "bd_create": "prefixed-id",
+        }
+    return {
+        "dolt_refs_seeded": "absent-or-prefixless",
+        "bootstrap_exit": "nonzero",
+        "bd_create": "issue_prefix-config-missing",
+    }
+
+
+@given(
+    'a new BC is stood up via "create-bc" whose beads tracker remote at '
+    '"<owner>/<bc>-beads" exists but is empty of Dolt data, and whose '
+    'committed ".beads/metadata.json" names a definite issue_prefix'
+)
+def gapg_empty_remote_committed_metadata(ctx):
+    """Record the standup pre-state (lead-vb6j / ROOT / GAP G): the tracker
+    remote `<owner>/<bc>-beads` EXISTS (git branch/commit present) but carries
+    NO Dolt data, and the cloned repo's committed `.beads/metadata.json` names
+    a definite issue_prefix the create-fresh must adopt.  The surface under
+    observation is the executable `_empty_remote_seed_script` orchestration
+    ordering, so a concrete `<owner>/<bc>` is used to materialise a well-formed
+    configured DOLT (`git+https://`) remote URL."""
+    ctx["gapg_owner"] = "dstengle"
+    ctx["gapg_bc"] = "shopsystem-knowledge"
+    ctx["gapg_dolt_url"] = (
+        f"git+https://github.com/{ctx['gapg_owner']}/{ctx['gapg_bc']}-beads.git"
+    )
+
+
+@when(
+    "the standup's beads provisioning orchestration runs its bootstrap-and-seed "
+    "ordering"
+)
+def gapg_run_seed_ordering(ctx):
+    """Materialise the executable `_empty_remote_seed_script` for the tracker's
+    configured DOLT (`git+https://`) remote and structurally extract its
+    create-fresh-from-metadata facts + ordering (lead-vb6j / ROOT / GAP G)."""
+    from bc_launcher.controller import _empty_remote_seed_script
+
+    script = _empty_remote_seed_script(ctx["gapg_dolt_url"])
+    (
+        metadata_ref,
+        create_fresh_idx,
+        adopts_committed_prefix,
+        before_remote_add,
+        before_dolt_push,
+    ) = _parse_seed_create_fresh(script)
+    ctx["gapg_script"] = script
+    ctx["gapg_metadata_ref"] = metadata_ref
+    ctx["gapg_create_fresh_idx"] = create_fresh_idx
+    ctx["gapg_adopts_committed_prefix"] = adopts_committed_prefix
+    ctx["gapg_before_remote_add"] = before_remote_add
+    ctx["gapg_before_dolt_push"] = before_dolt_push
+    # The seed establishes a prefixed local DB create-fresh BEFORE its seed only
+    # when the create-fresh step exists, references metadata.json, adopts the
+    # committed prefix, and is ordered before both the remote-add and the push.
+    ctx["gapg_create_fresh_before_seed"] = (
+        create_fresh_idx != -1
+        and metadata_ref
+        and adopts_committed_prefix
+        and before_remote_add
+        and before_dolt_push
+    )
+
+
+@then(
+    "the standup first establishes a PREFIXED local dolt database create-fresh "
+    'from the committed ".beads/metadata.json", adopting that committed '
+    "issue_prefix rather than one derived from the BC name, BEFORE it seeds the "
+    "remote"
+)
+def gapg_create_fresh_before_seed(ctx):
+    """The REAL `_empty_remote_seed_script` must FIRST establish a PREFIXED
+    local dolt DB create-fresh from the committed `.beads/metadata.json`
+    (adopting the committed issue_prefix, NOT a BC-name-derived one), ordered
+    BEFORE the dolt remote is added and BEFORE `bd dolt push` (lead-vb6j / ROOT
+    / GAP G).
+
+    RED teeth: pre-fix the seed script has NO create-fresh-from-metadata step
+    (`bd bootstrap` clone-hard-fails the empty remote and no prefixed local DB
+    is established before the push), so `create_fresh_idx == -1` /
+    `metadata_ref` is False and these assertions FAIL; post-fix they pass.
+    """
+    assert ctx["gapg_metadata_ref"], (
+        "The real _empty_remote_seed_script must read the committed "
+        "`.beads/metadata.json` as the create-fresh prefix source, so the "
+        "create-fresh adopts the COMMITTED issue_prefix (lead-vb6j / ROOT / "
+        f"GAP G); script={ctx['gapg_script']!r}"
+    )
+    assert ctx["gapg_create_fresh_idx"] != -1, (
+        "The real _empty_remote_seed_script must establish a PREFIXED local "
+        "dolt DB create-fresh (`bd init`) — distinct from `bd bootstrap`, "
+        "which clones the configured remote and hard-fails 'contains no Dolt "
+        f"data' on an empty one (lead-vb6j / ROOT / GAP G); script="
+        f"{ctx['gapg_script']!r}"
+    )
+    assert ctx["gapg_adopts_committed_prefix"], (
+        "The create-fresh must adopt the COMMITTED issue_prefix (a shell var "
+        "populated from `.beads/metadata.json`, `bd init -p \"$...\"`), NOT a "
+        "hard-coded BC-name-derived literal (lead-vb6j / ROOT / GAP G)"
+    )
+    assert ctx["gapg_before_remote_add"], (
+        "The create-fresh must be ordered BEFORE `bd dolt remote add origin` — "
+        "the local DB is create-fresh'd with the dolt remote NOT yet "
+        "configured, so bd creates fresh instead of cloning the empty remote "
+        "(lead-vb6j / ROOT / GAP G)"
+    )
+    assert ctx["gapg_before_dolt_push"], (
+        "The create-fresh must be ordered BEFORE the `bd dolt push` seed step, "
+        "so the seed pushes a PREFIXED database (lead-vb6j / ROOT / GAP G)"
+    )
+
+
+@then(
+    'the standup then seeds that prefixed local database to the tracker remote '
+    'with "bd dolt push", so the tracker remote carries Dolt data with '
+    '"refs/dolt/*" refs present'
+)
+def gapg_seeds_prefixed_db(ctx):
+    """After the create-fresh, the seed must `bd dolt push` the now-prefixed
+    local DB to the tracker remote and verify refs/dolt/* land (lead-vb6j /
+    ROOT / GAP G).  Because the REAL script establishes the create-fresh BEFORE
+    the push, its outcome models as refs/dolt/* present."""
+    script = ctx["gapg_script"]
+    assert "bd dolt push" in script, (
+        "The seed must `bd dolt push` the prefixed local DB to the tracker "
+        f"remote (lead-vb6j / ROOT / GAP G); script={script!r}"
+    )
+    assert re.search(r"git ls-remote \S+ 'refs/dolt/\*'", script), (
+        "The seed must verify refs/dolt/* land on the tracker remote after the "
+        f"push (lead-vb6j / ROOT / GAP G); script={script!r}"
+    )
+    real = _model_create_fresh_seed_outcome(ctx["gapg_create_fresh_before_seed"])
+    assert real["dolt_refs_seeded"] == "present", (
+        "Because the REAL seed establishes a prefixed local DB create-fresh "
+        "BEFORE `bd dolt push`, its seed must land refs/dolt/* present; it "
+        f"models as {real['dolt_refs_seeded']!r} (lead-vb6j / ROOT / GAP G)"
+    )
+
+
+@then(
+    'the retried "bd bootstrap" exits zero rather than hard-failing the '
+    'empty-remote clone with "contains no Dolt data"'
+)
+def gapg_retried_bootstrap_zero(ctx):
+    """Because the seed seeds a PREFIXED database (create-fresh before push),
+    the retried `bd bootstrap` clones a NON-empty, prefixed remote and exits
+    zero instead of hard-failing 'contains no Dolt data' (lead-vb6j / ROOT /
+    GAP G).
+
+    RED teeth: pre-fix the real script lacks the create-fresh-before-seed step,
+    so its outcome models as bootstrap nonzero and this assertion FAILS."""
+    real = _model_create_fresh_seed_outcome(ctx["gapg_create_fresh_before_seed"])
+    assert real["bootstrap_exit"] == "zero", (
+        "The retried `bd bootstrap` must exit zero because the seed established "
+        "a prefixed local DB create-fresh before pushing; the real seed models "
+        f"bootstrap_exit {real['bootstrap_exit']!r} (lead-vb6j / ROOT / GAP G)"
+    )
+
+
+@then(
+    'after standup "bd create" run in the new BC\'s workspace exits zero and '
+    'yields an id of the form "<prefix>-<n>" carrying the committed '
+    'issue_prefix rather than failing "issue_prefix config is missing"'
+)
+def gapg_bd_create_prefixed(ctx):
+    """Because the retried bootstrap clones the prefixed seeded remote, the new
+    BC's local bd carries the committed prefix, so `bd create` yields a
+    `<prefix>-<n>` id instead of failing 'issue_prefix config is missing'
+    (lead-vb6j / ROOT / GAP G).
+
+    RED teeth: pre-fix the real script lacks the create-fresh-before-seed step,
+    so the seed pushes a prefix-less DB and `bd create` models as
+    'issue_prefix-config-missing', failing this assertion."""
+    real = _model_create_fresh_seed_outcome(ctx["gapg_create_fresh_before_seed"])
+    assert real["bd_create"] == "prefixed-id", (
+        "After standup `bd create` must yield a `<prefix>-<n>` id carrying the "
+        "committed issue_prefix; because the real seed establishes a prefixed "
+        "create-fresh before the push it models as "
+        f"{real['bd_create']!r} (lead-vb6j / ROOT / GAP G)"
+    )
+    # The committed prefix the create-fresh adopts comes from metadata.json, not
+    # a name-derived literal.
+    assert ctx["gapg_adopts_committed_prefix"], (
+        "The `<prefix>` `bd create` carries must be the COMMITTED issue_prefix "
+        "adopted from `.beads/metadata.json`, not a BC-name-derived one "
+        "(lead-vb6j / ROOT / GAP G)"
+    )

@@ -305,9 +305,37 @@ def _empty_remote_seed_script(beads_remote_url: str) -> str:
         # NON-FATAL raw-git push to the PLAIN https:// URL: redundant (the
         # branch already exists) and must not abort the seed under set -e.
         f"git -C \"$tmp\" push \"{git_push_url}\" main >/dev/null 2>&1 || true; "
+        # lead-vb6j / ROOT / GAP G — CREATE-FRESH-THEN-SEED ORDERING.  Establish a
+        # PREFIXED local dolt DB create-fresh from the committed
+        # `.beads/metadata.json` BEFORE the dolt remote is configured and BEFORE
+        # `bd dolt push`.  ROOT (traced in-container, v0.3.55): with sync.remote
+        # configured (GAP B) and the tracker remote EMPTY, `bd bootstrap`
+        # dolt-CLONES the empty remote and HARD-FAILS "contains no Dolt data"
+        # instead of create-fresh'ing from metadata.json — so at seed time there
+        # is NO prefixed local DB, `bd dolt push` seeds nothing / a prefix-less
+        # DB, and after standup `bd create` fails "issue_prefix config is missing"
+        # (session-start health gate red -> BC offline).  `bd bootstrap` DOES
+        # create-fresh ("Created fresh database with prefix") when NO remote is
+        # configured (lead-pqlx); `bd init` is the create-fresh primitive that
+        # likewise CREATES a fresh DB rather than cloning the configured remote.
+        # So: read the COMMITTED issue_prefix from `.beads/metadata.json`
+        # (committed-registry `issues.jsonl` fallback) — NOT the BC-name-derived
+        # one (lead-rply) — and `bd init -p` a fresh PREFIXED local dolt DB with
+        # the dolt remote NOT yet configured.  The `bd dolt remote add origin` +
+        # `bd dolt push` below then seed THAT prefixed DB, so refs/dolt/* land
+        # WITH the prefix, the retried `bd bootstrap` exits zero, and `bd create`
+        # in the new BC yields a `<prefix>-<n>` id.
+        "gapg_prefix=$(sed -n "
+        "'s/.*\"issue_prefix\"[[:space:]]*:[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p' "
+        ".beads/metadata.json | head -1); "
+        "[ -n \"$gapg_prefix\" ] || gapg_prefix=$(sed -n "
+        "'s/.*\"id\"[[:space:]]*:[[:space:]]*\"\\(.*\\)-[^-]*\".*/\\1/p' "
+        ".beads/issues.jsonl | head -1); "
+        "BD_NON_INTERACTIVE=1 bd init -p \"$gapg_prefix\" >/dev/null 2>&1 || true; "
         # Point the local bd working set at the now-initialized DOLT remote
         # (git+https:// — bd's own tooling handles that scheme) and push the
-        # embedded-Dolt working set up.  THIS is the step that seeds refs/dolt/*.
+        # create-fresh'd PREFIXED embedded-Dolt working set up.  THIS is the step
+        # that seeds refs/dolt/* — now carrying the committed prefix.
         f"bd dolt remote add origin {beads_remote_url} || true; "
         "bd dolt push || true; "
         # Verify the remote now carries Dolt data refs (raw git ls-remote, so
