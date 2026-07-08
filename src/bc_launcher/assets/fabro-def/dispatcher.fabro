@@ -1,87 +1,85 @@
 // ============================================================================
-// bc-shop REACTIVE-PERSISTENT DISPATCHER, as a fabro DOT workflow (ADR-058 D2).
-// ONE persistent cyclic run per container: it OWNS the container's lifecycle,
-// discovers work_ids at RUNTIME, and fans out one DETACHED child per pending
-// inbox work item. Corrects the prior ONE-SHOT engage (ADR-050 D3 / retired
-// @scenario_hash 401ecb2ffbab9a8b) to restore ADR-050 D3 launch-lifecycle
-// parity the tmux engage carries. Runtime-proven on real fabro 0.254.0
-// (wf_10649334-946): the engine follows the launch->watch back-edge and
-// re-invokes the loop; `fabro run ... --parent <p> --detach` fans out isolated
-// concurrent children each honoring its own WORK_ID.
+// bc-shop REACTIVE-PERSISTENT DISPATCHER, as a fabro DOT workflow
+// (ADR-058 AMENDED, lead-b3f0). ONE persistent NATIVE cyclic poll-loop per
+// container: it OWNS the container's lifecycle, discovers work_ids at RUNTIME,
+// and fans out one DETACHED child per pending inbox work item. Entered through
+// the dispatcher.toml entrypoint (provider=local, in-process) so the sandbox
+// comes up without a docker daemon (scenario A @scenario_hash:24d94274b9cbc2b0).
 //
-// ============================= REACTIVE LOOP SHAPE (ADR-058 D2) ==============
-//   start -> watch                             (enter the loop)
-//   watch -> launch                            (UNCONDITIONAL success: WAKE)
-//   watch -> end   [condition=outcome=failed]  (watch stream CLOSED => shutdown)
-//   launch -> watch                            (the CYCLE back-edge)
-// The run persists -- cycling watch->launch->watch -- until shutdown; `end`
-// (Msquare) is reached ONLY when the watch stream closes.
+// ============================= NATIVE POLL-LOOP SHAPE (scenario B) ===========
+//   start -> poll                                (enter the loop)
+//   poll -> dispatch                             (act on the pending work ids)
+//   poll -> end   [condition=outcome=failed]     (poll failed => shutdown sink)
+//   dispatch -> wait                             (do not block on children)
+//   wait -> poll                                 (the BACK-EDGE forms the cycle)
+// The run persists -- cycling poll->dispatch->wait->poll -- until shutdown.
+// EVERY loop node (poll, dispatch, wait) is a NATIVE `script=` node
+// (parallelogram, NO LLM). There is NO long-running `shop-msg watch` node and
+// NO LLM/agent node (no Haiku `launch` node, no model-backed node) ANYWHERE in
+// the loop, so the steady-state loop spends ZERO tokens: work is done only by
+// each child (scenario B @scenario_hash:a5e16a192f755768).
 //
-// ============================= WATCH (NATIVE script=, NO LLM, ADR-058 D2/D5) =
-// On entry the native `watch` node FIRST drains `shop-msg pending inbox`
-// non-blockingly and exits 0 immediately when it is NON-EMPTY (startup /
-// catch-up drain of messages arrived between sessions or while launch was
-// busy). ELSE it blocks on `shop-msg watch`, SKIPS the leading `READY` sentinel
-// and exits 0 on the FIRST real event line as a WAKE; it exits NONZERO when the
-// watch stream CLOSES, taking the `watch -> end` shutdown edge. A native node
-// has EXACTLY two outcomes: exit 0 => `succeeded`, nonzero => `failed`.
-// `grep -m1 -v '^READY$'` implements exactly this: it matches (exit 0) on the
-// first line that is NOT the READY sentinel (WAKE) and exits nonzero if the
-// stream closes having emitted only READY / nothing (shutdown).
+// ============================= POLL (NATIVE script=, NO LLM) =================
+// `poll` lists the current pending inbox NON-BLOCKINGLY via `shop-msg pending
+// inbox --bc $BC_NAME` (the no-matching-outbox, consumption-robust source) and
+// yields the concrete pending work ids, returning PROMPTLY rather than blocking
+// on a long-running watch. $BC_NAME arrives via the [run.environment.env]
+// overlay (dispatcher.toml). A native node has EXACTLY two outcomes: exit 0 =>
+// succeeded (poll->dispatch), nonzero => failed (poll->end shutdown).
 //
-// ============================= LAUNCH (HAIKU AGENT, ADR-058 D3) ==============
-// The `launch` node is a HAIKU agent (pinned to claude-haiku-4-5 via the graph
-// model_stylesheet). It reads the AUTHORITATIVE pending set from `shop-msg
-// pending inbox --bc $BC_NAME` (the no-matching-outbox, consumption-robust
-// source -- it does NOT trust the watch line as authoritative) and per pending
-// work id W spawns ONE DETACHED CHILD:
-//   fabro run workflow.fabro -I BC_NAME=$BC_NAME -I WORK_ID=W --parent <this-run> --detach
-// DESIGN CAVEAT (proof-confirmed wf_10649334-946): `-I WORK_ID` reaches the
-// child's inputs / goal / agent-prompts but NOT the child's native `script=`
-// node env (the [run.environment.env] overlay is applied literally; minijinja
-// is not evaluated on it). So the launch node MUST write the CONCRETE WORK_ID
-// into each child's env overlay ([run.environment.env]) at spawn -- an AGENT
-// can do this substitution; a native node cannot, which is why launch is an
-// agent. The launch node does NOT wait on the children and takes the
-// unconditional `launch -> watch` back-edge, so a failed / crashed / bad
-// dispatch child is isolated to its own detached run and does NOT terminate the
-// dispatcher; it keeps cycling and re-attempts any still-pending work id from
-// the authoritative pending-inbox source on the next cycle (ADR-058 D4/D5).
+// ============================= DISPATCH (NATIVE script=, NO LLM, scenario C) =
+// `dispatch` acts on the pending work ids. Scenario C
+// (@scenario_hash:6088da7e9e4c4e59) pins its per-child delivery contract: for
+// each pending work id W it materializes a per-child `.toml` carrying the
+// CONCRETE work id in a [run.environment.env] WORK_ID overlay and spawns the
+// child DETACHED via `fabro run child.toml --detach` (NOT `-I WORK_ID`).
 //
 // ============================= CHILD DEF UNCHANGED (ADR-051 intact) ==========
 // Each spawned child is the UNCHANGED ADR-051 workflow.fabro def running as a
-// distinct parent-linked run isolated by its own per-run WORK_ID: one child =
-// one work item = one work_done. Children run in PARALLEL with no shared
-// work-id file.
+// distinct run isolated by its own per-run WORK_ID: one child = one work item =
+// one work_done. Children run in PARALLEL with no shared work-id file.
 digraph BcShopDispatcher {
     graph [
-        goal="Reactive-persistent dispatcher for BC {{ inputs.BC_NAME }}: watch the inbox and fan out one DETACHED workflow.fabro child per pending work item, isolated per WORK_ID, surviving child failure, until the watch stream closes. This run OWNS the container lifecycle and discovers work_ids at runtime; it takes NO launch-time work id."
-        model_stylesheet="* { model: claude-haiku-4-5 } .launch { model: claude-haiku-4-5 }"
+        goal="Reactive-persistent NATIVE poll-loop dispatcher for BC {{ inputs.BC_NAME }}: poll the inbox non-blockingly, dispatch one DETACHED workflow.fabro child per pending work item (isolated per WORK_ID via a per-child env overlay), wait a short interval, and loop. NATIVE script= nodes only -- NO LLM and NO long-running watch, so the steady-state loop spends ZERO tokens; work is done only by each child. This run OWNS the container lifecycle and discovers work_ids at runtime; it takes NO launch-time work id."
         rankdir=TB
     ]
 
     // ---------- terminals ---------------------------------------------------
     start [shape=Mdiamond, label="Start"]
-    end   [shape=Msquare,  label="Exit: SHUTDOWN\n(watch stream closed)"]
+    end   [shape=Msquare,  label="Exit: SHUTDOWN\n(poll failed)"]
 
-    // ---------- watch: NATIVE reactive wake (NO LLM) ------------------------
+    // ---------- poll: NATIVE non-blocking pending-inbox lister (NO LLM) ------
     // $BC_NAME arrives via the [run.environment.env] overlay (dispatcher.toml).
-    // FIRST a non-blocking catch-up drain (exit 0 immediately if pending inbox
-    // is non-empty), ELSE block on `shop-msg watch`, SKIP the leading READY
-    // sentinel and WAKE (exit 0) on the first real event line; exit NONZERO
-    // when the watch stream CLOSES (=> watch->end shutdown).
-    watch [shape=parallelogram, deterministic=true,
-           label="watch: catch-up drain OR block-until-wake",
-           script="if [ -n \"$(shop-msg pending inbox --bc \"$BC_NAME\" 2>/dev/null)\" ]; then echo 'catch-up drain: pending inbox non-empty -> WAKE'; exit 0; fi; shop-msg watch --bc \"$BC_NAME\" | grep -m1 -v '^READY$'"]
+    // Lists the current pending inbox and yields the concrete pending work ids,
+    // returning PROMPTLY (NOT blocking on a long-running `shop-msg watch`).
+    poll [shape=parallelogram, deterministic=true,
+          label="poll: list pending inbox work ids (non-blocking)",
+          script="shop-msg pending inbox --bc \"$BC_NAME\""]
 
-    // ---------- launch: HAIKU agent fan-out (detached child per work_id) -----
-    launch [class="launch", permissions="read-write",
-            label="launch: fan out one detached workflow.fabro child per pending work_id",
-            prompt="You are the DISPATCHER LAUNCH step ONLY, powered by claude-haiku-4-5. Read the AUTHORITATIVE pending set with `shop-msg pending inbox --bc $BC_NAME` (the no-matching-outbox, consumption-robust source; do NOT trust any watch line as authoritative). For EACH pending work id W spawn EXACTLY ONE detached child of the UNCHANGED ADR-051 child def by issuing `fabro run workflow.fabro -I BC_NAME=$BC_NAME -I WORK_ID=W --parent <this dispatcher run id> --detach`, and because `-I WORK_ID` does NOT reach the child's native `script=` node env you MUST write the CONCRETE value of W into that child's env overlay ([run.environment.env] WORK_ID = \"W\") at spawn. Spawn children in PARALLEL, isolated per WORK_ID; do NOT wait on any child. A failed, crashed or bad-dispatch child is isolated to its own detached run and MUST NOT stop you. You MUST NOT consume the inbox, run bc-emit, run shop-msg respond, or modify the child def. When you have spawned a child for every pending work id (or the pending set is empty), end so the run takes the unconditional `launch -> watch` back-edge and cycles."]
+    // ---------- dispatch: NATIVE fan-out, one detached child per work_id -----
+    // Scenario C (@scenario_hash:6088da7e9e4c4e59). Reads the AUTHORITATIVE
+    // pending set from `shop-msg pending inbox --bc $BC_NAME`; per pending work
+    // id W it MATERIALIZES a per-child `.toml` (child-$wid.toml) carrying the
+    // CONCRETE work id in a [run.environment.env] WORK_ID overlay -- the channel
+    // that REACHES the child's native script= node env (`-I WORK_ID` does NOT)
+    // -- then spawns `fabro run child-$wid.toml --detach`. The child applies the
+    // UNCHANGED ADR-051 workflow.fabro def. Children run in PARALLEL isolated
+    // per WORK_ID; dispatch does NOT block on them before the wait->poll
+    // back-edge. Single-level \" DOT escapes only (the proven poll/watch idiom);
+    // every literal TOML `"` is written via single-quoted echo fragments.
+    dispatch [shape=parallelogram, deterministic=true,
+              label="dispatch: fan out one detached workflow.fabro child per pending work id",
+              script="shop-msg pending inbox --bc \"$BC_NAME\" | awk '{print $1}' | while read -r wid; do [ -n \"$wid\" ] || continue; { echo '[workflow]'; echo 'graph = \"workflow.fabro\"'; echo '[run.inputs]'; echo 'BC_NAME = \"'\"$BC_NAME\"'\"'; echo 'WORK_ID = \"'\"$wid\"'\"'; echo '[run.environment.env]'; echo 'BC_NAME = \"'\"$BC_NAME\"'\"'; echo 'WORK_ID = \"'\"$wid\"'\"'; echo '[run.environment]'; echo 'id = \"local\"'; echo '[environments.local]'; echo 'provider = \"local\"'; echo '[run.pull_request]'; echo 'enabled = false'; } > \"child-$wid.toml\"; fabro run \"child-$wid.toml\" --detach; done"]
 
-    // ---------- edges (ADR-058 D2 reactive cycle) ---------------------------
-    start  -> watch                              // enter the loop
-    watch  -> launch                             // UNCONDITIONAL success: WAKE
-    watch  -> end    [condition="outcome=failed"] // watch stream CLOSED => shutdown
-    launch -> watch                              // the CYCLE back-edge (runs forever until shutdown)
+    // ---------- wait: NATIVE short sleep before the back-edge (NO LLM) -------
+    wait [shape=parallelogram, deterministic=true,
+          label="wait: sleep a short interval before looping",
+          script="sleep \"${DISPATCH_POLL_INTERVAL:-5}\""]
+
+    // ---------- edges (native cyclic poll-loop, scenario B) -----------------
+    start    -> poll                                    // enter the loop
+    poll     -> dispatch                                // act on pending work ids
+    poll     -> end       [condition="outcome=failed"]  // poll failed => shutdown
+    dispatch -> wait                                    // do not block on children
+    wait     -> poll                                    // BACK-EDGE forms the cycle
 }

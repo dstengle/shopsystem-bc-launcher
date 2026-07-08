@@ -617,21 +617,22 @@ def test_8q2x_defect_b_run_resolves_def_dir_workflow_not_workspace_root(
         f"parent cwd at the image WORKDIR); script:\n{script}"
     )
 
-    # (3) `fabro run dispatcher.fabro` (lead-odd9 / ADR-058 replaced the
-    # one-shot `fabro run workflow.fabro`) runs AFTER the backgrounded server
-    # group, in the SAME (cwd=/workspace/.fabro) shell -> resolves
-    # /workspace/.fabro/dispatcher.fabro, NOT /workspace/dispatcher.fabro.
-    run_pos = script.find("fabro run dispatcher.fabro")
+    # (3) `fabro run dispatcher.toml` (lead-b3f0 / ADR-058 AMENDED replaced the
+    # bare `fabro run dispatcher.fabro` graph-def run with the `.toml`
+    # entrypoint, @scenario_hash:24d94274b9cbc2b0) runs AFTER the backgrounded
+    # server group, in the SAME (cwd=/workspace/.fabro) shell -> resolves
+    # /workspace/.fabro/dispatcher.toml, NOT /workspace/dispatcher.toml.
+    run_pos = script.find("fabro run dispatcher.toml")
     assert run_pos != -1, (
-        f"Defect B: engage must issue `fabro run dispatcher.fabro`; "
+        f"Defect B: engage must issue `fabro run dispatcher.toml`; "
         f"script:\n{script}"
     )
     assert run_pos > m.start(), (
         "Defect B: `fabro run` must run AFTER the backgrounded server group, "
         f"in the foreground shell; script:\n{script}"
     )
-    assert "/workspace/dispatcher.fabro" not in script, (
-        "Defect B: the engage must NOT resolve /workspace/dispatcher.fabro "
+    assert "/workspace/dispatcher.toml" not in script, (
+        "Defect B: the engage must NOT resolve /workspace/dispatcher.toml "
         f"(the WORKDIR-root path the bug produced); script:\n{script}"
     )
     assert "/workspace/workflow.fabro" not in script, (
