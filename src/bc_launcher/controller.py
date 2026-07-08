@@ -176,14 +176,24 @@ def _is_empty_remote_failure(message: str) -> bool:
 
     lead-5k8c.  An uninitialized `<bc>-beads` GitHub repo makes bootstrap's
     clone fail with "git remote has no branches: cannot push ...; initialize
-    the repository with an initial branch/commit first".  That specific
-    condition — and ONLY that condition — is what the empty-remote
-    init-and-push provisioning recovers; other bootstrap failures fall
-    straight through to the warn-and-continue path.
+    the repository with an initial branch/commit first".
+
+    lead-ypnz / GAP D — VERSION-ROBUST.  The CURRENT bc-base dolt fails the
+    clone of a freshly `gh repo create --add-readme`'d tracker (git README
+    branch present, NO dolt refs) with a DIFFERENT phrasing: "clone failed;
+    remote at that url contains no Dolt data".  Both phrasings describe the
+    SAME condition — an existing-but-unseeded remote — which the empty-remote
+    init-and-push provisioning recovers.  So this predicate matches BOTH the
+    current "contains no Dolt data" text and the legacy "git remote has no
+    branches" text (keeping the legacy match makes it robust across dolt
+    versions).  Other bootstrap failures fall straight through to the
+    warn-and-continue path.
     """
     text = message.lower()
-    return "git remote has no branches" in text or (
-        "no branches" in text and "initialize" in text
+    return (
+        "git remote has no branches" in text
+        or ("no branches" in text and "initialize" in text)
+        or "contains no dolt data" in text
     )
 
 
