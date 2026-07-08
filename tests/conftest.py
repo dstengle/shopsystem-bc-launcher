@@ -16987,3 +16987,135 @@ def l3zzu_idemp_negctl(ctx):
         "unlike the pre-fix native node, the ACP in-flight tracking must NOT "
         f"re-dispatch W on the next cycle; cycle-2 decisions={acp_c2!r}"
     )
+
+
+# ===========================================================================
+# lead-3zzu delivery (@scenario_hash:f38ab66672151669): for each work id the ACP
+# dispatch node decides to SPAWN, it MATERIALIZES a per-child config carrying the
+# CONCRETE work id in a "[run.environment.env] WORK_ID=W" overlay (the channel
+# that REACHES the child's native script= env; `-I WORK_ID` does NOT) and spawns
+# the child DETACHED (`fabro run child-W.toml --detach`).  The child runs the
+# UNCHANGED ADR-051 workflow.fabro def -- preserving the lead-b3f0 delivery
+# guarantee (which retired 6088da7e9e4c4e59 re-pins through the ACP node).  Binds
+# directly to the NON-LLM dispatch_acp_agent.py delivery contract
+# (materialize_child_config / spawn_command) + the UNCHANGED child asset bytes.
+# Never a model.
+# ===========================================================================
+
+_L3ZZU_DELIVERY = {
+    'given_container': 'the container "bc-shopsystem-messaging" is running with the self-contained fabro def set POURED by shop-templates into "/workspace/.fabro/", including the "dispatcher.fabro" graph def whose "dispatch" node is the ACP-backed agent node and the UNCHANGED ADR-051 child def',
+    'given_spawn': 'the ACP dispatch node\'s decision for a pending work id "W" with no live child is to SPAWN a child',
+    'when': 'the ACP-backed "dispatch" node\'s decision contract and the per-child config it materializes for "W" are inspected structurally, without a live docker daemon, a running fabro server, or a reachable agent-vault',
+    'then_overlay': 'the per-child config the ACP node materializes for "W" carries the CONCRETE work id in a "[run.environment.env]" overlay as "WORK_ID=W", so the child receives its own work id through the child config env overlay',
+    'then_detached': 'the ACP node spawns that child DETACHED, so decided children run in PARALLEL isolated per WORK_ID and the dispatch step does not block on them before the loop\'s "wait -> poll" back-edge',
+    'then_child_reaches': 'the spawned child runs the UNCHANGED ADR-051 child def, and the concrete "WORK_ID=W" from the "[run.environment.env]" overlay REACHES that child\'s native "script=" node env so the child acts on its own work id, preserving the lead-b3f0 delivery guarantee under the ACP dispatch',
+}
+
+
+# --- Given (delivery): container with the ACP dispatch node + UNCHANGED child --
+
+@given(_L3ZZU_DELIVERY['given_container'])
+def l3zzu_delivery_container(ctx, fake_driver, controller, tmp_path):
+    _odd9_drive_fabro_launch(_ODD9_BC, ctx, fake_driver, controller, tmp_path,
+                             work_id=None)
+    assert fake_driver.is_running("bc-shopsystem-messaging"), (
+        "Expected bc-shopsystem-messaging to be running after the fabro-path launch."
+    )
+    ctx["l3zzu_graph"] = _b3f0_dispatcher_graph_text()
+
+
+# --- Given (delivery): the decision for pending W with no live child is SPAWN --
+
+@given(_L3ZZU_DELIVERY['given_spawn'])
+def l3zzu_delivery_spawn_decision(ctx):
+    agent = _l3zzu_load_acp_agent()
+    ctx["l3zzu_agent"] = agent
+    ctx["l3zzu_w"] = "W"
+    decisions = agent.decide(["W"], set())
+    by_id = {d["work_id"]: d["action"] for d in decisions}
+    assert by_id.get("W") == "SPAWN", (
+        f"a pending W with no live child must decide SPAWN; decisions={decisions!r}"
+    )
+
+
+# --- When (delivery): inspect the decision contract + the per-child config -----
+
+@when(_L3ZZU_DELIVERY['when'])
+def l3zzu_delivery_inspect(ctx):
+    ctx.setdefault("l3zzu_agent", _l3zzu_load_acp_agent())
+    ctx.setdefault("l3zzu_w", "W")
+
+
+# --- Then (delivery): per-child config carries WORK_ID in the env overlay ------
+
+@then(_L3ZZU_DELIVERY['then_overlay'])
+def l3zzu_delivery_overlay(ctx):
+    agent = ctx["l3zzu_agent"]
+    assert hasattr(agent, "materialize_child_config"), (
+        "the ACP agent must materialize a per-child config carrying the concrete "
+        "WORK_ID for each SPAWN decision (delivery contract)"
+    )
+    cfg = agent.materialize_child_config("W")
+    assert "[run.environment.env]" in cfg, (
+        f"the materialized child config must carry a [run.environment.env] overlay; config:\n{cfg}"
+    )
+    # The CONCRETE per-child work id is written as WORK_ID="W" (from the decision,
+    # not a fixed literal), so the child receives its OWN work id.
+    assert re.search(r'WORK_ID\s*=\s*"W"', cfg), (
+        f'the overlay must set the concrete WORK_ID="W" for this child; config:\n{cfg}'
+    )
+    ctx["l3zzu_child_cfg"] = cfg
+    # per-child: a DIFFERENT work id yields a DIFFERENT concrete WORK_ID.
+    other = agent.materialize_child_config("V")
+    assert re.search(r'WORK_ID\s*=\s*"V"', other), (
+        f'materialize must carry the CONCRETE per-child work id (V for V); config:\n{other}'
+    )
+
+
+# --- Then (delivery): the child is spawned DETACHED ---------------------------
+
+@then(_L3ZZU_DELIVERY['then_detached'])
+def l3zzu_delivery_detached(ctx):
+    agent = ctx["l3zzu_agent"]
+    assert hasattr(agent, "spawn_command"), (
+        "the ACP agent must expose the detached spawn command for a SPAWN decision"
+    )
+    cmd = agent.spawn_command("W")
+    cmd_s = " ".join(cmd) if isinstance(cmd, (list, tuple)) else str(cmd)
+    assert "fabro run" in cmd_s, (
+        f"the spawn must issue `fabro run`; command:\n{cmd_s}"
+    )
+    assert "--detach" in cmd_s, (
+        f"the child must be spawned DETACHED (--detach) so the dispatch step does "
+        f"not block before the wait -> poll back-edge; command:\n{cmd_s}"
+    )
+    # `fabro run` targets a per-child .toml entrypoint carrying the concrete W.
+    assert re.search(r"fabro run [^\s]*W[^\s]*\.toml", cmd_s), (
+        f"the spawn must `fabro run` a per-child .toml naming the concrete W; command:\n{cmd_s}"
+    )
+
+
+# --- Then (delivery): UNCHANGED child def; overlay reaches its native env ------
+
+@then(_L3ZZU_DELIVERY['then_child_reaches'])
+def l3zzu_delivery_child_reaches(ctx):
+    cfg = ctx["l3zzu_child_cfg"]
+    # The materialized child config applies the UNCHANGED ADR-051 workflow.fabro.
+    assert re.search(r'graph\s*=\s*"workflow\.fabro"', cfg), (
+        f"the child config must apply the ADR-051 workflow.fabro child def; config:\n{cfg}"
+    )
+    wf = _ky63_def_asset_root() / "workflow.fabro"
+    assert wf.is_file(), "the ADR-051 workflow.fabro child def must ship in the bundle"
+    # The [run.environment.env] overlay is the PROVEN channel that reaches a
+    # native script= node's env (the child workflow.toml documents it); the ACP
+    # node materializes WORK_ID via that SAME channel, and NOT via `-I WORK_ID`
+    # (which does NOT reach the child's native script= env).
+    child_toml = (_ky63_def_asset_root() / "workflow.toml").read_text()
+    assert "[run.environment.env]" in child_toml and "WORK_ID" in child_toml, (
+        "the child workflow.toml must document the [run.environment.env] WORK_ID "
+        "overlay (the proven native-script delivery channel)"
+    )
+    assert "-I WORK_ID" not in cfg, (
+        "the ACP node must deliver WORK_ID via the [run.environment.env] overlay, "
+        f"NOT `-I WORK_ID` (which does not reach the child native script env); config:\n{cfg}"
+    )

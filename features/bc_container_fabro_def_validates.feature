@@ -70,3 +70,13 @@ Feature: a launched bc-base BC carries a self-contained VALID fabro loop def (le
     And when the in-flight run state records NO live child for a pending work id "V", the decision returned for "V" is to SPAWN a child, so a genuinely unstarted work id is still dispatched exactly once
     And as the negative control, the pre-fix native command "dispatch" node carried NO in-flight skip and re-dispatched every still-pending work id each ~6s cycle — the exact duplicate-spawn the ACP node's in-flight tracking exists to eliminate
 
+  @scenario_hash:f38ab66672151669 @bc:shopsystem-bc-launcher
+  Scenario: for each work id the ACP dispatch node decides to spawn, the spawned child receives its concrete WORK_ID via a per-child "[run.environment.env] WORK_ID" overlay carried from the ACP agent's context, preserving the lead-b3f0 delivery guarantee
+    Given the shopsystem-bc-launcher BC is installed
+    And the container "bc-shopsystem-messaging" is running with the self-contained fabro def set POURED by shop-templates into "/workspace/.fabro/", including the "dispatcher.fabro" graph def whose "dispatch" node is the ACP-backed agent node and the UNCHANGED ADR-051 child def
+    And the ACP dispatch node's decision for a pending work id "W" with no live child is to SPAWN a child
+    When the ACP-backed "dispatch" node's decision contract and the per-child config it materializes for "W" are inspected structurally, without a live docker daemon, a running fabro server, or a reachable agent-vault
+    Then the per-child config the ACP node materializes for "W" carries the CONCRETE work id in a "[run.environment.env]" overlay as "WORK_ID=W", so the child receives its own work id through the child config env overlay
+    And the ACP node spawns that child DETACHED, so decided children run in PARALLEL isolated per WORK_ID and the dispatch step does not block on them before the loop's "wait -> poll" back-edge
+    And the spawned child runs the UNCHANGED ADR-051 child def, and the concrete "WORK_ID=W" from the "[run.environment.env]" overlay REACHES that child's native "script=" node env so the child acts on its own work id, preserving the lead-b3f0 delivery guarantee under the ACP dispatch
+
