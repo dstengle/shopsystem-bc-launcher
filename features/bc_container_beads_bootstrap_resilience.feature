@@ -110,11 +110,11 @@ Feature: bc-container launch bd-bootstrap is bootstrap-resilient and never fatal
       | dstengle | shopsystem-knowledge  | https://github.com/dstengle/shopsystem-knowledge-beads.git | redundant-noop-non-fatal    | reached-and-run   | present          | zero           |
       | dstengle | shopsystem-knowledge  | git+https://github.com/dstengle/shopsystem-knowledge-beads.git | remote-helper-aborted-exit-128 | never-reached     | absent           | nonzero        |
 
-  @scenario_hash:e3a0ec19298e7ce7 @bc:shopsystem-bc-launcher
-  Scenario: standing up a new BC with an empty tracker remote establishes a prefixed local dolt DB from the committed metadata.json before seeding, so the retried bootstrap exits zero and bd create yields a prefixed id
-    Given a new BC is stood up via "create-bc" whose beads tracker remote at "<owner>/<bc>-beads" exists but is empty of Dolt data, and whose committed ".beads/metadata.json" names a definite issue_prefix
-    When the standup's beads provisioning orchestration runs its bootstrap-and-seed ordering
-    Then the standup first establishes a PREFIXED local dolt database create-fresh from the committed ".beads/metadata.json", adopting that committed issue_prefix rather than one derived from the BC name, BEFORE it seeds the remote
-    And the standup then seeds that prefixed local database to the tracker remote with "bd dolt push", so the tracker remote carries Dolt data with "refs/dolt/*" refs present
-    And the retried "bd bootstrap" exits zero rather than hard-failing the empty-remote clone with "contains no Dolt data"
+  @scenario_hash:5351a4a8071b594f @bc:shopsystem-bc-launcher
+  Scenario: standing up a new BC whose sync.remote is configured to an empty tracker remote unconfigures sync.remote before bd init so the prefixed local dolt DB create-freshes, then restores sync.remote and seeds, so bd create yields a prefixed id
+    Given a scaffolded BC whose ".beads/config.yaml" has "sync.remote" CONFIGURED to the derived "<owner>/<bc>-beads" remote that exists but is EMPTY of Dolt data, and whose committed ".beads/metadata.json" names a definite issue_prefix in its "dolt_database" field
+    When the standup's beads provisioning orchestration runs
+    Then the standup FIRST unconfigures "sync.remote" by removing the "sync.remote" line from ".beads/config.yaml", so that "bd init -p <prefix>" adopting the committed metadata.json issue_prefix create-freshes a PREFIXED local dolt database rather than attempting to CLONE the configured empty remote and hard-failing
+    And the standup THEN restores the "sync.remote" line, runs "bd dolt remote add origin" against the git+https url, and "bd dolt push" so the tracker remote carries Dolt data with "refs/dolt/*" refs present
     And after standup "bd create" run in the new BC's workspace exits zero and yields an id of the form "<prefix>-<n>" carrying the committed issue_prefix rather than failing "issue_prefix config is missing"
+    And as the negative control, had "bd init -p" instead been run WHILE "sync.remote" was still configured to the empty remote, it would attempt a dolt clone and hard-fail "contains no Dolt data" — the exact pre-fix real-launch failure this unconfigure-before-init ordering exists to avoid
