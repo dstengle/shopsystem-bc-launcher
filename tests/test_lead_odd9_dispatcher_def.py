@@ -51,10 +51,11 @@ def test_workflow_child_def_still_enrolled_unchanged():
 
 
 def test_dispatcher_is_a_cyclic_dot_digraph():
-    """Structural sanity: dispatcher.fabro is a DOT digraph carrying the native
-    poll-loop reactive cycle (wait -> poll back-edge, lead-b3f0 / ADR-058
-    AMENDED @scenario_hash:a5e16a192f755768 replaced the launch -> watch
-    cyclic-Haiku back-edge)."""
+    """Structural sanity: dispatcher.fabro is a DOT digraph carrying the poll-loop
+    reactive cycle (wait -> poll back-edge, lead-b3f0 / ADR-058 AMENDED
+    @scenario_hash:a5e16a192f755768, RECONCILED by lead-3zzu / ADR-058
+    Amendment 2 to 9f31aa5f378410b1: the `dispatch` node is now the NON-LLM ACP
+    script-agent, poll/wait stay native, the wait -> poll back-edge is unchanged)."""
     text = (_fabro_def_asset_root() / "dispatcher.fabro").read_text()
     assert "digraph BcShopDispatcher {" in text
     assert text.rstrip().endswith("}")

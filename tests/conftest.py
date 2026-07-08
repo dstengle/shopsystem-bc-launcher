@@ -16298,16 +16298,18 @@ def gapi_negative_control(ctx, tmp_path):
 #     sandbox comes up IN-PROCESS), NOT the bare `dispatcher.fabro` graph def
 #     (which would bypass [environments.local], default to the docker sandbox,
 #     and fail 0s at /var/run/docker.sock in the docker-less bc-base).
-#   B @scenario_hash:a5e16a192f755768 — dispatcher.fabro is a NATIVE cyclic
-#     poll-loop (start->poll->dispatch->wait->poll), each loop node a native
-#     script= node, NO long-running `shop-msg watch` node, NO LLM/agent node.
-#   C @scenario_hash:6088da7e9e4c4e59 — the native dispatch node materializes a
-#     per-child .toml carrying the CONCRETE work id in a [run.environment.env]
-#     WORK_ID overlay and spawns `fabro run child.toml --detach` (NOT -I WORK_ID,
-#     which does not reach the child's native script= env).
+#   B @scenario_hash:a5e16a192f755768 (RECONCILED by lead-3zzu to
+#     9f31aa5f378410b1) — dispatcher.fabro is a cyclic poll-loop
+#     (start->poll->dispatch->wait->poll); poll/wait are native script= nodes and
+#     `dispatch` is the ONLY agent node, a NON-LLM ACP script-agent; NO
+#     long-running `shop-msg watch` node, NO LLM node.
+#   (lead-b3f0 scenario C — the NATIVE dispatch node's per-child env-overlay
+#    work_id delivery — was RETIRED WHOLESALE by lead-3zzu / ADR-058 Amendment 2;
+#    its guarantee is re-pinned through the ACP node by f38ab66672151669, the
+#    lead-3zzu delivery scenario.)
 #
 # FIDELITY: A binds to the REAL launcher's ACTUAL recorded engage argv
-# (controller.launch over FakeDockerDriver); B/C bind structurally to the REAL
+# (controller.launch over FakeDockerDriver); B binds structurally to the REAL
 # committed dispatcher.fabro / dispatcher.toml asset bytes (reusing the ky63
 # quote-aware DOT parser).  Never a model.  (Supersedes/retires the old
 # cyclic-Haiku dispatcher pin wholesale, and reconciles 30fd5f2079f1c433 /
@@ -16615,12 +16617,32 @@ def b3f0_poll_native(pending_cmd, ctx):
 # --- Then (B): dispatch is a native node acting on the poll ids ---------------
 
 @then(parsers.parse(
-    'the "dispatch" node is a NATIVE "script=" node with no LLM that acts on '
-    'the pending work ids from "poll"'))
+    'the "dispatch" node is the only agent node — a non-LLM ACP script-agent '
+    '("backend=acp") — that acts on the pending work ids from "poll"'))
 def b3f0_dispatch_native(ctx):
+    # RECONCILED (lead-3zzu, ADR-058 Amendment 2): `dispatch` is no longer a
+    # native script= node — it is the ONLY agent node in the loop, a NON-LLM ACP
+    # script-agent (backend="acp" + acp.command/acp.config). The a5e16 KEEP-set
+    # (cyclic topology, poll/wait native, no shop-msg watch, zero-token) is
+    # unchanged; only the now-false "dispatch is native / no agent node" clause
+    # is reconciled. lead-4uo1 owns the formal re-author.
     graph = _b3f0_graph(ctx)
     nodes = _ky63_parse_nodes(graph)
-    _b3f0_native_body(nodes, "dispatch")
+    assert "dispatch" in nodes, "dispatcher.fabro missing the dispatch node"
+    body = nodes["dispatch"]
+    assert re.search(r'backend\s*=\s*"acp"', body), (
+        f'the `dispatch` node must be the non-LLM ACP script-agent (backend="acp"); body:\n{body}'
+    )
+    assert "script=" not in body, (
+        f"the ACP dispatch agent must NOT be a native script= command node; body:\n{body}"
+    )
+    # NON-LLM: no prompt= model text; it drives an external ACP process.
+    assert "prompt=" not in body, (
+        f"the ACP dispatch agent is NON-LLM (no prompt= model text); body:\n{body}"
+    )
+    assert ("acp.command" in body) or ("acp.config" in body), (
+        f"the ACP dispatch agent must name its ACP process (acp.command/acp.config); body:\n{body}"
+    )
 
 
 # --- Then (B): wait is a native short-sleep node before the back-edge ---------
@@ -16640,10 +16662,11 @@ def b3f0_wait_native(ctx):
 # --- Then (B): no watch node, no LLM/agent node anywhere in the loop ----------
 
 @then(parsers.parse(
-    'the def contains NO long-running "shop-msg watch" node and NO LLM/agent '
-    'node (no Haiku "launch" node and no other model-backed node) anywhere in '
-    "the loop, so the steady-state loop consumes NO model tokens and tokens are "
-    "spent only on the child's actual work"))
+    'the def contains NO long-running "shop-msg watch" node and its only agent '
+    'node is the non-LLM ACP dispatch script-agent (no Haiku "launch" node and '
+    'no other model-backed LLM node) anywhere in the loop, so the steady-state '
+    "loop consumes NO model tokens and tokens are spent only on the child's "
+    "actual work"))
 def b3f0_no_watch_no_llm(ctx):
     graph = _b3f0_graph(ctx)
     # Strip DOT `//` line comments so the EXECUTABLE graph (not the explanatory
@@ -16653,193 +16676,446 @@ def b3f0_no_watch_no_llm(ctx):
     nodes = _ky63_parse_nodes(graph)
     # NO long-running `shop-msg watch` node anywhere in the executable def.
     assert "shop-msg watch" not in executable, (
-        "the native poll-loop must contain NO long-running `shop-msg watch` "
+        "the poll-loop must contain NO long-running `shop-msg watch` "
         f"node; executable graph:\n{executable}"
     )
     # NO `launch` node (the retired Haiku agent) — the loop nodes are exactly the
-    # native poll/dispatch/wait (+ terminals).
+    # native poll/wait, the ACP dispatch agent, and terminals.
     assert "launch" not in nodes, (
-        "the native poll-loop must contain NO Haiku `launch` agent node"
+        "the poll-loop must contain NO Haiku `launch` agent node"
     )
-    # NO LLM/agent node ANYWHERE: no node carries a prompt=/class=, and the graph
-    # declares no model_stylesheet / model: binding (zero steady-state tokens).
+    # RECONCILED (lead-3zzu, ADR-058 Amendment 2): the ONLY agent node is the
+    # NON-LLM ACP dispatch script-agent. Every OTHER node is native (no
+    # prompt=/class=); `dispatch` carries class= + backend="acp" but is NON-LLM
+    # (no prompt= model text, drives an external ACP process). Zero tokens holds
+    # because the ACP agent is a non-LLM script, NOT because there is no agent
+    # node.
+    assert "dispatch" in nodes, "dispatcher.fabro missing the ACP dispatch node"
+    dispatch_body = nodes["dispatch"]
+    assert re.search(r'backend\s*=\s*"acp"', dispatch_body), (
+        "the only agent node must be the ACP dispatch script-agent "
+        f'(backend="acp"); dispatch body:\n{dispatch_body}'
+    )
     for name, body in nodes.items():
+        if name == "dispatch":
+            # The ACP agent is NON-LLM: it carries NO prompt= model text.
+            assert "prompt=" not in body, (
+                f"the ACP dispatch agent must be NON-LLM (no prompt=); body:\n{body}"
+            )
+            continue
         assert "prompt=" not in body and "class=" not in body, (
-            f"loop node {name!r} must be NATIVE (no LLM prompt=/class=); body:\n{body}"
+            f"loop node {name!r} (other than the ACP dispatch agent) must be "
+            f"NATIVE (no LLM prompt=/class=); body:\n{body}"
         )
     assert "model_stylesheet" not in executable and re.search(r"model\s*:", executable) is None, (
-        "the native poll-loop must declare NO model binding (no model_stylesheet "
+        "the poll-loop must declare NO model binding (no model_stylesheet "
         f"/ model:), so the steady-state loop spends zero model tokens; "
         f"executable graph:\n{executable}"
     )
 
 
 # ===========================================================================
-# lead-b3f0 scenario C (@scenario_hash:6088da7e9e4c4e59): the native `dispatch`
-# node hands each pending work id W to its child via a per-child `.toml`
-# carrying the CONCRETE work id in a [run.environment.env] WORK_ID overlay, and
-# spawns the child DETACHED (`fabro run <child>.toml --detach`) -- NOT
-# `-I WORK_ID`, which does NOT reach the child's native `script=` node env.  The
-# spawned child is the UNCHANGED ADR-051 workflow.fabro def.  Binds structurally
-# to the REAL committed dispatcher.fabro `dispatch` node body + the workflow.fabro
-# child asset (reusing the ky63 quote-aware DOT parser).  Never a model.
+# lead-3zzu — ADR-058 Amendment 2: the dispatcher's `dispatch` node becomes an
+# ACP-backed NON-LLM SCRIPT-AGENT (backend="acp" + acp.command/acp.config) so it
+# is CONTEXT-BLIND no longer.  Unlike the pre-fix native command node (which
+# re-fired for every still-pending work id each ~6s poll cycle, duplicate-
+# spawning a slow child onto the shared per-WORK_ID worktree), the ACP node
+# RECEIVES the poll context (pending ids + in-flight run state) and RETURNS
+# structured dispatch DECISIONS: SKIP a work id whose child is still in flight
+# (idempotency), SPAWN a work id with no live child (exactly once).  Zero-token
+# holds because the ACP agent is a NON-LLM python SCRIPT (Fabro injects no model
+# creds), NOT because the loop has no agent node.  Binds structurally to the
+# REAL committed dispatcher.fabro `dispatch` node body AND to the directly unit-
+# testable decision contract of the poured dispatch_acp_agent.py.  Never a model.
+#   acpkind   @scenario_hash:7709a671bdfaddb7
+#   idemp     @scenario_hash:713d01c4f4dfd107
+#   delivery  @scenario_hash:f38ab66672151669
+# ===========================================================================
+import inspect as _l3zzu_inspect
+
+_L3ZZU_STEP = {
+    'acp_when': 'the poured "dispatcher.fabro" def\'s "dispatch" node is inspected structurally, without a live docker daemon, a running fabro server, or a reachable agent-vault',
+    'acp_then_kind': 'the "dispatch" node is an ACP-backed AGENT node carrying "backend=acp" together with an "acp.command" attr (a shell such as "python3 <dispatch_acp_agent.py>") OR an "acp.config" attr (a JSON stdio config), so fabro drives it through the agent-client-protocol backend',
+    'acp_then_notnative': 'the "dispatch" node is NOT a native "script="/parallelogram command node, so the pre-fix context-blind command dispatch is absent',
+    'acp_then_receive': 'the "dispatch" node is wired to RECEIVE the incoming context yielded by the "poll" node — the pending inbox work ids plus the in-flight run state — as its input',
+    'acp_then_return': 'the "dispatch" node is wired to RETURN structured dispatch DECISIONS as its output, which the loop consumes to spawn children, so the dispatch step both reads context and emits decisions rather than blindly re-acting on raw work ids each cycle',
+}
+
+
+def _l3zzu_dispatch_body(ctx):
+    graph = ctx.get("l3zzu_graph") or _b3f0_dispatcher_graph_text()
+    nodes = _ky63_parse_nodes(graph)
+    assert "dispatch" in nodes, "dispatcher.fabro missing the `dispatch` node"
+    return nodes["dispatch"]
+
+
+def _l3zzu_load_acp_agent():
+    """Import the poured NON-LLM ACP dispatch script-agent module from the
+    fabro-def asset root.  Its decision contract (decide / DispatchTracker /
+    materialize_child_config / spawn_command) is directly unit-testable because
+    it is a plain python script, not an LLM: feed it context, assert decisions.
+    """
+    path = _ky63_def_asset_root() / "dispatch_acp_agent.py"
+    assert path.is_file(), (
+        f"the NON-LLM ACP dispatch script-agent is ABSENT at {path}; the ACP "
+        "dispatch node's acp.command must point at a poured dispatch_acp_agent.py "
+        "(ADR-058 Amendment 2, lead-3zzu)"
+    )
+    # compile+exec into a fresh module namespace rather than SourceFileLoader,
+    # so loading the poured asset writes NO __pycache__ into the def-bundle tree
+    # (the bundle-shape test asserts the asset root holds EXACTLY the enumerated
+    # files -- a stray .pyc would be a spurious extra).
+    import types as _types
+    mod = _types.ModuleType("dispatch_acp_agent")
+    mod.__file__ = str(path)
+    exec(compile(path.read_text(), str(path), "exec"), mod.__dict__)
+    return mod
+
+
+# --- When (acpkind): inspect the poured dispatch node structurally ------------
+
+@when(_L3ZZU_STEP['acp_when'])
+def l3zzu_inspect_dispatch_node(ctx):
+    ctx["l3zzu_graph"] = _b3f0_dispatcher_graph_text()
+
+
+# --- Then (acpkind): the dispatch node is an ACP-backed agent node ------------
+
+@then(_L3ZZU_STEP['acp_then_kind'])
+def l3zzu_dispatch_is_acp(ctx):
+    body = _l3zzu_dispatch_body(ctx)
+    # backend="acp": fabro drives the node through the agent-client-protocol
+    # backend (v0.11.1 JSON-RPC over stdio), not the native command executor.
+    assert re.search(r'backend\s*=\s*"acp"', body), (
+        f'the `dispatch` node must carry backend="acp"; body:\n{body}'
+    )
+    # exactly one of acp.command (a shell) OR acp.config (a JSON stdio config)
+    # names the external ACP process fabro launches.
+    assert ("acp.command" in body) or ("acp.config" in body), (
+        "the ACP dispatch node must carry an acp.command (shell such as "
+        '"python3 dispatch_acp_agent.py") OR an acp.config (JSON stdio config) '
+        f"attr; body:\n{body}"
+    )
+
+
+# --- Then (acpkind): the dispatch node is NOT a native command node -----------
+
+@then(_L3ZZU_STEP['acp_then_notnative'])
+def l3zzu_dispatch_not_native(ctx):
+    body = _l3zzu_dispatch_body(ctx)
+    # The pre-fix context-blind native command dispatch is ABSENT: the ACP node
+    # is neither a `script=` node nor a `shape=parallelogram` command node.
+    assert "script=" not in body, (
+        "the ACP dispatch node must NOT be a native `script=` command node "
+        f"(the pre-fix context-blind dispatch must be absent); body:\n{body}"
+    )
+    assert "shape=parallelogram" not in body, (
+        "the ACP dispatch node must NOT be a native shape=parallelogram command "
+        f"node; body:\n{body}"
+    )
+
+
+# --- Then (acpkind): wired to RECEIVE the poll context as input ---------------
+
+@then(_L3ZZU_STEP['acp_then_receive'])
+def l3zzu_dispatch_receives_context(ctx):
+    graph = ctx.get("l3zzu_graph") or _b3f0_dispatcher_graph_text()
+    # The poll -> dispatch edge feeds the ACP node the context poll yielded.
+    pairs = {(s, d) for s, d, _a in _b3f0_dispatcher_edges(graph)}
+    assert ("poll", "dispatch") in pairs, (
+        "the ACP dispatch node must be wired to receive the poll context via a "
+        f"poll -> dispatch edge; edges={pairs!r}"
+    )
+    # Its decision contract RECEIVES the pending work ids AND the in-flight run
+    # state as its two inputs (context-in).
+    mod = _l3zzu_load_acp_agent()
+    assert hasattr(mod, "decide"), (
+        "the ACP agent must expose a `decide` decision contract (context-in / "
+        "decisions-out)"
+    )
+    params = list(_l3zzu_inspect.signature(mod.decide).parameters)
+    assert len(params) >= 2, (
+        "decide must RECEIVE the pending inbox work ids AND the in-flight run "
+        f"state as its input; signature params: {params!r}"
+    )
+
+
+# --- Then (acpkind): wired to RETURN structured decisions as output -----------
+
+@then(_L3ZZU_STEP['acp_then_return'])
+def l3zzu_dispatch_returns_decisions(ctx):
+    mod = _l3zzu_load_acp_agent()
+    decisions = mod.decide(["lead-a1"], set())
+    assert isinstance(decisions, list) and decisions, (
+        "decide must RETURN a structured list of dispatch decisions (decisions-out)"
+    )
+    d = decisions[0]
+    assert isinstance(d, dict) and "work_id" in d and "action" in d, (
+        "each returned decision must be a structured {work_id, action} record "
+        f"the loop consumes to spawn children; got: {d!r}"
+    )
+    assert d["action"] in ("SPAWN", "SKIP"), (
+        f"a decision's action must be SPAWN or SKIP; got {d['action']!r}"
+    )
+
+
+# ===========================================================================
+# lead-3zzu idemp (@scenario_hash:713d01c4f4dfd107): the ACP dispatch node's
+# decision contract is IDEMPOTENT.  For a pending work id whose prior child is
+# still IN FLIGHT it decides SKIP (no second child, no per-WORK_ID worktree
+# collision); for a pending work id with NO live child it decides SPAWN (each
+# unstarted work id dispatched EXACTLY ONCE).  Negative control: the pre-fix
+# native command dispatch carried NO in-flight skip and re-dispatched every
+# still-pending id each ~6s cycle -- the exact duplicate-spawn the ACP node's
+# in-flight tracking exists to eliminate.  Binds directly to the NON-LLM
+# dispatch_acp_agent.py decision contract (decide / DispatchTracker).  Never a
+# model.
 # ===========================================================================
 
+_L3ZZU_IDEMP = {
+    'given_container': 'the container "bc-shopsystem-messaging" is running with the self-contained fabro def set POURED by shop-templates into "/workspace/.fabro/", including the "dispatcher.fabro" graph def whose "dispatch" node is the ACP-backed agent node',
+    'given_context': 'the incoming context carries a pending work id "W" AND the in-flight run state records that a prior child for "W" is still running and has not yet emitted work_done',
+    'when': 'the ACP-backed "dispatch" node\'s decision contract is inspected structurally against that context, without a live docker daemon, a running fabro server, or a reachable agent-vault',
+    'then_skip': 'the decision returned for the still-in-flight work id "W" is to SKIP re-dispatch, so NO second child is spawned for "W" while its prior child is live, and the two children cannot collide on the shared per-"W" git worktree',
+    'then_spawn': 'when the in-flight run state records NO live child for a pending work id "V", the decision returned for "V" is to SPAWN a child, so a genuinely unstarted work id is still dispatched exactly once',
+    'then_negctl': 'as the negative control, the pre-fix native command "dispatch" node carried NO in-flight skip and re-dispatched every still-pending work id each ~6s cycle — the exact duplicate-spawn the ACP node\'s in-flight tracking exists to eliminate',
+}
 
-# --- Given (C): container running with dispatcher.fabro + UNCHANGED child def -
 
-@given(parsers.parse(
-    'the container "{container_name}" is running with the self-contained fabro '
-    'def set POURED by shop-templates into "{def_dir}", including the '
-    '"dispatcher.fabro" graph def and the UNCHANGED ADR-051 child def'))
-def b3f0_container_running_with_child(container_name, def_dir, ctx, fake_driver,
-                                      controller, tmp_path):
+# --- Given (idemp): container running with the ACP-backed dispatch node -------
+
+@given(_L3ZZU_IDEMP['given_container'])
+def l3zzu_idemp_container(ctx, fake_driver, controller, tmp_path):
     _odd9_drive_fabro_launch(_ODD9_BC, ctx, fake_driver, controller, tmp_path,
                              work_id=None)
-    assert fake_driver.is_running(container_name), (
-        f"Expected {container_name!r} to be running after the fabro-path launch."
+    assert fake_driver.is_running("bc-shopsystem-messaging"), (
+        "Expected bc-shopsystem-messaging to be running after the fabro-path launch."
     )
-    ctx["container_name"] = container_name
+    ctx["l3zzu_graph"] = _b3f0_dispatcher_graph_text()
 
 
-# --- Given (C): poll has yielded a concrete pending work id W (framing) -------
+# --- Given (idemp): the poll context — pending W with a live prior child ------
 
-@given(parsers.parse(
-    'the "poll" node has yielded a concrete pending work id "{w}" from '
-    '"{pending_cmd}"'))
-def b3f0_poll_yielded_w(w, pending_cmd, ctx):
-    ctx["b3f0_w"] = w
+@given(_L3ZZU_IDEMP['given_context'])
+def l3zzu_idemp_context(ctx):
+    # W is pending AND its prior child is still running (has not emitted
+    # work_done) -> W is in the in-flight run state.
+    ctx["l3zzu_pending"] = ["W"]
+    ctx["l3zzu_inflight"] = {"W"}
 
 
-# --- When (C): inspect the dispatch node script + the per-child .toml ---------
+# --- When (idemp): inspect the decision contract against that context ---------
 
-@when(parsers.parse(
-    'the poured "dispatcher.fabro" def\'s native "dispatch" node script and the '
-    'per-child ".toml" it materializes are inspected structurally, without a '
-    "live docker daemon, a running fabro server, or a reachable agent-vault"))
-def b3f0_inspect_dispatch(ctx):
-    graph = _b3f0_dispatcher_graph_text()
-    ctx["b3f0_dispatcher_graph"] = graph
-    nodes = _ky63_parse_nodes(graph)
-    assert "dispatch" in nodes, "dispatcher.fabro missing the native dispatch node"
-    body = nodes["dispatch"]
-    # The dispatch node must be NATIVE (parallelogram script=, no LLM).
-    assert "script=" in body and "shape=parallelogram" in body, (
-        f"the dispatch node must be a NATIVE script= node; body:\n{body}"
+@when(_L3ZZU_IDEMP['when'])
+def l3zzu_idemp_inspect(ctx):
+    ctx["l3zzu_agent"] = _l3zzu_load_acp_agent()
+
+
+# --- Then (idemp): in-flight W -> SKIP (no second child, no collision) --------
+
+@then(_L3ZZU_IDEMP['then_skip'])
+def l3zzu_idemp_skip(ctx):
+    agent = ctx["l3zzu_agent"]
+    decisions = agent.decide(ctx["l3zzu_pending"], ctx["l3zzu_inflight"])
+    by_id = {d["work_id"]: d["action"] for d in decisions}
+    assert by_id.get("W") == "SKIP", (
+        "for a work id W whose prior child is still IN FLIGHT the ACP decision "
+        "must be SKIP re-dispatch (no second child, the two children cannot "
+        f"collide on the shared per-W worktree); decisions={decisions!r}"
     )
-    assert "prompt=" not in body and "class=" not in body, (
-        f"the dispatch node must have NO LLM (no prompt=/class=); body:\n{body}"
-    )
-    ctx["b3f0_dispatch_body"] = body
-
-
-def _b3f0_dispatch_body(ctx):
-    return ctx.get("b3f0_dispatch_body") or _ky63_parse_nodes(
-        _b3f0_dispatcher_graph_text())["dispatch"]
-
-
-# --- Then (C): per-child .toml carries WORK_ID in [run.environment.env] -------
-
-@then(parsers.parse(
-    'for each pending work id "{w}" the native "dispatch" node materializes a '
-    'per-child ".toml" that carries the CONCRETE work id in a '
-    '"{env_table}" overlay as "{work_kv}", so the child receives its work id '
-    'through the child ".toml" env overlay'))
-def b3f0_dispatch_materializes_toml(w, env_table, work_kv, ctx):
-    body = _b3f0_dispatch_body(ctx)
-    assert env_table == "[run.environment.env]"
-    # The dispatch node MATERIALIZES a per-child .toml (writes a .toml file).
-    assert ".toml" in body, (
-        f"the dispatch node must materialize a per-child .toml; body:\n{body}"
-    )
-    # That .toml carries a [run.environment.env] overlay …
-    assert "[run.environment.env]" in body, (
-        f"the materialized child .toml must carry a {env_table} overlay; body:\n{body}"
-    )
-    # … into which the CONCRETE per-child work id is written as WORK_ID (the id
-    # comes from the loop variable, not a hard-coded literal), so it is per-child.
-    assert "WORK_ID" in body, (
-        f"the materialized child .toml overlay must set WORK_ID; body:\n{body}"
-    )
-    assert re.search(r"WORK_ID\b", body) and "$wid" in body, (
-        "the WORK_ID written into the overlay must be the CONCRETE per-child work "
-        f"id (from the poll loop variable), not a fixed literal; body:\n{body}"
+    spawns_for_w = [d for d in decisions
+                    if d["work_id"] == "W" and d["action"] == "SPAWN"]
+    assert not spawns_for_w, (
+        f"NO SPAWN may be returned for the in-flight work id W; got {spawns_for_w!r}"
     )
 
 
-# --- Then (C): spawns the child DETACHED via `fabro run <child>.toml --detach` -
+# --- Then (idemp): no live child for V -> SPAWN, exactly once -----------------
 
-@then(parsers.parse(
-    'the "dispatch" node then spawns that child DETACHED by issuing "{spawn}", '
-    "so children run in PARALLEL isolated per WORK_ID and the dispatch node "
-    'does not block on them before the "wait -> poll" back-edge'))
-def b3f0_dispatch_spawns_detached(spawn, ctx):
-    body = _b3f0_dispatch_body(ctx)
-    # Spawns the child via `fabro run <child>.toml --detach` (the poured def is
-    # generic: the child toml path is per-work-id, so bind to the base command
-    # `fabro run` + `.toml` + `--detach` rather than the literal illustration).
-    assert "fabro run" in body, f"the dispatch node must issue `fabro run`; body:\n{body}"
-    assert "--detach" in body, (
-        f"the dispatch node must spawn the child DETACHED (--detach) so it does "
-        f"not block on children before the back-edge; body:\n{body}"
+@then(_L3ZZU_IDEMP['then_spawn'])
+def l3zzu_idemp_spawn(ctx):
+    agent = ctx["l3zzu_agent"]
+    # V is a genuinely unstarted work id (NO live child); W is still in flight.
+    decisions = agent.decide(["W", "V"], {"W"})
+    by_id = {d["work_id"]: d["action"] for d in decisions}
+    assert by_id.get("V") == "SPAWN", (
+        f"a pending work id V with NO live child must be SPAWNed; decisions={decisions!r}"
     )
-    # The `fabro run` targets a `.toml` (the per-child entrypoint), not a bare
-    # `.fabro` graph def.
-    assert re.search(r"fabro run [^\n]*\.toml", body), (
-        f"the dispatch node must `fabro run` a per-child .toml entrypoint; body:\n{body}"
+    assert by_id.get("W") == "SKIP", (
+        f"the in-flight work id W stays SKIP alongside V; decisions={decisions!r}"
+    )
+    # EXACTLY ONCE: once V's child is live (tracked in-flight from the spawn), a
+    # later cycle with V still pending decides SKIP.
+    tracker = agent.DispatchTracker()
+    c1 = tracker.cycle(["W", "V"], observed_in_flight={"W"})
+    assert any(d["work_id"] == "V" and d["action"] == "SPAWN" for d in c1), (
+        f"cycle 1 must SPAWN the unstarted V; got {c1!r}"
+    )
+    c2 = tracker.cycle(["V"])  # V now tracked in-flight from cycle 1
+    assert not any(d["work_id"] == "V" and d["action"] == "SPAWN" for d in c2), (
+        "V must be dispatched EXACTLY ONCE: the tracker must SKIP V on the next "
+        f"cycle once its child is in flight; cycle-2 decisions={c2!r}"
     )
 
 
-# --- Then (C): child is the UNCHANGED ADR-051 def; overlay reaches native env -
+# --- Then (idemp): negative control — pre-fix native re-dispatched every cycle -
 
-@then(parsers.parse(
-    'the spawned child runs the UNCHANGED ADR-051 child def, and the concrete '
-    '"{work_kv}" from the "{env_table}" overlay REACHES that child\'s native '
-    '"script=" node env so the child acts on its own work id (BC-proven: a '
-    "detached child ran with child-ran-WORK_ID delivered via the env overlay)"))
-def b3f0_child_unchanged_overlay_reaches(work_kv, env_table, ctx):
-    body = _b3f0_dispatch_body(ctx)
-    # The child def the materialized toml applies is workflow.fabro (ADR-051).
-    assert "workflow.fabro" in body, (
-        f"the materialized child .toml must apply the ADR-051 workflow.fabro "
-        f"child def (graph = workflow.fabro); body:\n{body}"
+@then(_L3ZZU_IDEMP['then_negctl'])
+def l3zzu_idemp_negctl(ctx):
+    agent = ctx["l3zzu_agent"]
+
+    # The pre-fix NATIVE command dispatch was context-blind: it re-dispatched
+    # EVERY still-pending id each cycle, carrying NO in-flight skip.  Modelled
+    # here to show the duplicate-spawn it produced.
+    def prefix_native_dispatch(pending_ids):
+        return [{"work_id": w, "action": "SPAWN"} for w in pending_ids]
+
+    pre_c1 = prefix_native_dispatch(["W"])
+    pre_c2 = prefix_native_dispatch(["W"])  # W still pending (slow child)
+    prefix_spawns = [d for d in (pre_c1 + pre_c2) if d["action"] == "SPAWN"]
+    assert len(prefix_spawns) == 2, (
+        "the pre-fix native command dispatch must re-dispatch a still-pending W "
+        f"every cycle (2 duplicate spawns across 2 cycles); got {prefix_spawns!r}"
     )
-    # workflow.fabro is present in the bundle and UNCHANGED (a launch does not
-    # spawn a mutated child def).
+
+    # The ACP node's in-flight tracking ELIMINATES that duplicate-spawn: W is
+    # spawned exactly once across the same two cycles.
+    tracker = agent.DispatchTracker()
+    tracker.cycle(["W"])           # cycle 1: SPAWN W (now in flight)
+    acp_c2 = tracker.cycle(["W"])  # cycle 2: SKIP W (still in flight)
+    assert not any(d["work_id"] == "W" and d["action"] == "SPAWN" for d in acp_c2), (
+        "unlike the pre-fix native node, the ACP in-flight tracking must NOT "
+        f"re-dispatch W on the next cycle; cycle-2 decisions={acp_c2!r}"
+    )
+
+
+# ===========================================================================
+# lead-3zzu delivery (@scenario_hash:f38ab66672151669): for each work id the ACP
+# dispatch node decides to SPAWN, it MATERIALIZES a per-child config carrying the
+# CONCRETE work id in a "[run.environment.env] WORK_ID=W" overlay (the channel
+# that REACHES the child's native script= env; `-I WORK_ID` does NOT) and spawns
+# the child DETACHED (`fabro run child-W.toml --detach`).  The child runs the
+# UNCHANGED ADR-051 workflow.fabro def -- preserving the lead-b3f0 delivery
+# guarantee that the retired lead-b3f0 scenario C re-pins through the ACP node.
+# Binds directly to the NON-LLM dispatch_acp_agent.py delivery contract
+# (materialize_child_config / spawn_command) + the UNCHANGED child asset bytes.
+# Never a model.
+# ===========================================================================
+
+_L3ZZU_DELIVERY = {
+    'given_container': 'the container "bc-shopsystem-messaging" is running with the self-contained fabro def set POURED by shop-templates into "/workspace/.fabro/", including the "dispatcher.fabro" graph def whose "dispatch" node is the ACP-backed agent node and the UNCHANGED ADR-051 child def',
+    'given_spawn': 'the ACP dispatch node\'s decision for a pending work id "W" with no live child is to SPAWN a child',
+    'when': 'the ACP-backed "dispatch" node\'s decision contract and the per-child config it materializes for "W" are inspected structurally, without a live docker daemon, a running fabro server, or a reachable agent-vault',
+    'then_overlay': 'the per-child config the ACP node materializes for "W" carries the CONCRETE work id in a "[run.environment.env]" overlay as "WORK_ID=W", so the child receives its own work id through the child config env overlay',
+    'then_detached': 'the ACP node spawns that child DETACHED, so decided children run in PARALLEL isolated per WORK_ID and the dispatch step does not block on them before the loop\'s "wait -> poll" back-edge',
+    'then_child_reaches': 'the spawned child runs the UNCHANGED ADR-051 child def, and the concrete "WORK_ID=W" from the "[run.environment.env]" overlay REACHES that child\'s native "script=" node env so the child acts on its own work id, preserving the lead-b3f0 delivery guarantee under the ACP dispatch',
+}
+
+
+# --- Given (delivery): container with the ACP dispatch node + UNCHANGED child --
+
+@given(_L3ZZU_DELIVERY['given_container'])
+def l3zzu_delivery_container(ctx, fake_driver, controller, tmp_path):
+    _odd9_drive_fabro_launch(_ODD9_BC, ctx, fake_driver, controller, tmp_path,
+                             work_id=None)
+    assert fake_driver.is_running("bc-shopsystem-messaging"), (
+        "Expected bc-shopsystem-messaging to be running after the fabro-path launch."
+    )
+    ctx["l3zzu_graph"] = _b3f0_dispatcher_graph_text()
+
+
+# --- Given (delivery): the decision for pending W with no live child is SPAWN --
+
+@given(_L3ZZU_DELIVERY['given_spawn'])
+def l3zzu_delivery_spawn_decision(ctx):
+    agent = _l3zzu_load_acp_agent()
+    ctx["l3zzu_agent"] = agent
+    ctx["l3zzu_w"] = "W"
+    decisions = agent.decide(["W"], set())
+    by_id = {d["work_id"]: d["action"] for d in decisions}
+    assert by_id.get("W") == "SPAWN", (
+        f"a pending W with no live child must decide SPAWN; decisions={decisions!r}"
+    )
+
+
+# --- When (delivery): inspect the decision contract + the per-child config -----
+
+@when(_L3ZZU_DELIVERY['when'])
+def l3zzu_delivery_inspect(ctx):
+    ctx.setdefault("l3zzu_agent", _l3zzu_load_acp_agent())
+    ctx.setdefault("l3zzu_w", "W")
+
+
+# --- Then (delivery): per-child config carries WORK_ID in the env overlay ------
+
+@then(_L3ZZU_DELIVERY['then_overlay'])
+def l3zzu_delivery_overlay(ctx):
+    agent = ctx["l3zzu_agent"]
+    assert hasattr(agent, "materialize_child_config"), (
+        "the ACP agent must materialize a per-child config carrying the concrete "
+        "WORK_ID for each SPAWN decision (delivery contract)"
+    )
+    cfg = agent.materialize_child_config("W")
+    assert "[run.environment.env]" in cfg, (
+        f"the materialized child config must carry a [run.environment.env] overlay; config:\n{cfg}"
+    )
+    # The CONCRETE per-child work id is written as WORK_ID="W" (from the decision,
+    # not a fixed literal), so the child receives its OWN work id.
+    assert re.search(r'WORK_ID\s*=\s*"W"', cfg), (
+        f'the overlay must set the concrete WORK_ID="W" for this child; config:\n{cfg}'
+    )
+    ctx["l3zzu_child_cfg"] = cfg
+    # per-child: a DIFFERENT work id yields a DIFFERENT concrete WORK_ID.
+    other = agent.materialize_child_config("V")
+    assert re.search(r'WORK_ID\s*=\s*"V"', other), (
+        f'materialize must carry the CONCRETE per-child work id (V for V); config:\n{other}'
+    )
+
+
+# --- Then (delivery): the child is spawned DETACHED ---------------------------
+
+@then(_L3ZZU_DELIVERY['then_detached'])
+def l3zzu_delivery_detached(ctx):
+    agent = ctx["l3zzu_agent"]
+    assert hasattr(agent, "spawn_command"), (
+        "the ACP agent must expose the detached spawn command for a SPAWN decision"
+    )
+    cmd = agent.spawn_command("W")
+    cmd_s = " ".join(cmd) if isinstance(cmd, (list, tuple)) else str(cmd)
+    assert "fabro run" in cmd_s, (
+        f"the spawn must issue `fabro run`; command:\n{cmd_s}"
+    )
+    assert "--detach" in cmd_s, (
+        f"the child must be spawned DETACHED (--detach) so the dispatch step does "
+        f"not block before the wait -> poll back-edge; command:\n{cmd_s}"
+    )
+    # `fabro run` targets a per-child .toml entrypoint carrying the concrete W.
+    assert re.search(r"fabro run [^\s]*W[^\s]*\.toml", cmd_s), (
+        f"the spawn must `fabro run` a per-child .toml naming the concrete W; command:\n{cmd_s}"
+    )
+
+
+# --- Then (delivery): UNCHANGED child def; overlay reaches its native env ------
+
+@then(_L3ZZU_DELIVERY['then_child_reaches'])
+def l3zzu_delivery_child_reaches(ctx):
+    cfg = ctx["l3zzu_child_cfg"]
+    # The materialized child config applies the UNCHANGED ADR-051 workflow.fabro.
+    assert re.search(r'graph\s*=\s*"workflow\.fabro"', cfg), (
+        f"the child config must apply the ADR-051 workflow.fabro child def; config:\n{cfg}"
+    )
     wf = _ky63_def_asset_root() / "workflow.fabro"
     assert wf.is_file(), "the ADR-051 workflow.fabro child def must ship in the bundle"
-    # The overlay-reaches-native-script pattern is the PROVEN one the child's own
-    # workflow.toml documents: [run.environment.env] reaches native script env
-    # (unlike -I). The materialized child toml uses that SAME channel.
+    # The [run.environment.env] overlay is the PROVEN channel that reaches a
+    # native script= node's env (the child workflow.toml documents it); the ACP
+    # node materializes WORK_ID via that SAME channel, and NOT via `-I WORK_ID`
+    # (which does NOT reach the child's native script= env).
     child_toml = (_ky63_def_asset_root() / "workflow.toml").read_text()
     assert "[run.environment.env]" in child_toml and "WORK_ID" in child_toml, (
         "the child workflow.toml must document the [run.environment.env] WORK_ID "
         "overlay (the proven native-script delivery channel)"
     )
-
-
-# --- Then (C): negative control — `-I WORK_ID` does not reach native env ------
-
-@then(parsers.parse(
-    'as the negative control, had the dispatch instead passed the work id as '
-    '"{i_form}" (the ADR-058 mechanism), that value would NOT reach the child\'s '
-    'native "script=" node env — the exact delivery gap this "{env_table}" '
-    "overlay exists to close, and the reason no Haiku \"launch\" node is needed"))
-def b3f0_negative_control_i_workid(i_form, env_table, ctx):
-    body = _b3f0_dispatch_body(ctx)
-    # NEGATIVE CONTROL: the dispatch node must NOT pass `-I WORK_ID` (it would not
-    # reach the child's native script= env); it uses the env overlay instead.
-    assert "-I WORK_ID" not in body, (
-        "the dispatch node must NOT deliver the work id via `-I WORK_ID` (that "
-        f"does not reach the child's native script= env); body:\n{body}"
-    )
-    assert "[run.environment.env]" in body, (
-        f"the dispatch node must deliver WORK_ID via the {env_table} overlay "
-        f"(the channel that DOES reach the child native script env); body:\n{body}"
-    )
-    # And no Haiku `launch` agent node is needed — the whole def is native.
-    graph = ctx.get("b3f0_dispatcher_graph") or _b3f0_dispatcher_graph_text()
-    assert "launch" not in _ky63_parse_nodes(graph), (
-        "no Haiku `launch` node is needed: the env-overlay delivery lets a NATIVE "
-        "dispatch node do what previously required an agent"
+    assert "-I WORK_ID" not in cfg, (
+        "the ACP node must deliver WORK_ID via the [run.environment.env] overlay, "
+        f"NOT `-I WORK_ID` (which does not reach the child native script env); config:\n{cfg}"
     )
