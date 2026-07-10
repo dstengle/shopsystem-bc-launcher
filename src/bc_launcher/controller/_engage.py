@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 
 from bc_launcher.constants import (
+    AGENT_TMUX_SESSION,
     AGENT_CONTAINER_USER,
     SHOPMSG_DSN_ENV,
 )
@@ -28,6 +29,11 @@ from bc_launcher.fabro import (
 from bc_launcher.manifest import (
     ManifestProductTypeError,
     _read_product_from_manifest,
+)
+from bc_launcher.readiness import (
+    ESCAPE_AFFORDANCE_MARKER,
+    ESCAPE_KEY_NAME,
+    OPTION_SCREEN_MARKER,
 )
 from bc_launcher.naming import (
     _container_name,
@@ -344,3 +350,71 @@ class EngageMixin:
             out_lines,
             err_lines,
         )
+
+    def _handle_option_screen(
+        self, container: str, out_lines: list[str], err_lines: list[str]
+    ) -> CommandResult | None:
+        """Handle a blocking interactive option screen before prompt inject
+        (lead-q3uy): Esc-dismiss an escapable screen, or refuse (return a
+        CommandResult) an un-escapable one. Returns None to continue. Extracted
+        from _start_agent_session verbatim."""
+        # Step 4b: blocking interactive option-screen handling (lead-q3uy).
+        #
+        # After the input-ready marker but BEFORE the prompt is submitted,
+        # the agent runtime can present a blocking interactive option
+        # screen that absorbs keystrokes.  Capture the pane ONCE and
+        # classify it:
+        #   * recognized blocking option screen WITH an escape affordance →
+        #     send a DISCRETE send-keys carrying ONLY the Escape key (never
+        #     Enter — and never an Enter to "select a default"), capture the
+        #     dismissed screen's content, log it as a host-discoverable
+        #     WARNING, then fall through to submit the prompt directly;
+        #   * recognized blocking option screen with NO escape affordance →
+        #     do NOT send Enter / do NOT auto-confirm a default; surface a
+        #     WARNING naming the un-escapable screen and do NOT submit the
+        #     prompt (which the screen would swallow);
+        #   * no blocking option screen → proceed to submit as normal.
+        pane = self._driver.capture_pane(container, AGENT_TMUX_SESSION)
+        if OPTION_SCREEN_MARKER in pane:
+            if ESCAPE_AFFORDANCE_MARKER in pane:
+                # Capture the rendered content BEFORE dismissing, so the
+                # WARNING records exactly what was auto-dismissed.
+                dismissed_content = pane
+                # Discrete send-keys carrying ONLY the Escape key payload —
+                # NOT Enter, and NOT a text+Enter pair.  This dismisses the
+                # escape-able screen without selecting any default option.
+                self._driver.exec_run(
+                    container,
+                    ["tmux", "send-keys", "-t", AGENT_TMUX_SESSION,
+                     ESCAPE_KEY_NAME],
+                    user=AGENT_CONTAINER_USER,
+                )
+                err_lines.append(
+                    "warning: an interactive option screen was "
+                    "auto-dismissed during engage (sent Escape to the "
+                    f"tmux session {AGENT_TMUX_SESSION!r}); rendered "
+                    "content of the dismissed screen follows so a human "
+                    "can review what was auto-dismissed (lead-q3uy):\n"
+                    f"{dismissed_content}\n"
+                )
+                out_lines.append(
+                    "Auto-dismissed a blocking interactive option screen "
+                    "with Escape during engage (lead-q3uy)\n"
+                )
+            else:
+                # No escape affordance: refuse to auto-confirm.  Pressing
+                # Enter here would blindly select whatever option is
+                # highlighted, so send NOTHING and do NOT submit the prompt.
+                err_lines.append(
+                    "warning: engage encountered a blocking interactive "
+                    "screen with NO escape/dismiss affordance; the launcher "
+                    "did NOT send Enter and did NOT auto-confirm a default; "
+                    "the startup prompt was NOT submitted.  Un-escapable "
+                    "screen content follows so a human can review it from "
+                    f"the host (lead-q3uy):\n{pane}\n"
+                )
+                return CommandResult(
+                    exit_code=0,
+                    stdout="".join(out_lines),
+                    stderr="".join(err_lines),
+                )

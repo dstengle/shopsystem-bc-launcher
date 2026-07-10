@@ -12,7 +12,9 @@ import time
 
 from bc_launcher.driver import DockerDriver, RegistryDriver
 from bc_launcher.controller._launch import LaunchMixin
+from bc_launcher.controller._launch_prep import LaunchPrepMixin
 from bc_launcher.controller._provisioning import ProvisioningMixin
+from bc_launcher.controller._beads_provisioning import BeadsProvisioningMixin
 from bc_launcher.controller._agent_session import AgentSessionMixin
 from bc_launcher.controller._engage import EngageMixin
 from bc_launcher.controller._commands import CommandsMixin
@@ -20,7 +22,9 @@ from bc_launcher.controller._commands import CommandsMixin
 
 class BcContainerController(
     LaunchMixin,
+    LaunchPrepMixin,
     ProvisioningMixin,
+    BeadsProvisioningMixin,
     AgentSessionMixin,
     EngageMixin,
     CommandsMixin,
