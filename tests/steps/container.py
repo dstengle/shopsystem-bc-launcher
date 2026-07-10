@@ -6,7 +6,7 @@ module boundaries are organizational, not semantic.
 from __future__ import annotations
 
 from pytest_bdd import given, when, then, parsers
-from tests.conftest import AGENT_VAULT_ADDR_ENV, AGENT_VAULT_MITM_PROXY_PORT, AGENT_VAULT_PLACEHOLDER_TOKEN, AGENT_VAULT_TOKEN_ENV, AGENT_VAULT_VAULT_ENV, BcContainerController, CONTAINER_CLAUDE_CREDENTIALS_PATH, DEFAULT_AGENT_VAULT_BROKER, FakeRegistryDriver, ManifestController, Path, _BC_BASE_LATEST_REF, _BC_IMAGE_ENV, _CADR_LAUNCH_PATH_FABRO, _CADR_LAUNCH_PATH_TMUX, _ESCAPABLE_OPTION_SCREEN, _FAKE_BROKER_CA_PEM, _GAPH_SYNC_REMOTE_LINE, _GAPI_CLEAR_STMT, _GAPI_SYNC_REMOTE_LINE, _J351_SLOW_PROMPT, _KY63_FAILSAFE_SINKS, _KY63_TERMINALS, _LEAD_63EM_FAULT_TO_MARKER, _MULTILINE_BROKER_CA_PEM, _ODD9_BC, _ODD9_DEF_DIR, _ODD9_PROJECT_SETTINGS_PATH, _ODD9_SERVER_SETTINGS_PATH, _READINESS_DSN, _READINESS_FULLSCREEN_PROMPT, _READINESS_GENERIC_PROMPT, _REAL_GITHUB_TOKEN, _REAL_OAUTH_TOKEN, _SRC_ROOT, _UNESCAPABLE_OPTION_SCREEN, _UNREACHABLE_BROKER, _VWIB_ADAPTER, _VWIB_BASE_URL, _VWIB_COMMITTED_SHIM, _VWIB_SHIM_BIN, _WDVX_DOCKER_FAULTS, _agent_vault_launch, _b3f0_dispatcher_edges, _b3f0_dispatcher_graph_text, _b3f0_dispatcher_toml_text, _b3f0_graph, _b3f0_native_body, _baked_placeholder_credentials, _ca_trust_script_path, _cadr_build_parser, _cadr_claude_engage_send_keys, _cadr_exec_calls, _cadr_fabro_engage_call, _cadr_fabro_run_calls, _cadr_fabro_server_calls, _cadr_launch_help_text, _cadr_server_start_argv, _cadr_tmux_agent_send_keys, _cadr_write_manifest, _clone_exec_env, _digest_sha_for_label, _escape_send_keys, _find_bc_base_dockerfile, _gapi_run_seed_body, _gapi_stub_prelude, _is_empty_remote_seed_command, _is_origin_owner_writeback_command, _is_repo_create_command, _ky63_complete_emitters, _ky63_def_asset_root, _ky63_json, _ky63_locate_or_fetch_fabro, _ky63_materialize_def, _ky63_parse_edges, _ky63_parse_nodes, _ky63_strip_line_comments, _ky63_success_reach, _launch_with_readiness_prompt, _launch_with_self_advance_mode, _lead63em_point_state_dir_at_sandbox, _lead63em_read_diagnostic_from_host, _legacy_only_empty_remote_classifier, _model_gaph_bd_init_outcome, _model_seed_outcome, _odd9_drive_fabro_launch, _parse_seed_create_fresh, _parse_seed_git_side_push, _prompt_submit_send_keys, _raw_git_scheme_aborts, _resolve_standup_tracker_slug, _run_gaph_seed_body, _run_image_launch, _runtime_proxy, _vwib_def_asset_root, _vwib_fabro_launch_exec_calls, _vwib_json, _vwib_recover_written_settings, _vwib_shim_start_argv, _vwib_shim_start_call, _vwib_socket, _vwib_subprocess, _vwib_sys, _vwib_time, _vwib_tomllib, _zxtk_default_manifest, given, is_bd_bootstrap_command, parsers, pytest, re, subprocess, sys, tempfile, then, when, yaml  # noqa: F401
+from tests.conftest import AGENT_VAULT_ADDR_ENV, AGENT_VAULT_MITM_PROXY_PORT, AGENT_VAULT_PLACEHOLDER_TOKEN, AGENT_VAULT_TOKEN_ENV, AGENT_VAULT_VAULT_ENV, BcContainerController, CONTAINER_CLAUDE_CREDENTIALS_PATH, DEFAULT_AGENT_VAULT_BROKER, FakeRegistryDriver, ManifestController, Path, _BC_BASE_LATEST_REF, _BC_IMAGE_ENV, _CADR_LAUNCH_PATH_FABRO, _CADR_LAUNCH_PATH_TMUX, _ESCAPABLE_OPTION_SCREEN, _FAKE_BROKER_CA_PEM, _GAPH_SYNC_REMOTE_LINE, _GAPI_CLEAR_STMT, _GAPI_SYNC_REMOTE_LINE, _J351_SLOW_PROMPT, _KY63_FAILSAFE_SINKS, _KY63_TERMINALS, _L3ZZU_DELIVERY, _L3ZZU_IDEMP, _L3ZZU_STEP, _LEAD_63EM_FAULT_TO_MARKER, _MULTILINE_BROKER_CA_PEM, _ODD9_BC, _ODD9_DEF_DIR, _ODD9_PROJECT_SETTINGS_PATH, _ODD9_SERVER_SETTINGS_PATH, _READINESS_DSN, _READINESS_FULLSCREEN_PROMPT, _READINESS_GENERIC_PROMPT, _REAL_GITHUB_TOKEN, _REAL_OAUTH_TOKEN, _SRC_ROOT, _UNESCAPABLE_OPTION_SCREEN, _UNREACHABLE_BROKER, _VWIB_ADAPTER, _VWIB_BASE_URL, _VWIB_COMMITTED_SHIM, _VWIB_SHIM_BIN, _WDVX_DOCKER_FAULTS, _agent_vault_launch, _b3f0_dispatcher_edges, _b3f0_dispatcher_graph_text, _b3f0_dispatcher_toml_text, _b3f0_graph, _b3f0_native_body, _baked_placeholder_credentials, _ca_trust_script_path, _cadr_build_parser, _cadr_claude_engage_send_keys, _cadr_exec_calls, _cadr_fabro_engage_call, _cadr_fabro_run_calls, _cadr_fabro_server_calls, _cadr_launch_help_text, _cadr_server_start_argv, _cadr_tmux_agent_send_keys, _cadr_write_manifest, _clone_exec_env, _digest_sha_for_label, _escape_send_keys, _find_bc_base_dockerfile, _gapi_run_seed_body, _gapi_stub_prelude, _is_empty_remote_seed_command, _is_origin_owner_writeback_command, _is_repo_create_command, _ky63_complete_emitters, _ky63_def_asset_root, _ky63_json, _ky63_locate_or_fetch_fabro, _ky63_materialize_def, _ky63_parse_edges, _ky63_parse_nodes, _ky63_strip_line_comments, _ky63_success_reach, _l3zzu_dispatch_body, _l3zzu_inspect, _l3zzu_load_acp_agent, _launch_with_readiness_prompt, _launch_with_self_advance_mode, _lead63em_point_state_dir_at_sandbox, _lead63em_read_diagnostic_from_host, _legacy_only_empty_remote_classifier, _model_gaph_bd_init_outcome, _model_seed_outcome, _odd9_drive_fabro_launch, _parse_seed_create_fresh, _parse_seed_git_side_push, _prompt_submit_send_keys, _raw_git_scheme_aborts, _resolve_standup_tracker_slug, _run_gaph_seed_body, _run_image_launch, _runtime_proxy, _vwib_def_asset_root, _vwib_fabro_launch_exec_calls, _vwib_json, _vwib_recover_written_settings, _vwib_shim_start_argv, _vwib_shim_start_call, _vwib_socket, _vwib_subprocess, _vwib_sys, _vwib_time, _vwib_tomllib, _zxtk_default_manifest, given, is_bd_bootstrap_command, parsers, pytest, re, subprocess, sys, tempfile, then, when, yaml  # noqa: F401
 
 
 @given("the shopsystem-bc-launcher BC package is installed in a Python environment")
@@ -8678,4 +8678,314 @@ def b3f0_no_watch_no_llm(ctx):
         "the poll-loop must declare NO model binding (no model_stylesheet "
         f"/ model:), so the steady-state loop spends zero model tokens; "
         f"executable graph:\n{executable}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Relocated from the retired unmatched.py (bead shopsystem_bc_launcher-9044).
+# Live steps the mechanical split mis-parked: their patterns were either
+# dict-subscript lookups or only reachable via Scenario-Outline Examples
+# expansion, both opaque to the splitter's static matcher.
+# ---------------------------------------------------------------------------
+
+
+@then(parsers.parse(
+    'the launch points git at that CA file and the proxied clone of '
+    '"{bc_name}" proceeds and completes its TLS handshake with no '
+    '"{err}" error'
+))
+def s70_assert_clone_proceeds(bc_name, err, ctx):
+    """Positive example: a passing CA validation points git at the CA and the
+    clone proceeds (mirrors controller.py:1469-1487)."""
+    assert ctx["s70_git_pointed_at_ca"], (
+        "on a valid cert the launch must point git at the CA file and let "
+        "the proxied clone proceed (the REAL validation passed)."
+    )
+    assert ctx["s70_clone_runs"], (
+        "the proxied clone must proceed after a passing CA validation."
+    )
+
+
+@then(parsers.parse(
+    'the launch refuses to point git at the CA and the proxied clone does '
+    'not run'
+))
+def s70_assert_clone_refused(ctx):
+    """Negative example: a failed CA validation refuses to point git at the CA
+    and the clone does not run (mirrors controller.py:1469-1479)."""
+    assert not ctx["s70_git_pointed_at_ca"], (
+        "on a marker-less cert the launch must REFUSE to point git at the "
+        "CA (the REAL validation failed loud)."
+    )
+    assert not ctx["s70_clone_runs"], (
+        "the proxied clone must NOT run after a failed CA validation."
+    )
+
+
+@when(_L3ZZU_STEP['acp_when'])
+def l3zzu_inspect_dispatch_node(ctx):
+    ctx["l3zzu_graph"] = _b3f0_dispatcher_graph_text()
+
+
+@then(_L3ZZU_STEP['acp_then_kind'])
+def l3zzu_dispatch_is_acp(ctx):
+    body = _l3zzu_dispatch_body(ctx)
+    # backend="acp": fabro drives the node through the agent-client-protocol
+    # backend (v0.11.1 JSON-RPC over stdio), not the native command executor.
+    assert re.search(r'backend\s*=\s*"acp"', body), (
+        f'the `dispatch` node must carry backend="acp"; body:\n{body}'
+    )
+    # exactly one of acp.command (a shell) OR acp.config (a JSON stdio config)
+    # names the external ACP process fabro launches.
+    assert ("acp.command" in body) or ("acp.config" in body), (
+        "the ACP dispatch node must carry an acp.command (shell such as "
+        '"python3 dispatch_acp_agent.py") OR an acp.config (JSON stdio config) '
+        f"attr; body:\n{body}"
+    )
+
+
+@then(_L3ZZU_STEP['acp_then_notnative'])
+def l3zzu_dispatch_not_native(ctx):
+    body = _l3zzu_dispatch_body(ctx)
+    # The pre-fix context-blind native command dispatch is ABSENT: the ACP node
+    # is neither a `script=` node nor a `shape=parallelogram` command node.
+    assert "script=" not in body, (
+        "the ACP dispatch node must NOT be a native `script=` command node "
+        f"(the pre-fix context-blind dispatch must be absent); body:\n{body}"
+    )
+    assert "shape=parallelogram" not in body, (
+        "the ACP dispatch node must NOT be a native shape=parallelogram command "
+        f"node; body:\n{body}"
+    )
+
+
+@then(_L3ZZU_STEP['acp_then_receive'])
+def l3zzu_dispatch_receives_context(ctx):
+    graph = ctx.get("l3zzu_graph") or _b3f0_dispatcher_graph_text()
+    # The poll -> dispatch edge feeds the ACP node the context poll yielded.
+    pairs = {(s, d) for s, d, _a in _b3f0_dispatcher_edges(graph)}
+    assert ("poll", "dispatch") in pairs, (
+        "the ACP dispatch node must be wired to receive the poll context via a "
+        f"poll -> dispatch edge; edges={pairs!r}"
+    )
+    # Its decision contract RECEIVES the pending work ids AND the in-flight run
+    # state as its two inputs (context-in).
+    mod = _l3zzu_load_acp_agent()
+    assert hasattr(mod, "decide"), (
+        "the ACP agent must expose a `decide` decision contract (context-in / "
+        "decisions-out)"
+    )
+    params = list(_l3zzu_inspect.signature(mod.decide).parameters)
+    assert len(params) >= 2, (
+        "decide must RECEIVE the pending inbox work ids AND the in-flight run "
+        f"state as its input; signature params: {params!r}"
+    )
+
+
+@then(_L3ZZU_STEP['acp_then_return'])
+def l3zzu_dispatch_returns_decisions(ctx):
+    mod = _l3zzu_load_acp_agent()
+    decisions = mod.decide(["lead-a1"], set())
+    assert isinstance(decisions, list) and decisions, (
+        "decide must RETURN a structured list of dispatch decisions (decisions-out)"
+    )
+    d = decisions[0]
+    assert isinstance(d, dict) and "work_id" in d and "action" in d, (
+        "each returned decision must be a structured {work_id, action} record "
+        f"the loop consumes to spawn children; got: {d!r}"
+    )
+    assert d["action"] in ("SPAWN", "SKIP"), (
+        f"a decision's action must be SPAWN or SKIP; got {d['action']!r}"
+    )
+
+
+@given(_L3ZZU_IDEMP['given_container'])
+def l3zzu_idemp_container(ctx, fake_driver, controller, tmp_path):
+    _odd9_drive_fabro_launch(_ODD9_BC, ctx, fake_driver, controller, tmp_path,
+                             work_id=None)
+    assert fake_driver.is_running("bc-shopsystem-messaging"), (
+        "Expected bc-shopsystem-messaging to be running after the fabro-path launch."
+    )
+    ctx["l3zzu_graph"] = _b3f0_dispatcher_graph_text()
+
+
+@given(_L3ZZU_IDEMP['given_context'])
+def l3zzu_idemp_context(ctx):
+    # W is pending AND its prior child is still running (has not emitted
+    # work_done) -> W is in the in-flight run state.
+    ctx["l3zzu_pending"] = ["W"]
+    ctx["l3zzu_inflight"] = {"W"}
+
+
+@when(_L3ZZU_IDEMP['when'])
+def l3zzu_idemp_inspect(ctx):
+    ctx["l3zzu_agent"] = _l3zzu_load_acp_agent()
+
+
+@then(_L3ZZU_IDEMP['then_skip'])
+def l3zzu_idemp_skip(ctx):
+    agent = ctx["l3zzu_agent"]
+    decisions = agent.decide(ctx["l3zzu_pending"], ctx["l3zzu_inflight"])
+    by_id = {d["work_id"]: d["action"] for d in decisions}
+    assert by_id.get("W") == "SKIP", (
+        "for a work id W whose prior child is still IN FLIGHT the ACP decision "
+        "must be SKIP re-dispatch (no second child, the two children cannot "
+        f"collide on the shared per-W worktree); decisions={decisions!r}"
+    )
+    spawns_for_w = [d for d in decisions
+                    if d["work_id"] == "W" and d["action"] == "SPAWN"]
+    assert not spawns_for_w, (
+        f"NO SPAWN may be returned for the in-flight work id W; got {spawns_for_w!r}"
+    )
+
+
+@then(_L3ZZU_IDEMP['then_spawn'])
+def l3zzu_idemp_spawn(ctx):
+    agent = ctx["l3zzu_agent"]
+    # V is a genuinely unstarted work id (NO live child); W is still in flight.
+    decisions = agent.decide(["W", "V"], {"W"})
+    by_id = {d["work_id"]: d["action"] for d in decisions}
+    assert by_id.get("V") == "SPAWN", (
+        f"a pending work id V with NO live child must be SPAWNed; decisions={decisions!r}"
+    )
+    assert by_id.get("W") == "SKIP", (
+        f"the in-flight work id W stays SKIP alongside V; decisions={decisions!r}"
+    )
+    # EXACTLY ONCE: once V's child is live (tracked in-flight from the spawn), a
+    # later cycle with V still pending decides SKIP.
+    tracker = agent.DispatchTracker()
+    c1 = tracker.cycle(["W", "V"], observed_in_flight={"W"})
+    assert any(d["work_id"] == "V" and d["action"] == "SPAWN" for d in c1), (
+        f"cycle 1 must SPAWN the unstarted V; got {c1!r}"
+    )
+    c2 = tracker.cycle(["V"])  # V now tracked in-flight from cycle 1
+    assert not any(d["work_id"] == "V" and d["action"] == "SPAWN" for d in c2), (
+        "V must be dispatched EXACTLY ONCE: the tracker must SKIP V on the next "
+        f"cycle once its child is in flight; cycle-2 decisions={c2!r}"
+    )
+
+
+@then(_L3ZZU_IDEMP['then_negctl'])
+def l3zzu_idemp_negctl(ctx):
+    agent = ctx["l3zzu_agent"]
+
+    # The pre-fix NATIVE command dispatch was context-blind: it re-dispatched
+    # EVERY still-pending id each cycle, carrying NO in-flight skip.  Modelled
+    # here to show the duplicate-spawn it produced.
+    def prefix_native_dispatch(pending_ids):
+        return [{"work_id": w, "action": "SPAWN"} for w in pending_ids]
+
+    pre_c1 = prefix_native_dispatch(["W"])
+    pre_c2 = prefix_native_dispatch(["W"])  # W still pending (slow child)
+    prefix_spawns = [d for d in (pre_c1 + pre_c2) if d["action"] == "SPAWN"]
+    assert len(prefix_spawns) == 2, (
+        "the pre-fix native command dispatch must re-dispatch a still-pending W "
+        f"every cycle (2 duplicate spawns across 2 cycles); got {prefix_spawns!r}"
+    )
+
+    # The ACP node's in-flight tracking ELIMINATES that duplicate-spawn: W is
+    # spawned exactly once across the same two cycles.
+    tracker = agent.DispatchTracker()
+    tracker.cycle(["W"])           # cycle 1: SPAWN W (now in flight)
+    acp_c2 = tracker.cycle(["W"])  # cycle 2: SKIP W (still in flight)
+    assert not any(d["work_id"] == "W" and d["action"] == "SPAWN" for d in acp_c2), (
+        "unlike the pre-fix native node, the ACP in-flight tracking must NOT "
+        f"re-dispatch W on the next cycle; cycle-2 decisions={acp_c2!r}"
+    )
+
+
+@given(_L3ZZU_DELIVERY['given_container'])
+def l3zzu_delivery_container(ctx, fake_driver, controller, tmp_path):
+    _odd9_drive_fabro_launch(_ODD9_BC, ctx, fake_driver, controller, tmp_path,
+                             work_id=None)
+    assert fake_driver.is_running("bc-shopsystem-messaging"), (
+        "Expected bc-shopsystem-messaging to be running after the fabro-path launch."
+    )
+    ctx["l3zzu_graph"] = _b3f0_dispatcher_graph_text()
+
+
+@given(_L3ZZU_DELIVERY['given_spawn'])
+def l3zzu_delivery_spawn_decision(ctx):
+    agent = _l3zzu_load_acp_agent()
+    ctx["l3zzu_agent"] = agent
+    ctx["l3zzu_w"] = "W"
+    decisions = agent.decide(["W"], set())
+    by_id = {d["work_id"]: d["action"] for d in decisions}
+    assert by_id.get("W") == "SPAWN", (
+        f"a pending W with no live child must decide SPAWN; decisions={decisions!r}"
+    )
+
+
+@when(_L3ZZU_DELIVERY['when'])
+def l3zzu_delivery_inspect(ctx):
+    ctx.setdefault("l3zzu_agent", _l3zzu_load_acp_agent())
+    ctx.setdefault("l3zzu_w", "W")
+
+
+@then(_L3ZZU_DELIVERY['then_overlay'])
+def l3zzu_delivery_overlay(ctx):
+    agent = ctx["l3zzu_agent"]
+    assert hasattr(agent, "materialize_child_config"), (
+        "the ACP agent must materialize a per-child config carrying the concrete "
+        "WORK_ID for each SPAWN decision (delivery contract)"
+    )
+    cfg = agent.materialize_child_config("W")
+    assert "[run.environment.env]" in cfg, (
+        f"the materialized child config must carry a [run.environment.env] overlay; config:\n{cfg}"
+    )
+    # The CONCRETE per-child work id is written as WORK_ID="W" (from the decision,
+    # not a fixed literal), so the child receives its OWN work id.
+    assert re.search(r'WORK_ID\s*=\s*"W"', cfg), (
+        f'the overlay must set the concrete WORK_ID="W" for this child; config:\n{cfg}'
+    )
+    ctx["l3zzu_child_cfg"] = cfg
+    # per-child: a DIFFERENT work id yields a DIFFERENT concrete WORK_ID.
+    other = agent.materialize_child_config("V")
+    assert re.search(r'WORK_ID\s*=\s*"V"', other), (
+        f'materialize must carry the CONCRETE per-child work id (V for V); config:\n{other}'
+    )
+
+
+@then(_L3ZZU_DELIVERY['then_detached'])
+def l3zzu_delivery_detached(ctx):
+    agent = ctx["l3zzu_agent"]
+    assert hasattr(agent, "spawn_command"), (
+        "the ACP agent must expose the detached spawn command for a SPAWN decision"
+    )
+    cmd = agent.spawn_command("W")
+    cmd_s = " ".join(cmd) if isinstance(cmd, (list, tuple)) else str(cmd)
+    assert "fabro run" in cmd_s, (
+        f"the spawn must issue `fabro run`; command:\n{cmd_s}"
+    )
+    assert "--detach" in cmd_s, (
+        f"the child must be spawned DETACHED (--detach) so the dispatch step does "
+        f"not block before the wait -> poll back-edge; command:\n{cmd_s}"
+    )
+    # `fabro run` targets a per-child .toml entrypoint carrying the concrete W.
+    assert re.search(r"fabro run [^\s]*W[^\s]*\.toml", cmd_s), (
+        f"the spawn must `fabro run` a per-child .toml naming the concrete W; command:\n{cmd_s}"
+    )
+
+
+@then(_L3ZZU_DELIVERY['then_child_reaches'])
+def l3zzu_delivery_child_reaches(ctx):
+    cfg = ctx["l3zzu_child_cfg"]
+    # The materialized child config applies the UNCHANGED ADR-051 workflow.fabro.
+    assert re.search(r'graph\s*=\s*"workflow\.fabro"', cfg), (
+        f"the child config must apply the ADR-051 workflow.fabro child def; config:\n{cfg}"
+    )
+    wf = _ky63_def_asset_root() / "workflow.fabro"
+    assert wf.is_file(), "the ADR-051 workflow.fabro child def must ship in the bundle"
+    # The [run.environment.env] overlay is the PROVEN channel that reaches a
+    # native script= node's env (the child workflow.toml documents it); the ACP
+    # node materializes WORK_ID via that SAME channel, and NOT via `-I WORK_ID`
+    # (which does NOT reach the child's native script= env).
+    child_toml = (_ky63_def_asset_root() / "workflow.toml").read_text()
+    assert "[run.environment.env]" in child_toml and "WORK_ID" in child_toml, (
+        "the child workflow.toml must document the [run.environment.env] WORK_ID "
+        "overlay (the proven native-script delivery channel)"
+    )
+    assert "-I WORK_ID" not in cfg, (
+        "the ACP node must deliver WORK_ID via the [run.environment.env] overlay, "
+        f"NOT `-I WORK_ID` (which does not reach the child native script env); config:\n{cfg}"
     )

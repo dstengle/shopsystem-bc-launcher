@@ -1,5 +1,11 @@
 # conftest split report
 
+> Updated by bead shopsystem_bc_launcher-9044: unmatched.py retired — 25 dead
+> steps deleted, 19 live steps (Scenario-Outline- / dict-pattern-only, mis-parked
+> by the mechanical split) relocated to container.py. Parity re-proven.
+Total step definitions: 736
+
+
 ## base_image.py — 160 steps
 
 - `given_bc_launcher_repository`
@@ -173,7 +179,7 @@
 - `given_published_image`
 - `given_container_running_on_bc_base`
 
-## container.py — 459 steps
+## container.py — 478 steps
 
 - `bc_package_installed`
 - `no_container_running`
@@ -634,6 +640,25 @@
 - `b3f0_dispatch_native`
 - `b3f0_wait_native`
 - `b3f0_no_watch_no_llm`
+- `s70_assert_clone_proceeds`
+- `s70_assert_clone_refused`
+- `l3zzu_inspect_dispatch_node`
+- `l3zzu_dispatch_is_acp`
+- `l3zzu_dispatch_not_native`
+- `l3zzu_dispatch_receives_context`
+- `l3zzu_dispatch_returns_decisions`
+- `l3zzu_idemp_container`
+- `l3zzu_idemp_context`
+- `l3zzu_idemp_inspect`
+- `l3zzu_idemp_skip`
+- `l3zzu_idemp_spawn`
+- `l3zzu_idemp_negctl`
+- `l3zzu_delivery_container`
+- `l3zzu_delivery_spawn_decision`
+- `l3zzu_delivery_inspect`
+- `l3zzu_delivery_overlay`
+- `l3zzu_delivery_detached`
+- `l3zzu_delivery_child_reaches`
 
 ## lead.py — 13 steps
 
@@ -732,49 +757,3 @@
 - `assert_six_urls_produced`
 - `assert_each_url_is_github_remote`
 
-## unmatched.py — 44 steps
-
-- `host_directory_exists`
-- `host_directory_does_not_exist`
-- `host_file_exists`
-- `host_file_does_not_exist`
-- `run_launch_no_credential_flags`
-- `run_launch_with_startup_prompt`
-- `container_starts_and_tmux_active`
-- `run_inject`
-- `assert_bind_mount_present`
-- `assert_readonly_bind_mount_present`
-- `assert_exec_copy`
-- `assert_cp_between_run_and_tmux`
-- `assert_exactly_three_credential_mounts`
-- `assert_stderr_contains_literal`
-- `assert_no_docker_run`
-- `assert_docker_run_was_issued`
-- `assert_no_exec_cp_with_suffix`
-- `assert_tmux_new_session_issued`
-- `assert_beads_prefix_is_committed`
-- `assert_committed_registry_imported`
-- `launch_starts_agent`
-- `then_launch_result_failure_names_update`
-- `s70_assert_clone_proceeds`
-- `s70_assert_clone_refused`
-- `cadr_launch_fabro`
-- `cadr_container_running`
-- `cadr_no_tmux_no_claude`
-- `l3zzu_inspect_dispatch_node`
-- `l3zzu_dispatch_is_acp`
-- `l3zzu_dispatch_not_native`
-- `l3zzu_dispatch_receives_context`
-- `l3zzu_dispatch_returns_decisions`
-- `l3zzu_idemp_container`
-- `l3zzu_idemp_context`
-- `l3zzu_idemp_inspect`
-- `l3zzu_idemp_skip`
-- `l3zzu_idemp_spawn`
-- `l3zzu_idemp_negctl`
-- `l3zzu_delivery_container`
-- `l3zzu_delivery_spawn_decision`
-- `l3zzu_delivery_inspect`
-- `l3zzu_delivery_overlay`
-- `l3zzu_delivery_detached`
-- `l3zzu_delivery_child_reaches`
