@@ -6,7 +6,8 @@ module boundaries are organizational, not semantic.
 from __future__ import annotations
 
 from pytest_bdd import given, when, then, parsers
-from tests.conftest import _bc_lead_dockerfile_text, _bc_lead_installs_compose_plugin, _bc_lead_installs_dolt_on_path, given, parsers, then, when  # noqa: F401
+from tests.conftest import given, parsers, then, when  # noqa: F401
+from tests.support.lead import _bc_lead_dockerfile_text, _bc_lead_installs_compose_plugin, _bc_lead_installs_dolt_on_path  # noqa: F401
 
 
 @given(parsers.parse(

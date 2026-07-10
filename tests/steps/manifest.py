@@ -6,7 +6,8 @@ module boundaries are organizational, not semantic.
 from __future__ import annotations
 
 from pytest_bdd import given, when, then, parsers
-from tests.conftest import BC_NAME_RE, FakeGitHubDriver, GITHUB_URL_RE, ManifestController, PRODUCT_BCS, _run_manifest_list, _run_manifest_sync, _run_manifest_validate, _write_manifest, given, parsers, then, when, yaml  # noqa: F401
+from tests.conftest import BC_NAME_RE, FakeGitHubDriver, GITHUB_URL_RE, ManifestController, given, parsers, then, when, yaml  # noqa: F401
+from tests.support.manifest import PRODUCT_BCS, _run_manifest_list, _run_manifest_sync, _run_manifest_validate, _write_manifest  # noqa: F401
 
 
 @given(parsers.parse('a manifest file exists at the path "bc-manifest.yaml" relative to the lead repo root'))

@@ -6,7 +6,8 @@ module boundaries are organizational, not semantic.
 from __future__ import annotations
 
 from pytest_bdd import given, when, then, parsers
-from tests.conftest import _BC_BASE_PINNED_IMAGE, _agent_vault_launch, _find_bc_base_dockerfile, _find_bc_lead_dockerfile, given, parsers, then, when  # noqa: F401
+from tests.conftest import given, parsers, then, when  # noqa: F401
+from tests.support.common import _BC_BASE_PINNED_IMAGE, _agent_vault_launch, _find_bc_base_dockerfile, _find_bc_lead_dockerfile  # noqa: F401
 
 
 @given("the shopsystem-bc-launcher BC is installed")
