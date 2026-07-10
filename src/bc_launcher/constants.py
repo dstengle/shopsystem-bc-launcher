@@ -40,3 +40,15 @@ AGENT_VAULT_CONTAINER_CA_PATH = "/home/vscode/.config/agent-vault/ca.pem"
 # profile that would export this; the controller/fabro wiring sets it explicitly
 # to AGENT_VAULT_CONTAINER_CA_PATH (lead-ze4w BUG#3).
 SSL_CERT_FILE_ENV = "SSL_CERT_FILE"
+
+# --- core container / image / messaging identity primitives ---
+# (moved from controller; shared across controller and sibling modules)
+
+# Host path of the docker socket, bind-mounted into the container ONLY when the
+# opt-in lead-only docker-socket flag is enabled (lead-zxtk,
+# @scenario_hash:ff370a4e7e9dac5e / e177655ba09a73fa).
+DOCKER_SOCKET_PATH = "/var/run/docker.sock"
+AGENT_TMUX_SESSION = "agent"
+BC_IMAGE = "ghcr.io/dstengle/shopsystem-bc-base:latest"
+BC_IMAGE_ENV = "BC_IMAGE"
+SHOPMSG_DSN_ENV = "SHOPMSG_DSN"

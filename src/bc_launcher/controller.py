@@ -26,520 +26,89 @@ from bc_launcher.constants import (  # shared primitives (single source of truth
     SSL_CERT_FILE_ENV,
 )
 
+# ---------------------------------------------------------------------------
+# Re-exported from bc_launcher.constants (Phase 1 controller.py decomposition)
+# so historical `from bc_launcher.controller import <name>` paths resolve.
+# ---------------------------------------------------------------------------
+from bc_launcher.constants import (  # noqa: F401,E402
+    DOCKER_SOCKET_PATH,
+    AGENT_TMUX_SESSION,
+    BC_IMAGE,
+    BC_IMAGE_ENV,
+    SHOPMSG_DSN_ENV,
+)
 
 # ---------------------------------------------------------------------------
-# Constants / defaults
+# Re-exported from bc_launcher.diagnostics (Phase 1 controller.py decomposition)
+# so historical `from bc_launcher.controller import <name>` paths resolve.
 # ---------------------------------------------------------------------------
-
-# Host path of the docker socket, bind-mounted into the container ONLY when the
-# opt-in lead-only docker-socket flag is enabled (lead-zxtk,
-# @scenario_hash:ff370a4e7e9dac5e / e177655ba09a73fa).
-DOCKER_SOCKET_PATH = "/var/run/docker.sock"
-AGENT_TMUX_SESSION = "agent"
-# AGENT_CONTAINER_USER (the unprivileged in-container agent user) is a shared
-# primitive imported from bc_launcher.constants above.
-BC_IMAGE = "ghcr.io/dstengle/shopsystem-bc-base:latest"
-BC_IMAGE_ENV = "BC_IMAGE"
-SHOPMSG_DSN_ENV = "SHOPMSG_DSN"
-
-# ---------------------------------------------------------------------------
-# Launch-failure diagnostic file (lead-63em — re-issue of lead-2qta)
-# ---------------------------------------------------------------------------
-#
-# When a launch fails to bring up a USABLE agent session, the operator needs
-# to learn WHY from the HOST, without attaching into any tmux session and
-# without relying on the launch command's stderr (ephemeral) or the
-# bc-container monitor tmux pane (needs a live session that never came up).
-# The launcher therefore writes a PERSISTED diagnostic FILE on the same
-# host-visible per-BC surface the mailbox is read from.
-#
-# DOCUMENTED per-BC host-discoverable location (lead-63em RESOLUTION of the
-# lead-2qta surface-ambiguity clarify):
-#
-#   <BCLAUNCHER_HOST_STATE_DIR>/<container-name>/launch-diagnostic.txt
-#
-# where the per-BC state root is the launcher host directory the operator's
-# per-BC mailbox/state is read from.  It is resolved from the
-# ``BCLAUNCHER_HOST_STATE_DIR`` env var when set, else defaults to a
-# per-USER state directory (``$XDG_STATE_HOME/bc-launcher``, falling back to
-# ``~/.local/state/bc-launcher``).  Each BC owns a per-BC subdirectory named
-# for its container (``bc-<bc_name>``), exactly the per-BC layout shape the
-# launcher already uses for the container identity surface, so the
-# diagnostic file lands on the SAME per-BC surface and is host-discoverable
-# at a single, documented, predictable path.  The launcher creates the
-# directory tree on demand, so the surface exists even on the very first
-# failed launch (when no container directory had been created yet).
-#
-# lead-bnhn (P1 bugfix): the default state root was ``/var/lib/bc-launcher``,
-# which is root-owned and NOT writable by the invoking (shop-shell) user, so
-# the on-demand ``mkdir(parents=True)`` in the diagnostic write raised
-# PermissionError and ABORTED the very launch the diagnostic was supposed to
-# describe.  The default is now a per-USER state directory the invoking user
-# can always write to, so the documented host-discoverable surface no longer
-# REQUIRES a root-pre-created path.  (The diagnostic write is ALSO wrapped
-# best-effort / non-fatal at the controller call site — see
-# ``_write_launch_diagnostic`` — so even an unwritable override location can
-# never abort the launch.)
-#
-# The file is a single human-readable line carrying the literal cause-marker
-# token (so an operator / tool can grep for the cause) followed by a
-# human-readable reason describing why the session failed to come up.
-BCLAUNCHER_HOST_STATE_DIR_ENV = "BCLAUNCHER_HOST_STATE_DIR"
-XDG_STATE_HOME_ENV = "XDG_STATE_HOME"
-# Per-USER default state-dir LEAF, joined under $XDG_STATE_HOME (or
-# ~/.local/state when XDG_STATE_HOME is unset) — a location writable by the
-# invoking user, never the root-owned /var/lib (lead-bnhn).
-DEFAULT_HOST_STATE_DIR_LEAF = "bc-launcher"
-LAUNCH_DIAGNOSTIC_FILENAME = "launch-diagnostic.txt"
-
-
-def default_host_state_dir() -> Path:
-    """The per-USER default launch-diagnostic state root (lead-bnhn).
-
-    Resolves to ``$XDG_STATE_HOME/bc-launcher`` when ``XDG_STATE_HOME`` is set,
-    else ``~/.local/state/bc-launcher`` (the XDG Base Directory default for
-    per-user state).  This is a location the INVOKING (shop-shell) user can
-    write to, so the on-demand parent ``mkdir`` in the diagnostic write does
-    NOT require a root-pre-created ``/var/lib/bc-launcher`` and cannot raise
-    PermissionError on a fresh-adopter bootstrap.  Used ONLY when
-    ``BCLAUNCHER_HOST_STATE_DIR`` is unset; an explicit override still wins.
-    """
-    xdg = os.environ.get(XDG_STATE_HOME_ENV)
-    if xdg:
-        base = Path(xdg)
-    else:
-        base = Path.home() / ".local" / "state"
-    return base / DEFAULT_HOST_STATE_DIR_LEAF
-
-# The four documented launch-failure cause-marker tokens.  Each is the
-# literal token written into the diagnostic file's ``cause:`` field so the
-# operator is pointed at the right repair.
-CAUSE_MARKER_MESSAGING_DB = "messaging-db"
-CAUSE_MARKER_AGENT_VAULT = "agent-vault"
-CAUSE_MARKER_READINESS = "readiness"
-CAUSE_MARKER_AGENT_STARTUP = "agent-startup"
-
-
-def launch_diagnostic_path(bc_name: str) -> Path:
-    """Documented per-BC host-discoverable launch-diagnostic file path.
-
-    lead-63em.  Returns the absolute host path at which a failed launch's
-    persisted diagnostic file lives for ``bc_name``:
-
-        <state-root>/<container-name>/launch-diagnostic.txt
-
-    The state root is ``BCLAUNCHER_HOST_STATE_DIR`` when set, else the
-    per-USER ``default_host_state_dir()`` (``$XDG_STATE_HOME/bc-launcher``,
-    default ``~/.local/state/bc-launcher`` — lead-bnhn: writable by the
-    invoking user, never the root-owned ``/var/lib/bc-launcher``).  The
-    per-BC subdirectory is the container name (``bc-<bc_name>``), matching
-    the launcher's existing per-BC identity shape.  This is the SAME
-    host-visible per-BC surface the operator's per-BC mailbox/state is read
-    from — readable from the host with NO tmux attach and independent of the
-    launch command's stderr.
-    """
-    override = os.environ.get(BCLAUNCHER_HOST_STATE_DIR_ENV)
-    root = Path(override) if override else default_host_state_dir()
-    return root / _container_name(bc_name) / LAUNCH_DIAGNOSTIC_FILENAME
-
-# SHOPMSG_SYSTEM_SLUG (lead-53y0): bc-launcher RESOLVES + INJECTS this slug
-# into the launched BC container's docker run env.  bc-launcher itself NEVER
-# reads/consumes SHOPMSG_SYSTEM_SLUG — the CONSUMER is the BC's own shop-msg
-# at runtime (messaging, lead-tgsb).  Resolution precedence for the injected
-# value: SHOPMSG_SYSTEM_SLUG env on the launcher invocation > manifest
-# product: > DEFAULT_SYSTEM_SLUG ('shopsystem').
-SHOPMSG_SYSTEM_SLUG_ENV = "SHOPMSG_SYSTEM_SLUG"
-DEFAULT_SYSTEM_SLUG = "shopsystem"
-
-# lead-5k8c — the GitHub org that owns each BC's `<bc>-beads` Dolt remote
-# (mirrors the BC_IMAGE org "ghcr.io/dstengle/...").  The per-BC beads remote
-# is `git+https://github.com/<org>/<bc>-beads.git`; the agent-vault proxy
-# injects credentials for it via HTTPS_PROXY at exec time.
-BEADS_REMOTE_ORG = "dstengle"
-
-
-def _beads_dolt_remote_url(bc_name: str) -> str:
-    """The `git+https://` Dolt remote URL for a BC's `<bc>-beads` registry.
-
-    lead-5k8c.  A BC named ``shopsystem-bc-launcher`` keeps its beads working
-    set on the GitHub repo ``<org>/shopsystem-bc-launcher-beads.git``; the
-    launcher's empty-remote provisioning seeds + pushes to this URL.
-    """
-    return (
-        f"git+https://github.com/{BEADS_REMOTE_ORG}/{bc_name}-beads.git"
-    )
-
-
-def _is_empty_remote_failure(message: str) -> bool:
-    """Whether a `bd bootstrap` failure was caused by an EMPTY Dolt remote.
-
-    lead-5k8c.  An uninitialized `<bc>-beads` GitHub repo makes bootstrap's
-    clone fail with "git remote has no branches: cannot push ...; initialize
-    the repository with an initial branch/commit first".
-
-    lead-ypnz / GAP D — VERSION-ROBUST.  The CURRENT bc-base dolt fails the
-    clone of a freshly `gh repo create --add-readme`'d tracker (git README
-    branch present, NO dolt refs) with a DIFFERENT phrasing: "clone failed;
-    remote at that url contains no Dolt data".  Both phrasings describe the
-    SAME condition — an existing-but-unseeded remote — which the empty-remote
-    init-and-push provisioning recovers.  So this predicate matches BOTH the
-    current "contains no Dolt data" text and the legacy "git remote has no
-    branches" text (keeping the legacy match makes it robust across dolt
-    versions).  Other bootstrap failures fall straight through to the
-    warn-and-continue path.
-    """
-    text = message.lower()
-    return (
-        "git remote has no branches" in text
-        or ("no branches" in text and "initialize" in text)
-        or "contains no dolt data" in text
-    )
-
-
-def _beads_dolt_repo_slug(bc_name: str) -> str:
-    """The `<owner>/<bc>-beads` GitHub slug for a BC's beads tracker repo.
-
-    lead-7jc2.  This is the repo the launcher CREATES when standing up a new
-    BC whose `<bc>-beads` tracker does not yet exist, distinct from the lead's
-    own `<product>-lead-beads`.  Mirrors the `git+https://` remote URL built by
-    `_beads_dolt_remote_url` but in the `gh repo create`/`gh repo view` slug
-    form (no scheme, no `.git` suffix).
-    """
-    return f"{BEADS_REMOTE_ORG}/{bc_name}-beads"
-
-
-def _is_repo_not_found_failure(message: str) -> bool:
-    """Whether a `bd bootstrap` failure was caused by an ABSENT tracker repo.
-
-    lead-7jc2.  When the `<bc>-beads` GitHub tracker repo does not exist at
-    all, bootstrap's clone fails "Repository not found" — a strictly earlier
-    failure than the empty-but-existing remote's "git remote has no branches".
-    That condition — and ONLY that condition — is what the absent-repo
-    create-then-seed provisioning recovers; other bootstrap failures fall
-    through to the empty-remote seed path (lead-5k8c) or the warn-and-continue
-    path.
-    """
-    return "repository not found" in message.lower()
-
-
-def _create_absent_tracker_repo_script(beads_repo_slug: str) -> str:
-    """Shell to CREATE an ABSENT `<bc>-beads` GitHub tracker repo (lead-7jc2).
-
-    The absent-repo case observed live: bd bootstrap's clone fails "Repository
-    not found" because the `<bc>-beads` GitHub repo was never created.  This
-    creates it with an INITIAL BRANCH AND COMMIT (`gh repo create ...
-    --add-readme` seeds an initial commit on the default branch) so it is not
-    an empty branchless repo, then verifies it is now viewable.  The
-    subsequent empty-remote seed step (lead-5k8c) adds the `bd dolt remote`
-    and pushes the Dolt working set.  `gh` auth flows through the agent-vault
-    proxy; a create that races an already-existing repo is tolerated (the
-    verify tail is the load-bearing check).
-    """
-    return (
-        "set -e; "
-        f"gh repo create {beads_repo_slug} --private --add-readme || true; "
-        f"gh repo view {beads_repo_slug} >/dev/null"
-    )
-
-
-# lead-3mez / GAP A — the absent-repo tracker-provisioning exec above runs
-# `gh repo create` through the container's agent-vault proxy (HTTPS_PROXY +
-# broker CA + AGENT_VAULT_*, all wired at `docker run` time).  gh will not
-# even attempt the request without a non-empty token in its env: with no
-# GH_TOKEN it exits non-zero ("gh auth login" / "populate GH_TOKEN") BEFORE
-# the proxy can substitute the real GITHUB_TOKEN on the wire.  Empirically
-# proven (David's 2026-07-07 shopsystem-knowledge standup): re-running the
-# exact in-container script with GH_TOKEN=dummy created the repo.  So the exec
-# only needs a non-empty PLACEHOLDER; the broker rides the wire.  Mirrors the
-# FABRO_SERVER_INSTALL_GH_TOKEN idiom (ADR-049 D1: no real cred literal).
-TRACKER_PROVISION_GH_TOKEN = "gh-dummy-agent-vault-rides-the-wire"
-
-
-def _tracker_provision_exec_env() -> dict[str, str]:
-    """The extra exec env pinned on the absent-repo `gh repo create` provisioning
-    exec (lead-3mez / GAP A): a non-empty GH_TOKEN placeholder so gh
-    authenticates through the already-wired agent-vault proxy instead of
-    exiting non-zero for lack of a token."""
-    return {"GH_TOKEN": TRACKER_PROVISION_GH_TOKEN}
-
-
-def _empty_remote_seed_script(beads_remote_url: str) -> str:
-    """Shell to INITIALIZE an empty `<bc>-beads` Dolt remote (lead-5k8c).
-
-    Mirrors the heal performed live 2026-06-22: `git init -b main` a temp
-    repo seeded from the git-tracked `.beads/issues.jsonl`, push an initial
-    commit to the `<bc>-beads.git` GitHub repo (agent-vault proxy injects
-    creds via HTTPS_PROXY), then `bd dolt remote add origin <url>` +
-    `bd dolt push`, and verify `refs/dolt/data` appears in `git ls-remote`.
-
-    lead-ktl0 / GAP E — the RAW-git operations (`git push`, `git ls-remote`)
-    must target the PLAIN `https://` tracker URL, NOT the `git+https://` DOLT
-    remote URL.  `git+https` is a Dolt-tooling transport convention; passed to
-    raw git it errors "git: 'remote-git+https' is not a git command; fatal:
-    remote helper 'git+https' aborted session" (exit 128).  Under `set -e` that
-    FATAL push aborted the seed BEFORE `bd dolt push` (the step that actually
-    seeds the Dolt data), stranding the tracker so the retried `bd bootstrap`
-    failed "contains no Dolt data".  So: (a) the raw-git ops use the plain
-    `https://` URL (strip the `git+` prefix), and (b) the git-side push is made
-    NON-FATAL (`|| true`) — `create-absent` already `gh repo create
-    --add-readme`'d the initial branch/commit, so the git-side push is
-    redundant/optional and its failure must never abort the seed before
-    `bd dolt push` runs.  Only the raw-git ops need the plain scheme; the
-    `bd dolt remote add origin` keeps the `git+https://` DOLT remote URL — that
-    is the correct scheme for bd's own dolt tooling.
-
-    lead-tc38 / GAP H (ROOT, supersedes GAP G) — UNCONFIGURE-BEFORE-INIT.  The
-    GAP G create-fresh `bd init -p <prefix>` ran WHILE `sync.remote` was STILL
-    configured in `.beads/config.yaml` to the derived `<owner>/<bc>-beads`
-    remote, which EXISTS but is EMPTY of Dolt data.  With `sync.remote`
-    configured, `bd init` (like `bd bootstrap`) CLONES that empty remote and
-    HARD-FAILS "Error 1105: clone failed; remote at that url contains no Dolt
-    data", so the create-fresh never happens (GAP G's test false-greened
-    because its fixture omitted this configured-empty-remote precondition;
-    confirmed in a real in-container launch, v0.3.56).  So the create-fresh is
-    wrapped: capture the scaffolded `sync.remote` line, REMOVE it from
-    `.beads/config.yaml` so `bd init -p` create-freshes a PREFIXED local dolt DB
-    with NO remote configured (does NOT clone), then RESTORE the line before the
-    `bd dolt remote add origin` + `bd dolt push` seed configures the git+https
-    dolt remote and seeds refs/dolt/*.
-
-    lead-372r / GAP I (ROOT, additive to GAP H, which is UNCHANGED) —
-    CLEAR-BEFORE-INIT.  At LAUNCH the PRECEDING failed `bd bootstrap` empty-remote
-    clone LEAVES a PARTIAL `.beads/embeddeddolt` on disk.  With GAP H's
-    `sync.remote` unconfigured, the create-fresh `bd init -p <prefix>` would still
-    have run — except that partial embedded-Dolt working set makes `bd init -p`
-    ABORT "database already exists; use bd init --force", a failure MASKED by the
-    `|| true` on `bd init`.  So the create-fresh NEVER happens, the subsequent
-    `bd dolt push` seeds nothing, and the fatal `git ls-remote refs/dolt` verify
-    fails -> seed exit 1 -> BC offline (traced in-container, v0.3.57; GAP H's
-    executed test false-greened because its fixture omitted the partial-DB
-    precondition).  So immediately after the GAP H unconfigure and BEFORE
-    `bd init -p`, `rm -rf .beads/embeddeddolt` clears any partial state (equivalent
-    to `bd init --force`) so the create-fresh actually runs; `bd dolt push` then
-    seeds THAT prefixed DB and the fatal verify passes.
-    """
-    # Strip the `git+` transport prefix so RAW git accepts the URL; the dolt
-    # remote itself keeps the original `git+https://` scheme below.
-    git_push_url = beads_remote_url.removeprefix("git+")
-    return (
-        f"set -e; cd {CONTAINER_WORKSPACE}; "
-        # Materialize the committed registry into a throwaway init tree so the
-        # seed commit carries the BC's tracked issues.
-        "tmp=$(mktemp -d); "
-        "cp .beads/issues.jsonl \"$tmp/issues.jsonl\" 2>/dev/null || true; "
-        "git -C \"$tmp\" init -b main >/dev/null; "
-        "git -C \"$tmp\" add -A; "
-        "git -C \"$tmp\" -c user.email=bc-launcher@shopsystem "
-        "-c user.name=bc-launcher commit -m 'seed beads remote' >/dev/null; "
-        # NON-FATAL raw-git push to the PLAIN https:// URL: redundant (the
-        # branch already exists) and must not abort the seed under set -e.
-        f"git -C \"$tmp\" push \"{git_push_url}\" main >/dev/null 2>&1 || true; "
-        # lead-vb6j / ROOT / GAP G — CREATE-FRESH-THEN-SEED ORDERING.  Establish a
-        # PREFIXED local dolt DB create-fresh from the committed
-        # `.beads/metadata.json` BEFORE the dolt remote is configured and BEFORE
-        # `bd dolt push`.  ROOT (traced in-container, v0.3.55): with sync.remote
-        # configured (GAP B) and the tracker remote EMPTY, `bd bootstrap`
-        # dolt-CLONES the empty remote and HARD-FAILS "contains no Dolt data"
-        # instead of create-fresh'ing from metadata.json — so at seed time there
-        # is NO prefixed local DB, `bd dolt push` seeds nothing / a prefix-less
-        # DB, and after standup `bd create` fails "issue_prefix config is missing"
-        # (session-start health gate red -> BC offline).  `bd bootstrap` DOES
-        # create-fresh ("Created fresh database with prefix") when NO remote is
-        # configured (lead-pqlx); `bd init` is the create-fresh primitive that
-        # likewise CREATES a fresh DB rather than cloning the configured remote.
-        # So: read the COMMITTED prefix and `bd init -p` a fresh PREFIXED local
-        # dolt DB with the dolt remote NOT yet configured.  The `bd dolt remote
-        # add origin` + `bd dolt push` below then seed THAT prefixed DB, so
-        # refs/dolt/* land WITH the prefix, the retried `bd bootstrap` exits
-        # zero, and `bd create` in the new BC yields a `<prefix>-<n>` id.
-        #
-        # PREFIX SOURCE (lead-vb6j follow-up).  PRIMARY: `.beads/metadata.json`
-        # `dolt_database` — real bd-written metadata.json carries `dolt_database`
-        # (e.g. `shopsystem_bc_launcher`) and NO `issue_prefix` key.  FALLBACK:
-        # the FIRST issue id in `.beads/issues.jsonl`, quote-BOUNDED and cut at
-        # its FINAL hyphen — the shell mirror of `committed_beads_prefix_from_
-        # registry` (regex `"id"\s*:\s*"([^"]+)"`, then `rsplit("-", 1)[0]`).
-        # The capture MUST be quote-bounded (`[^"]*`): a greedy `"\(.*\)-[^-]*"`
-        # bleeds across the multi-field JSONL line and yields a ~1000-char
-        # garbage prefix.  NEVER fall back to a BC-name-derived prefix (lead-rply
-        # / lead-vb6j): a cloned registry may carry a prefix the BC name does not
-        # imply.
-        "gapg_prefix=$(sed -n "
-        "'s/.*\"dolt_database\"[[:space:]]*:[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p' "
-        ".beads/metadata.json | head -1); "
-        "if [ -z \"$gapg_prefix\" ]; then "
-        "gapg_id=$(grep -o '\"id\"[[:space:]]*:[[:space:]]*\"[^\"]*\"' "
-        ".beads/issues.jsonl | head -1 | sed 's/.*\"\\([^\"]*\\)\"$/\\1/'); "
-        "gapg_prefix=\"${gapg_id%-*}\"; fi; "
-        # lead-tc38 / GAP H (ROOT, supersedes GAP G) — UNCONFIGURE sync.remote
-        # BEFORE the `bd init -p` create-fresh, then RESTORE it before the dolt
-        # seed.  GAP G ran `bd init -p` WHILE `sync.remote` was STILL configured
-        # in `.beads/config.yaml` to the derived `<owner>/<bc>-beads` remote —
-        # which EXISTS (GAP B resolved its owner + `create-absent` gh-created it)
-        # but is EMPTY of Dolt data.  With `sync.remote` configured, `bd init`
-        # (like `bd bootstrap`) CLONES that empty remote and HARD-FAILS
-        # "Error 1105: clone failed; remote at that url contains no Dolt data" —
-        # so the create-fresh never happens, `bd dolt push` seeds a prefix-less
-        # / empty DB, and `bd create` after standup fails "issue_prefix config is
-        # missing".  GAP G's structural test false-greened because its fixture
-        # OMITTED this configured-empty-remote precondition; confirmed in a real
-        # in-container launch (v0.3.56).  So: capture the scaffolded `sync.remote`
-        # line, remove it from `.beads/config.yaml` so `bd init -p` create-freshes
-        # a PREFIXED local dolt DB with NO remote configured (does NOT clone),
-        # then restore the line before `bd dolt remote add`/`bd dolt push` seed
-        # refs/dolt/* against the git+https dolt remote.
-        "gaph_remote_line=$(grep -E '^sync\\.remote' .beads/config.yaml "
-        "2>/dev/null | head -1 || true); "
-        "sed -i '/^sync\\.remote/d' .beads/config.yaml 2>/dev/null || true; "
-        # lead-372r / GAP I (ROOT, additive to GAP H) — CLEAR-BEFORE-INIT.  At
-        # LAUNCH the PRECEDING failed `bd bootstrap` empty-remote clone LEAVES a
-        # PARTIAL `.beads/embeddeddolt` on disk.  `bd init -p` then ABORTS
-        # "database already exists; use bd init --force" — MASKED by the `|| true`
-        # below — so the create-fresh NEVER runs, the `bd dolt push` seeds
-        # nothing, and the fatal `git ls-remote refs/dolt` verify fails -> seed
-        # exit 1 -> BC offline (traced in-container, v0.3.57; GAP H's fixture
-        # omitted this partial-DB precondition so it false-greened over the
-        # ordering).  So remove any partial embedded-Dolt working set BEFORE the
-        # create-fresh, so `bd init -p` create-freshes a fresh PREFIXED local dolt
-        # DB rather than aborting under the mask.  (`rm -rf` is equivalent to
-        # `bd init --force` here; the lead's manual test only worked because it
-        # `rm -rf`'d first — the launch does not.)
-        "rm -rf .beads/embeddeddolt; "
-        "BD_NON_INTERACTIVE=1 bd init -p \"$gapg_prefix\" >/dev/null 2>&1 || true; "
-        # Restore the captured sync.remote line now that the fresh PREFIXED local
-        # dolt DB exists, so the dolt seed below (and later `bd bootstrap` /
-        # `bd create`) again see the configured tracker remote.
-        "if [ -n \"$gaph_remote_line\" ]; then "
-        "printf '%s\\n' \"$gaph_remote_line\" >> .beads/config.yaml; fi; "
-        # Point the local bd working set at the now-initialized DOLT remote
-        # (git+https:// — bd's own tooling handles that scheme) and push the
-        # create-fresh'd PREFIXED embedded-Dolt working set up.  THIS is the step
-        # that seeds refs/dolt/* — now carrying the committed prefix.
-        f"bd dolt remote add origin {beads_remote_url} || true; "
-        "bd dolt push || true; "
-        # Verify the remote now carries Dolt data refs (raw git ls-remote, so
-        # the PLAIN https:// URL again).
-        f"git ls-remote {git_push_url} 'refs/dolt/*' | grep -q refs/dolt"
-    )
-
-
-# lead-r34c / GAP B — the scaffolded ORIGIN_OWNER placeholder in the tracker
-# remote is correct at SCAFFOLD time (no origin owner is known yet), but it must
-# be RESOLVED to the derived GitHub owner BEFORE the in-container `bd bootstrap`
-# runs.  Empirically proven (David's 2026-07-07 shopsystem-knowledge standup):
-# the standup resolved the owner to `dstengle` for the gh-create step but never
-# wrote it back into the in-container `.beads` config / functional bd dolt
-# remote, so `bd bootstrap` cloned the stale
-# `git+https://github.com/ORIGIN_OWNER/<bc>-beads.git` URL and failed
-# "Repository not found".  This writeback derives the owner from the CONTAINER's
-# `/workspace` git origin remote (the real origin the clone left behind) and
-# rewrites BOTH the `.beads/config.yaml` `sync.remote` AND the functional bd
-# dolt remote (the one `bd dolt remote list` reports and `bd bootstrap` clones
-# from), so no literal `ORIGIN_OWNER` segment survives to bootstrap time and the
-# clone target is `<owner>/<bc>-beads`.  It is idempotent + best-effort: on a
-# config already carrying a resolved owner the sed is a no-op and the dolt
-# remote re-add is harmless.
-def _resolve_origin_owner_writeback_script(bc_name: str) -> str:
-    """Shell to RESOLVE the ORIGIN_OWNER placeholder to the derived GitHub owner
-    and WRITE it into the in-container `.beads` config sync.remote + the
-    functional bd dolt remote BEFORE `bd bootstrap` (lead-r34c / GAP B)."""
-    remote_tail = f"{bc_name}-beads.git"
-    return (
-        f"set -e; cd {CONTAINER_WORKSPACE}; "
-        # (1) Derive the GitHub owner from the container's /workspace git origin
-        #     remote: strip a trailing `.git`, normalise a `git@host:owner/repo`
-        #     scp-form colon to a slash, then take the second-to-last path
-        #     segment (`<owner>` in `.../<owner>/<repo>`).
-        f"url=$(git -C {CONTAINER_WORKSPACE} remote get-url origin); "
-        "owner=$(printf '%s' \"$url\" | sed -E 's#\\.git$##; s#:#/#g' "
-        "| awk -F/ '{print $(NF-1)}'); "
-        "test -n \"$owner\"; "
-        # (2) Rewrite the scaffolded `.beads` config sync.remote placeholder so
-        #     no literal ORIGIN_OWNER survives in the tracker config.
-        "if [ -f .beads/config.yaml ]; then "
-        "sed -i \"s#ORIGIN_OWNER#${owner}#g\" .beads/config.yaml; fi; "
-        # (3) Rewrite the FUNCTIONAL bd dolt remote (the one `bd dolt remote
-        #     list` reports and `bd bootstrap` clones from): drop the stale
-        #     ORIGIN_OWNER remote and re-add it under the derived owner so the
-        #     bootstrap clone target is <owner>/<bc>-beads.
-        f"remote_url=\"git+https://github.com/${{owner}}/{remote_tail}\"; "
-        "bd dolt remote remove origin 2>/dev/null || true; "
-        "bd dolt remote add origin \"$remote_url\" || true"
-    )
+from bc_launcher.diagnostics import (  # noqa: F401,E402
+    BCLAUNCHER_HOST_STATE_DIR_ENV,
+    XDG_STATE_HOME_ENV,
+    DEFAULT_HOST_STATE_DIR_LEAF,
+    LAUNCH_DIAGNOSTIC_FILENAME,
+    CAUSE_MARKER_MESSAGING_DB,
+    CAUSE_MARKER_AGENT_VAULT,
+    CAUSE_MARKER_READINESS,
+    CAUSE_MARKER_AGENT_STARTUP,
+    default_host_state_dir,
+    launch_diagnostic_path,
+    _resolve_host_path,
+)
 
 # ---------------------------------------------------------------------------
-# Agent-vault credential broker model (ADR-026, lead-hxb8 / lead-v4ih)
+# Re-exported from bc_launcher.networking (Phase 1 controller.py decomposition)
+# so historical `from bc_launcher.controller import <name>` paths resolve.
 # ---------------------------------------------------------------------------
-#
-# ADR-026 (accepted 2026-06-09) locks the credential disposition: ZERO
-# host-filesystem credential coupling reaches a BC container, for BOTH Claude
-# OAuth and GitHub.  The agent-vault broker is the SOLE credential path; there
-# is no launch-mode flag and no host-mount fallback.
-#
-# The launcher therefore:
-#   * mounts NO host ~/.claude, ~/.config/gh, or ~/.gitconfig into the
-#     container, and never consults BCLAUNCHER_HOST_HOME to resolve a
-#     credential mount source;
-#   * mounts a placeholder-only, read-only .credentials.json whose accessToken
-#     is the literal AGENT_VAULT_PLACEHOLDER_TOKEN — never a real OAuth token;
-#   * wraps the agent invocation as `agent-vault run -- claude`, with
-#     HTTPS_PROXY pointed at the broker's proxy listener on the shopsystem
-#     network, so the broker substitutes the real Claude OAuth and GitHub
-#     credentials on outbound requests (the container never holds them);
-#   * gates launch on an agent_vault_reachable readiness barrier alongside the
-#     messaging-database barrier: the agent engages only when BOTH are
-#     reachable.
-
-# The literal accessToken value baked into the container's placeholder
-# .credentials.json.  Scenarios 3931e43e / e4348b11 pin this exact string.
-AGENT_VAULT_PLACEHOLDER_TOKEN = "__PLACEHOLDER__"
-
-# Container path at which the placeholder Claude credential file lives and the
-# proxy env var the agent-vault run wrapper honours for outbound substitution.
-AGENT_VAULT_PROXY_ENV = "HTTPS_PROXY"
-
-# Default agent-vault broker proxy listener address on the shopsystem network.
-# The broker is provisioned out of band (scenario 2a4e9889); the launcher only
-# needs its proxy-listener address to point HTTPS_PROXY at it and to probe
-# readiness.  Overridable per-launch via the launch() ``agent_vault_broker``
-# argument or the BCLAUNCHER_AGENT_VAULT_BROKER env var.
-DEFAULT_AGENT_VAULT_BROKER = "http://agent-vault:14321"
-AGENT_VAULT_BROKER_ENV = "BCLAUNCHER_AGENT_VAULT_BROKER"
-
-# The agent-vault broker's control-API port — the port the readiness PROBE
-# targets (a reachability check, NOT the :14322 MITM proxy the runtime traffic
-# uses).
-AGENT_VAULT_CONTROL_API_PORT = 14321
-# The unqualified agent-vault service name on the (single-product) shopsystem
-# network.  For a SECOND product the broker is reachable under a
-# slug-qualified name (``<slug>-agent-vault``); see resolve_probe_broker_address.
-AGENT_VAULT_SERVICE_NAME = "agent-vault"
+from bc_launcher.networking import (  # noqa: F401,E402
+    SHOPMSG_SYSTEM_SLUG_ENV,
+    DEFAULT_SYSTEM_SLUG,
+    _resolve_shop_network,
+    resolve_probe_broker_address,
+)
 
 # ---------------------------------------------------------------------------
-# Agent-vault MITM proxy port + clone-time trust env (bclaunch-5fji)
+# Re-exported from bc_launcher.tracker_provision (Phase 1 controller.py decomposition)
+# so historical `from bc_launcher.controller import <name>` paths resolve.
 # ---------------------------------------------------------------------------
-#
-# DEFECT 1 (bclaunch-5fji): the agent-vault *control API* listens on :14321
-# (the DEFAULT_AGENT_VAULT_BROKER above and AGENT_VAULT_ADDR carry it).  But
-# the credential-substituting MITM HTTPS proxy listens on a SEPARATE port,
-# :14322, and requires basic-auth whose userinfo is the agent token + vault
-# (``http://<token>:<vault>@<host>:14322`` — the same shape ``agent-vault run``
-# itself uses).  Pointing a clone's HTTPS_PROXY at the bare control-API address
-# reaches a listener that does not proxy, so the brokered clone fails.  The
-# clone-time proxy URL must therefore be built against the MITM port with the
-# agent credentials as userinfo.  The agent token already carries its
-# operator-supplied agent-token prefix (see the AGENT_VAULT_TOKEN scenarios),
-# so it is used verbatim as the userinfo username — NOT re-prefixed.
-AGENT_VAULT_MITM_PROXY_PORT = 14322
+from bc_launcher.tracker_provision import (  # noqa: F401,E402
+    BEADS_REMOTE_ORG,
+    TRACKER_PROVISION_GH_TOKEN,
+    _beads_dolt_remote_url,
+    _is_empty_remote_failure,
+    _beads_dolt_repo_slug,
+    _is_repo_not_found_failure,
+    _create_absent_tracker_repo_script,
+    _tracker_provision_exec_env,
+    _empty_remote_seed_script,
+    _resolve_origin_owner_writeback_script,
+)
 
-# DEFECT 2 (bclaunch-5fji): the launch-time clone runs in a NON-LOGIN shell, so
-# it never sources /etc/profile.d/agent-vault-ca.sh and therefore lacks
-# GIT_SSL_CAINFO, producing 'unable to get local issuer certificate' when git
-# verifies the broker's MITM cert.  The container CA path the bc-base entrypoint
-# materializes the broker CA to is FIXED by the operator design (bclaunch-9rr);
-# the controller sets GIT_SSL_CAINFO to that same path explicitly on the clone
-# exec so the brokered clone trusts the broker CA without a login shell.
-GIT_SSL_CAINFO_ENV = "GIT_SSL_CAINFO"
+# ---------------------------------------------------------------------------
+# Re-exported from bc_launcher.agent_vault (Phase 1 controller.py decomposition)
+# so historical `from bc_launcher.controller import <name>` paths resolve.
+# ---------------------------------------------------------------------------
+from bc_launcher.agent_vault import (  # noqa: F401,E402
+    AGENT_VAULT_PLACEHOLDER_TOKEN,
+    AGENT_VAULT_PROXY_ENV,
+    DEFAULT_AGENT_VAULT_BROKER,
+    AGENT_VAULT_BROKER_ENV,
+    AGENT_VAULT_CONTROL_API_PORT,
+    AGENT_VAULT_SERVICE_NAME,
+    AGENT_VAULT_MITM_PROXY_PORT,
+    GIT_SSL_CAINFO_ENV,
+    CA_PEM_FIRST_LINE,
+    AGENT_VAULT_ADDR_ENV,
+    AGENT_VAULT_TOKEN_ENV,
+    AGENT_VAULT_VAULT_ENV,
+    AGENT_VAULT_CA_PEM_ENV,
+    CONTAINER_BROKER_CA_PATH,
+    CONTAINER_CLAUDE_CREDENTIALS_PATH,
+    _clone_ca_materialize_script,
+    _mitm_proxy_host,
+    _build_clone_proxy_url,
+    _build_runtime_proxy_url,
+)
 
 # (SSL_CERT_FILE_ENV / AGENT_VAULT_CONTAINER_CA_PATH are shared primitives
 # imported from bc_launcher.constants; the lead-ze4w BUG#3 rationale lives on
@@ -558,78 +127,6 @@ def _fabro_exec_env() -> dict[str, str]:
     a login shell.
     """
     return {SSL_CERT_FILE_ENV: AGENT_VAULT_CONTAINER_CA_PATH}
-
-# ---------------------------------------------------------------------------
-# Clone-prep CA materialization — write-path == trust-path (lead-z0v2)
-# ---------------------------------------------------------------------------
-#
-# REGRESSION (lead-z0v2, empirical v0.3.34): the launcher LOGGED that it had
-# "materialized the broker MITM root CA into the container trust store before
-# the clone" yet the clone FAILED with
-#   error setting certificate file: /home/vscode/.config/agent-vault/ca.pem
-# because the CA file did NOT exist:
-#   * the entrypoint materializer (agent-vault-ca.sh) writes the CA file ONLY
-#     when AGENT_VAULT_CA_PEM is set + non-empty; in the real flagless launch
-#     that env was EMPTY, so NOTHING was written; and
-#   * the controller UNCONDITIONALLY set GIT_SSL_CAINFO to the CA path on the
-#     clone exec, pointing git at a CA path that was never written.
-# That is a write-path-vs-trust-path MISMATCH: git was pointed at a path the
-# launcher never guaranteed to contain real CA content.
-#
-# FIX: a single clone-prep script that (a) ACTUALLY writes the broker MITM CA
-# *content* to AGENT_VAULT_CONTAINER_CA_PATH BEFORE the clone — sourcing the
-# content from AGENT_VAULT_CA_PEM when present (ADR-045 inline PEM), else from
-# the working operator path `agent-vault ca fetch` — and (b) configures git to
-# trust THAT SAME existing path.  The script EXITS NON-ZERO if the file does
-# not end up non-empty with a "-----BEGIN CERTIFICATE-----" first line, so the
-# launcher NEVER points git at an unwritten / empty / malformed CA path.  The
-# write-path and the trust-path are the identical constant
-# AGENT_VAULT_CONTAINER_CA_PATH, eliminating the mismatch.
-CA_PEM_FIRST_LINE = "-----BEGIN CERTIFICATE-----"
-
-
-def _clone_ca_materialize_script(ca_path: str = AGENT_VAULT_CONTAINER_CA_PATH) -> str:
-    """Shell that writes real broker CA *content* to ``ca_path`` then verifies
-    it, before the clone (lead-z0v2).
-
-    Source precedence for the CA content:
-      1. the inline ``AGENT_VAULT_CA_PEM`` env (ADR-045) when set + non-empty;
-      2. else the working operator path ``agent-vault ca fetch`` (the same
-         workaround an operator runs by hand: ``agent-vault ca fetch > <ca>``).
-
-    The script then VERIFIES the file is a non-empty PEM whose first line is
-    ``-----BEGIN CERTIFICATE-----``; if not, it exits non-zero so the caller
-    refuses to point git at an unwritten / empty / malformed CA path.  This is
-    the write-path side of the write==trust invariant; the caller sets
-    GIT_SSL_CAINFO to this SAME ``ca_path`` only after this script succeeds.
-    """
-    return (
-        "set -e; "
-        f'ca="{ca_path}"; '
-        'mkdir -p "$(dirname "$ca")"; '
-        # (1) inline PEM (ADR-045) wins; (2) else operator `agent-vault ca fetch`.
-        'if [ -n "${AGENT_VAULT_CA_PEM:-}" ]; then '
-        '  printf \'%s\\n\' "$AGENT_VAULT_CA_PEM" > "$ca"; '
-        "else "
-        '  agent-vault ca fetch > "$ca"; '
-        "fi; "
-        # vscode runs the clone and must read the CA.
-        'chown vscode:vscode "$ca" 2>/dev/null || true; '
-        # VERIFY: non-empty AND first line is the PEM BEGIN marker.  Exit
-        # non-zero otherwise so git is never pointed at a bad CA path.
-        '[ -s "$ca" ] || { echo "agent-vault CA file is empty: $ca" >&2; exit 1; }; '
-        # F3 grep-validation fix (lead-eqao): the BEGIN-CERTIFICATE marker
-        # begins with "-----", so a bare `grep -qx "{marker}"` made grep parse
-        # the dash-prefixed pattern as OPTIONS ("grep: unrecognized option") and
-        # exit non-zero on an ACTUALLY-VALID cert, falsely "missing BEGIN
-        # CERTIFICATE" and refusing the clone.  Use `-F` (fixed string, so no
-        # regex interpretation) and `--` (end-of-options, so the dash-prefixed
-        # marker is treated as a PATTERN, never as flags).  The negative limb
-        # stays honest: genuinely marker-less content still fails to match `-x`
-        # (whole-line) and is rejected fail-loud below.
-        f'head -n 1 "$ca" | grep -qxF -- "{CA_PEM_FIRST_LINE}" '
-        '|| { echo "agent-vault CA file missing BEGIN CERTIFICATE: $ca" >&2; exit 1; }'
-    )
 
 # ---------------------------------------------------------------------------
 # Fabro def-bundle + orchestrator wiring — extracted to bc_launcher.fabro
@@ -675,628 +172,45 @@ from bc_launcher.fabro import (  # noqa: E402,F401  (re-export for compat)
     _fabro_workflow_toml_install_script,
 )
 
+# ---------------------------------------------------------------------------
+# Re-exported from bc_launcher.readiness (Phase 1 controller.py decomposition)
+# so historical `from bc_launcher.controller import <name>` paths resolve.
+# ---------------------------------------------------------------------------
+from bc_launcher.readiness import (  # noqa: F401,E402
+    CLAUDE_READY_MARKER,
+    CLAUDE_INPUT_READY_MARKER,
+    CLAUDE_READINESS_TIMEOUT_SECONDS,
+    OPTION_SCREEN_MARKER,
+    ESCAPE_AFFORDANCE_MARKER,
+    ESCAPE_KEY_NAME,
+    READINESS_PROMPT_ESCAPE_AFFORDANCE_MARKERS,
+    WORKSPACE_TRUST_PROMPT_MARKERS,
+    FULLSCREEN_RENDERER_PROMPT_MARKER,
+    READINESS_DISMISS_POLL_SECONDS,
+    _readiness_wait_blocking_prompt,
+)
 
 # ---------------------------------------------------------------------------
-# Operator-supplied agent-vault credential + TLS-trust injection
-# (bclaunch-5hi / bclaunch-7pf)
+# Re-exported from bc_launcher.naming (Phase 1 controller.py decomposition)
+# so historical `from bc_launcher.controller import <name>` paths resolve.
 # ---------------------------------------------------------------------------
-#
-# The in-container `agent-vault run` client authenticates to the broker using
-# an addr + token + vault triple.  These are OPERATOR-SUPPLIED at launch (from
-# the CLI --env-file / process env / launch() params) and are injected into
-# the container env under these names.  The TOKEN value is NEVER a literal
-# baked into source — the only credential literal permitted in src/ is the
-# AGENT_VAULT_PLACEHOLDER_TOKEN above.
-AGENT_VAULT_ADDR_ENV = "AGENT_VAULT_ADDR"
-AGENT_VAULT_TOKEN_ENV = "AGENT_VAULT_TOKEN"
-AGENT_VAULT_VAULT_ENV = "AGENT_VAULT_VAULT"
-
-# The broker CA travels as an env var (bclaunch-7pf REVISED, operator design
-# directive — supersedes the 9ca2e05 CA bind-mount).  The CA is a PUBLIC
-# ~574-byte cert (NOT secret).  A controller-side CA bind-mount is UNSAFE under
-# nested-docker / host-path mismatch and the design goal is to eliminate
-# controller bind mounts entirely.  So the operator supplies the CA PEM via
-# --env-file as AGENT_VAULT_CA_PEM; the controller injects it into the
-# container env, and the bc-base entrypoint (bclaunch-9rr) materializes it to a
-# file and exports the TLS-trust vars.  The controller does NO CA handling and
-# builds NO CA bind-mount.
-AGENT_VAULT_CA_PEM_ENV = "AGENT_VAULT_CA_PEM"
-
-# The fixed container path at which the bc-base entrypoint materializes the CA
-# from AGENT_VAULT_CA_PEM.  Retained here only so tests/scenarios can name the
-# (former) controller-side path and assert the controller builds NO mount at
-# it; the controller itself no longer references it.
-CONTAINER_BROKER_CA_PATH = "/etc/agent-vault/broker-ca.pem"
-
-# The container-internal path of the placeholder Claude credentials file.
-CONTAINER_CLAUDE_CREDENTIALS_PATH = "/home/vscode/.claude/.credentials.json"
-
-# Claude Code readiness markers used to sequence prompt injection inside
-# the agent tmux session.  The default tmux session command is bash, so a
-# naïve send-keys of the startup prompt lands in bash and fails as
-# "-bash: <first-word>: command not found".  The launch sequence is:
-#   1. send-keys 'claude --dangerously-skip-permissions' Enter
-#                                         — start Claude Code with
-#                                           in-container permission bypass
-#                                           (the BC container is the
-#                                           isolation boundary)
-#   2. wait for CLAUDE_READY_MARKER       — workspace-trust banner appeared
-#                                           (PRE-trust: this is the line
-#                                           Claude Code prints BEFORE the
-#                                           trust prompt clears, so it
-#                                           confirms the agent has reached
-#                                           interactive UI without
-#                                           presupposing trust was accepted)
-#   3. send-keys Enter                    — accept workspace-trust default
-#                                           (empirically verified that
-#                                           --dangerously-skip-permissions
-#                                           does NOT bypass workspace trust,
-#                                           so this step is still required)
-#   4. wait for CLAUDE_INPUT_READY_MARKER — main input prompt is live
-#                                           (POST-trust: "bypass permissions
-#                                           on" appears only once the trust
-#                                           prompt has cleared and the
-#                                           main input UI is live — chosen
-#                                           in preference to the bare "❯"
-#                                           glyph because the PRE-trust
-#                                           pane also contains "❯" as the
-#                                           trust-prompt selector arrow,
-#                                           which would otherwise cause
-#                                           step 4 to succeed trivially)
-#   5. send-keys <startup_prompt> Enter   — prompt lands inside Claude Code
-# On any wait timeout, the launcher emits a stderr warning naming the
-# step that did not confirm.
-CLAUDE_READY_MARKER = "Accessing workspace:"
-CLAUDE_INPUT_READY_MARKER = "bypass permissions on"
-CLAUDE_READINESS_TIMEOUT_SECONDS = 60.0
+from bc_launcher.naming import (  # noqa: F401,E402
+    _BEADS_ISSUE_ID_RE,
+    _container_name,
+    beads_prefix_for,
+    committed_beads_prefix_from_registry,
+    _slugify,
+)
 
 # ---------------------------------------------------------------------------
-# Blocking interactive option-screen handling on engage (lead-q3uy)
+# Re-exported from bc_launcher.manifest (Phase 1 controller.py decomposition)
+# so historical `from bc_launcher.controller import <name>` paths resolve.
 # ---------------------------------------------------------------------------
-#
-# After the input-ready marker is observed (step 4) but BEFORE the startup
-# prompt is submitted (step 5), the in-container agent runtime can present a
-# blocking interactive option screen (e.g. a "select an option" / settings /
-# theme chooser) that absorbs keystrokes — so a naive prompt submission would
-# be eaten by the screen instead of reaching the input prompt.  The launcher
-# captures the pane at this point and recognizes a blocking option screen by
-# the OPTION_SCREEN_MARKER signature.
-#
-# Disposition (lead-q3uy):
-#   * If the captured screen ALSO carries an ESCAPE_AFFORDANCE_MARKER (the
-#     screen advertises an Escape/dismiss key), send a DISCRETE tmux send-keys
-#     carrying ONLY the Escape key (NEVER Enter) to dismiss it, CAPTURE the
-#     rendered screen content, log it as a host-discoverable WARNING (the same
-#     launch-stderr surface every other engage warning uses), then proceed to
-#     submit the startup prompt directly — no host-side `bc-container inject`.
-#   * If the screen exposes NO escape affordance, do NOT send Enter and do NOT
-#     auto-confirm a default (pressing Enter would blindly select whatever
-#     option is highlighted); instead surface a WARNING NAMING the un-escapable
-#     screen so a human can review it from the host, and do NOT submit the
-#     prompt into a screen that would swallow it.
-#
-# Detection keys on rendered-pane substrings, mirroring the existing
-# CLAUDE_*_MARKER readiness-marker idiom rather than inventing a new seam.  The
-# ESCAPE key NAME is the tmux key-name token sent as the SOLE send-keys payload
-# (a discrete pty write that the TUI processes as a single Escape keypress).
-OPTION_SCREEN_MARKER = "Select an option"
-ESCAPE_AFFORDANCE_MARKER = "esc to"
-ESCAPE_KEY_NAME = "Escape"
-
-# ---------------------------------------------------------------------------
-# Readiness-wait interactive-prompt auto-dismissal (lead-cw7m / lead-c713)
-# ---------------------------------------------------------------------------
-#
-# EXTENDS the lead-q3uy/gs03 Esc-not-Enter / warn / no-auto-confirm posture
-# from the ENGAGE phase (AFTER input-ready) to the READINESS-WAIT phase
-# (BEFORE input-ready).  The new bc-base Claude Code image (c50b3b) renders
-# an EARLIER interactive prompt — "Try the new fullscreen renderer?
-# (1. Yes / 2. Not now, Esc to cancel)" — BEFORE the "Accessing workspace:"
-# trust banner.  The narrow step-4 readiness handler (wait for
-# CLAUDE_INPUT_READY_MARKER) could not see past it: the input-ready marker
-# never appeared, the wait timed out at 60s, the startup prompt was never
-# injected, the watcher never armed, and the BC never came online.
-#
-# Disposition (lead-cw7m — launcher-runtime scan-and-solve; the PO chose
-# this over an image-config pre-seed because it is robust to image-config
-# drift):
-#   * During the readiness wait (while waiting for the input-ready marker),
-#     if the pane presents an interactive prompt that is NOT the
-#     already-handled workspace-trust prompt and is NOT yet at input-ready,
-#     dismiss it with a safe NON-COMMITTAL default by sending ONLY Esc
-#     (decline — NEVER Enter / '1', so the renderer is NOT enabled), emit a
-#     host-discoverable WARNING NAMING the auto-dismissed prompt, then
-#     CONTINUE the readiness loop toward input-ready.
-#   * The whole scan-dismiss loop stays BOUNDED by the existing 60s readiness
-#     timeout.  On timeout WITHOUT input-ready: STOP attempting dismissals
-#     (no infinite loop), warn that the main input did not become ready
-#     within 60 seconds, and proceed WITHOUT injecting the startup prompt.
-#
-# Detection keys on rendered-pane substrings, mirroring the CLAUDE_*_MARKER /
-# OPTION_SCREEN_MARKER idiom.  A readiness-wait prompt is recognized as a
-# blocking interactive prompt that advertises an Esc/cancel affordance and is
-# NOT the workspace-trust prompt and is NOT yet at input-ready.  The specific
-# fullscreen-renderer onboarding prompt is recognized by its own signature.
-READINESS_PROMPT_ESCAPE_AFFORDANCE_MARKERS = ("esc to", "esc to cancel")
-WORKSPACE_TRUST_PROMPT_MARKERS = ("trust this folder", "Quick safety check")
-FULLSCREEN_RENDERER_PROMPT_MARKER = "Try the new fullscreen renderer?"
-# How long a single input-ready wait poll is given before the controller
-# re-captures the pane to look for a blocking readiness-wait prompt.  The
-# per-attempt budget keeps the loop responsive while the TOTAL elapsed time
-# stays bounded by CLAUDE_READINESS_TIMEOUT_SECONDS.
-READINESS_DISMISS_POLL_SECONDS = 5.0
-
-
-def _readiness_wait_blocking_prompt(pane: str) -> str | None:
-    """Classify a readiness-wait pane capture (lead-cw7m / lead-c713).
-
-    Returns a short human-readable NAME of a blocking interactive prompt that
-    is presenting during the readiness wait and must be auto-dismissed with
-    Esc, or ``None`` when the pane carries no such prompt.
-
-    A prompt qualifies when ALL hold:
-      * the input-ready marker is NOT yet present (an input-ready pane is not a
-        blocking prompt — it is success);
-      * the pane is NOT the already-handled workspace-trust prompt (step 3 of
-        the readiness sequence accepts that one with Enter);
-      * the pane advertises an Esc/cancel affordance (so Esc is the screen's
-        own non-committal decline default — we never blind-press Enter / '1').
-
-    The specific fullscreen-renderer onboarding prompt (image c50b3b) is named
-    explicitly; any other Esc-dismissable readiness-wait prompt is named
-    generically from its first non-empty rendered line.
-    """
-    if not pane:
-        return None
-    if CLAUDE_INPUT_READY_MARKER in pane:
-        # Input-ready reached — not a blocking prompt.
-        return None
-    if any(m in pane for m in WORKSPACE_TRUST_PROMPT_MARKERS):
-        # The workspace-trust prompt is handled by step 3 (Enter); do NOT
-        # treat it as an unexpected prompt to Esc-dismiss.
-        return None
-    pane_lower = pane.lower()
-    if not any(m in pane_lower for m in READINESS_PROMPT_ESCAPE_AFFORDANCE_MARKERS):
-        # No Esc/cancel affordance advertised — not an Esc-dismissable prompt.
-        return None
-    if FULLSCREEN_RENDERER_PROMPT_MARKER in pane:
-        return FULLSCREEN_RENDERER_PROMPT_MARKER
-    # Generic readiness-wait prompt: name it by its first non-empty line.
-    for line in pane.splitlines():
-        stripped = line.strip()
-        if stripped:
-            return stripped
-    return "an unexpected interactive prompt"
-
-
-def _container_name(bc_name: str) -> str:
-    return f"bc-{bc_name}"
-
-
-def beads_prefix_for(bc_name: str) -> str:
-    """Derive a *fallback* beads issue_prefix from the BC name.
-
-    A BC named ``shopsystem-<identifier>`` would, by name-derivation, carry a
-    prefix derived from the identifier: lowercase, non-alphanumerics stripped,
-    the ``shopsystem-`` namespace prefix dropped (e.g. ``shopsystem-messaging``
-    → ``messaging``).
-
-    NOTE — name-derivation is NOT authoritative (lead-rply).  A cloned repo's
-    committed registry may carry a DIFFERENT prefix than the BC name implies
-    (e.g. ``shopsystem-bc-launcher`` name-derives ``bclauncher`` but its
-    committed registry uses ``bclaunch``; ``shopsystem-templates`` name-derives
-    ``templates`` but uses ``tmpl``).  The launcher MUST adopt the COMMITTED
-    prefix the cloned repo already carries — see
-    ``_committed_beads_prefix`` — and only fall back to this name-derived value
-    when the clone carries no committed registry from which a prefix can be
-    read.
-    """
-    ident = bc_name
-    if ident.startswith("shopsystem-"):
-        ident = ident[len("shopsystem-"):]
-    ident = re.sub(r"[^a-z0-9]", "", ident.lower())
-    return ident
-
-
-# Issue ids in a beads registry are ``<prefix>-<suffix>`` where the suffix is a
-# short base36-ish token (e.g. ``bclaunch-eaa``).  The committed prefix is the
-# segment before the FINAL hyphen of an issue id.
-_BEADS_ISSUE_ID_RE = re.compile(r'"id"\s*:\s*"(?P<id>[^"]+)"')
-
-
-def committed_beads_prefix_from_registry(registry_text: str) -> str | None:
-    """Extract the committed issue_prefix from a ``.beads/issues.jsonl`` blob.
-
-    The committed registry is JSONL: one issue object per line, each carrying an
-    ``"id":"<prefix>-<suffix>"`` field.  The committed prefix is the portion of
-    the first issue id up to (but excluding) its final hyphen.  Returns ``None``
-    when the blob carries no parseable issue id (e.g. an empty registry), so the
-    caller can fall back to name-derivation rather than configuring an empty
-    prefix.
-    """
-    for match in _BEADS_ISSUE_ID_RE.finditer(registry_text or ""):
-        issue_id = match.group("id")
-        if "-" in issue_id:
-            return issue_id.rsplit("-", 1)[0]
-    return None
-
-
-def _slugify(text: str) -> str:
-    """Lowercase and replace runs of spaces with hyphens."""
-    return re.sub(r"\s+", "-", text.strip().lower())
-
-
-def _resolve_shop_network(start_dir: Path | None = None) -> str | None:
-    """Resolve the shop's docker network name from on-disk shop configuration.
-
-    This is the fallback network source (lead-ngzl): when no explicit
-    ``--network`` is given AND bc-manifest.yaml carries no shop-level
-    network/product field, the network is resolved from the shop's known
-    on-disk configuration rather than hard-erroring.  Per ADR-038 D3 the
-    precedence is: explicit override > manifest product > on-disk shop
-    network / hard default ``"shopsystem"``.
-
-    SEQUENCING (lead-ngzl / ADR-043 D2): the canonical single-source
-    ops-coordinates artifact (``bin/ops-coordinates``) does not exist yet
-    (lead-7wta).  In the interim this resolves the network name from, in
-    order:
-
-      1. ``compose.yaml`` ``networks:`` — the first network entry that
-         declares an explicit ``name:`` (the live shop wiring:
-         ``networks: shopsystem: {name: shopsystem}``);
-      2. the product slug from ``.claude/shop/name.md`` with a trailing
-         ``-product`` suffix stripped (``"shopsystem-product"`` ->
-         ``"shopsystem"``).
-
-    Returns the resolved network name, or ``None`` when no on-disk shop
-    network configuration is discoverable (the error path is then the
-    caller's responsibility when ``--network`` is also absent).
-    """
-    import yaml
-
-    base = start_dir or Path.cwd()
-
-    # (1) compose.yaml networks: <key>: {name: <network>}
-    compose_path = base / "compose.yaml"
-    if compose_path.exists():
-        try:
-            data = yaml.safe_load(compose_path.read_text())
-        except yaml.YAMLError:
-            data = None
-        if isinstance(data, dict):
-            networks = data.get("networks")
-            if isinstance(networks, dict):
-                for spec in networks.values():
-                    if isinstance(spec, dict):
-                        name = spec.get("name")
-                        if isinstance(name, str) and name.strip():
-                            return name.strip()
-
-    # (2) product slug from .claude/shop/name.md minus a "-product" suffix
-    name_md = base / ".claude" / "shop" / "name.md"
-    if name_md.exists():
-        raw = name_md.read_text().strip()
-        if raw:
-            token = raw.splitlines()[0].strip()
-            if token.endswith("-product"):
-                token = token[: -len("-product")]
-            if token:
-                return _slugify(token)
-
-    return None
-
-
-def _mitm_proxy_host(agent_vault_addr: str) -> str | None:
-    """Derive the broker's MITM-proxy host:port from AGENT_VAULT_ADDR.
-
-    bclaunch-5fji DEFECT 1: ``AGENT_VAULT_ADDR`` names the broker's *control
-    API* (e.g. ``https://agent-vault:14321`` — it carries a scheme and the
-    control-API port).  The credential-substituting MITM HTTPS proxy lives on
-    the SAME host but a DIFFERENT port (:14322).  This extracts the host from
-    the addr (stripping any scheme and the control-API port) and returns
-    ``<host>:14322``.  Returns ``None`` when no host can be derived (so the
-    caller skips building a proxy URL).
-    """
-    if not agent_vault_addr:
-        return None
-    from urllib.parse import urlparse
-
-    addr = agent_vault_addr.strip()
-    # urlparse needs a scheme to populate ``hostname``; add a throwaway one
-    # when the operator supplied a bare host:port.
-    parsed = urlparse(addr if "://" in addr else "tcp://" + addr)
-    host = parsed.hostname
-    if not host:
-        return None
-    return f"{host}:{AGENT_VAULT_MITM_PROXY_PORT}"
-
-
-def _build_clone_proxy_url(
-    agent_vault_addr: str | None,
-    agent_vault_token: str | None,
-    agent_vault_vault: str | None,
-) -> str | None:
-    """Build the brokered-clone HTTPS_PROXY URL (bclaunch-5fji DEFECT 1).
-
-    Shape (matching what ``agent-vault run`` uses):
-        http://<token>:<vault>@<host>:14322
-
-    * ``<host>`` is derived from ``agent_vault_addr`` with the MITM port
-      (:14322) substituted for the control-API port.
-    * userinfo is ``<token>:<vault>``, URL-encoded.  The agent token already
-      carries its operator-supplied agent-token prefix (per the
-      AGENT_VAULT_TOKEN scenarios), so it is used verbatim — NOT re-prefixed.
-
-    Returns ``None`` when addr / token / vault are not all available (no
-    operator credentials supplied), so the caller leaves the clone proxy unset
-    rather than constructing a half-formed URL.
-    """
-    if not (agent_vault_addr and agent_vault_token and agent_vault_vault):
-        return None
-    host = _mitm_proxy_host(agent_vault_addr)
-    if host is None:
-        return None
-    from urllib.parse import quote
-
-    # ``safe=""`` so any ``@`` / ``:`` / ``/`` inside the token or vault is
-    # percent-encoded and cannot corrupt the userinfo / authority boundary.
-    user = quote(agent_vault_token, safe="")
-    secret = quote(agent_vault_vault, safe="")
-    return f"http://{user}:{secret}@{host}"
-
-
-def _build_runtime_proxy_url(
-    agent_vault_broker: str | None,
-    agent_vault_addr: str | None,
-    agent_vault_token: str | None,
-    agent_vault_vault: str | None,
-) -> str | None:
-    """Build the CONTAINER's runtime HTTPS_PROXY value (bclaunch-3q12).
-
-    bclaunch-3q12 DEFECT: ``controller.launch`` previously set the container's
-    persistent ``HTTPS_PROXY`` to ``broker_address``, which DEFAULTS to
-    ``DEFAULT_AGENT_VAULT_BROKER`` (``http://agent-vault:14321`` — the agent-vault
-    *control API*) whenever the operator did not hand-build an explicit
-    ``--agent-vault-broker`` URL.  At runtime claude-the-agent then inherited a
-    proxy pointed at the control API (:14321), not the credential-substituting
-    MITM HTTPS proxy (:14322), and its brokered Anthropic calls failed
-    (``CONNECT tunnel failed`` / 405).
-
-    The runtime proxy is the same shape the brokered CLONE already derives
-    (``_build_clone_proxy_url``): ``http://<token>:<vault>@<host>:14322``.  This
-    completes the runtime half of the lead-5fji DEFECT 1 fix so a plain
-    ``bc-container launch`` with NO hand-built ``--agent-vault-broker`` URL sets
-    the runtime proxy at the MITM listener automatically.
-
-    Precedence (decided cleanly, bclaunch-3q12):
-
-      1. An explicit ``agent_vault_broker`` (operator passed ``--agent-vault-broker``
-         a full URL, or set ``BCLAUNCHER_AGENT_VAULT_BROKER``) WINS — it is used
-         verbatim.  This preserves the pre-existing operator workaround/override:
-         an operator may still pass any explicit proxy URL.
-      2. Otherwise the proxy is DERIVED (:14322 + ``<token>:<vault>`` userinfo,
-         the operator's agent-token used verbatim) from the env-file
-         ``AGENT_VAULT_ADDR`` / ``AGENT_VAULT_TOKEN`` / ``AGENT_VAULT_VAULT``
-         triple — the default for a plain brokered launch.
-
-    Returns ``None`` only when neither path yields a value (no explicit broker
-    AND the addr/token/vault triple is incomplete), so the caller can fall back
-    to the control-API default address for readiness probing without claiming a
-    derived runtime proxy that does not exist.
-    """
-    # (1) Explicit operator-supplied broker URL wins verbatim.
-    if agent_vault_broker:
-        return agent_vault_broker
-    # (2) Else derive the :14322 MITM proxy from the env-file triple — the same
-    #     derivation the clone exec already uses.
-    return _build_clone_proxy_url(
-        agent_vault_addr, agent_vault_token, agent_vault_vault
-    )
-
-
-def resolve_probe_broker_address(
-    explicit_broker: str | None,
-    system_slug: str | None,
-) -> str:
-    """Resolve the agent-vault broker address used for the READINESS PROBE.
-
-    lead-cs7k DEFECT (b): the readiness probe must target the broker by a host
-    the LAUNCHED CONTAINER's network can resolve.  The pre-fix code probed the
-    hardcoded ``DEFAULT_AGENT_VAULT_BROKER`` (``http://agent-vault:14321``),
-    which only resolves on the single-product ``shopsystem`` network.  For a
-    SECOND product the broker lives on the product network under a
-    slug-qualified name (e.g. ``dummyco-agent-vault``), so the probe host must
-    DERIVE from the resolved product slug.
-
-    Crucially this PROBE address is DECOUPLED from the runtime ``HTTPS_PROXY``
-    value (``_build_runtime_proxy_url``): pointing the probe at
-    ``dummyco-agent-vault:14321`` (the control-API reachability target) must
-    NOT clobber the ``http://<token>:<vault>@<host>:14322`` MITM proxy the
-    launched agent uses verbatim.  This function therefore returns ONLY the
-    probe address and is never fed into the runtime-proxy env.
-
-    Precedence:
-      1. An explicit operator-supplied broker URL wins verbatim (it already
-         names the broker the operator wants probed).
-      2. Else, when a product slug is known, the probe host is
-         ``<slug>-agent-vault`` on the control-API port.
-      3. Else (no slug) the unqualified default broker.
-    """
-    if explicit_broker:
-        return explicit_broker
-    if system_slug and system_slug != DEFAULT_SYSTEM_SLUG:
-        host = f"{_slugify(system_slug)}-{AGENT_VAULT_SERVICE_NAME}"
-        return f"http://{host}:{AGENT_VAULT_CONTROL_API_PORT}"
-    return DEFAULT_AGENT_VAULT_BROKER
-
-
-def _resolve_host_path(devcontainer_path: Path) -> Path:
-    """
-    If running inside a devcontainer where ``devcontainer_path`` lies on a bind
-    mount, return the corresponding host-visible source path.  Falls back to
-    ``devcontainer_path`` if no covering bind mount is found (i.e., not inside
-    a bind-mounted devcontainer).
-
-    Needed because mount sources passed to ``docker run`` are interpreted by
-    the host docker daemon — bind-mount sources like ``/home/vscode/.claude``
-    that are valid inside the launching container may not exist on the host.
-
-    Resolution order:
-      1. If ``BCLAUNCHER_HOST_HOME`` env var is set and the path is under the
-         current ``Path.home()``, substitute the env var for the home prefix.
-         This handles devcontainers whose home is bind-mounted from a host
-         user home that we know explicitly.
-      2. Otherwise walk ``/proc/self/mountinfo`` for the longest mount-point
-         prefix that covers the path, and substitute the source root.
-      3. Otherwise return the path unchanged.
-    """
-    try:
-        target = str(devcontainer_path.resolve())
-    except OSError:
-        target = str(devcontainer_path)
-    host_home = os.environ.get("BCLAUNCHER_HOST_HOME")
-    if host_home:
-        home_str = str(Path.home())
-        if target == home_str:
-            return Path(host_home)
-        if target.startswith(home_str + "/"):
-            return Path(host_home + target[len(home_str):])
-    best_mount_point: str | None = None
-    best_source_root: str | None = None
-    try:
-        with open("/proc/self/mountinfo", encoding="utf-8") as f:
-            for line in f:
-                parts = line.split()
-                if len(parts) < 5:
-                    continue
-                source_root = parts[3]
-                mount_point = parts[4]
-                if target == mount_point or target.startswith(mount_point + "/"):
-                    if best_mount_point is None or len(mount_point) > len(best_mount_point):
-                        best_mount_point = mount_point
-                        best_source_root = source_root
-    except OSError:
-        return devcontainer_path
-    if best_mount_point is None or best_source_root is None:
-        return devcontainer_path
-    if target == best_mount_point:
-        resolved = best_source_root
-    else:
-        suffix = target[len(best_mount_point):]
-        resolved = best_source_root + suffix
-    # mountinfo source roots may be dataset-relative (start with "/<user>/...")
-    # rather than absolute host paths.  When BCLAUNCHER_HOST_HOME is set, apply
-    # the same home-prefix substitution to the mountinfo result so it lands at
-    # an absolute host path.
-    if host_home:
-        user_leaf = "/" + Path(host_home).name
-        if resolved == user_leaf:
-            return Path(host_home)
-        if resolved.startswith(user_leaf + "/"):
-            return Path(host_home + resolved[len(user_leaf):])
-    return Path(resolved)
-
-
-class ManifestProductTypeError(Exception):
-    """Raised when a bc-manifest.yaml file's `product:` field is not a string.
-
-    Carries enough structured context that the CLI can format a single-line
-    error message naming the field, file path, expected type, and observed
-    type — without exposing the underlying ``AttributeError`` that would
-    otherwise surface from ``_slugify`` downstream.
-
-    Per lead-393: the launch path must convert this into a non-zero exit
-    with a clean stderr message; a Python traceback is only acceptable when
-    the operator opts in via ``--debug`` (or ``BCLAUNCHER_DEBUG=1``).
-    """
-
-    def __init__(
-        self,
-        manifest_path: Path,
-        observed_type: str,
-        *,
-        field: str = "product",
-        expected_type: str = "string",
-    ) -> None:
-        self.manifest_path = manifest_path
-        self.field = field
-        self.expected_type = expected_type
-        self.observed_type = observed_type
-        super().__init__(self.format_message())
-
-    def format_message(self) -> str:
-        """Single-line stderr-ready message naming field, file, types."""
-        return (
-            f"bc-manifest.yaml: field {self.field!r} in {self.manifest_path} "
-            f"has wrong type: expected {self.expected_type}, "
-            f"got {self.observed_type}"
-        )
-
-
-def _resolve_manifest_remote(manifest_path: Path, bc_name: str) -> str | None:
-    """Resolve the git remote URL registered for ``bc_name`` in bc-manifest.yaml.
-
-    lead-uiwu FACET 1.  bc-manifest.yaml registers each BC with its remote URL
-    and is "the declared source of remote URLs when launching BCs".  When a
-    ``bc-container launch`` carries NO ``--repo-url`` and NO
-    ``--workspace-mount``, the launcher resolves the BC's clone source from the
-    manifest's ``bcs[].remote`` entry for the named BC and clones it into
-    ``/workspace`` — rather than starting a container with a SILENT empty,
-    non-git ``/workspace``.
-
-    This is DISTINCT from ``_read_product_from_manifest`` (the manifest
-    ``product:`` field, used for network/system-slug derivation): this reads the
-    per-BC ``remote:`` field.  Returns the remote URL string for ``bc_name``, or
-    ``None`` when the manifest is absent / unparseable / carries no resolvable
-    remote for that BC, so the caller can apply the no-source loud-failure path
-    (FACET 1 negative, scenario 0b50d090c9cc3c45).
-    """
-    import yaml
-    from bc_launcher.manifest import load_manifest
-    if not manifest_path.exists():
-        return None
-    try:
-        manifest = load_manifest(manifest_path)
-    except (yaml.YAMLError, ValueError):
-        return None
-    for entry in manifest.entries:
-        if entry.name == bc_name:
-            remote = (entry.remote or "").strip()
-            return remote or None
-    return None
-
-
-def _read_product_from_manifest(manifest_path: Path) -> str | None:
-    """Read the 'product' field from a bc-manifest.yaml file.
-
-    Returns None if the file does not exist or has no 'product' key.
-    Raises yaml.YAMLError on parse failure.
-    Raises ManifestProductTypeError if 'product' is present but not a string.
-    """
-    import yaml
-    if not manifest_path.exists():
-        return None
-    data = yaml.safe_load(manifest_path.read_text())
-    if not isinstance(data, dict):
-        return None
-    if "product" not in data:
-        return None
-    product = data["product"]
-    if product is None:
-        # `product: null` (explicitly null) is just as broken as `product: 42`
-        # for the downstream slugify call — name the field rather than silently
-        # falling through to the "no network" branch, which would otherwise
-        # hide the malformed-field root cause behind an unrelated error.
-        raise ManifestProductTypeError(
-            manifest_path=manifest_path,
-            observed_type="null",
-        )
-    if not isinstance(product, str):
-        raise ManifestProductTypeError(
-            manifest_path=manifest_path,
-            observed_type=type(product).__name__,
-        )
-    return product
+from bc_launcher.manifest import (  # noqa: F401,E402
+    ManifestProductTypeError,
+    _resolve_manifest_remote,
+    _read_product_from_manifest,
+)
 
 
 # ---------------------------------------------------------------------------

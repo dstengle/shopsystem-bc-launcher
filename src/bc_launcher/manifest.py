@@ -455,3 +455,112 @@ class ManifestController:
                 lines.append(f"Warning: '{name}' is present in repos dir but not declared in manifest")
 
         return 0, "\n".join(lines) + ("\n" if lines else "")
+
+
+# ---------------------------------------------------------------------------
+# Launch-time manifest reads (moved from controller, Phase 1 decomposition).
+# ---------------------------------------------------------------------------
+
+
+class ManifestProductTypeError(Exception):
+    """Raised when a bc-manifest.yaml file's `product:` field is not a string.
+
+    Carries enough structured context that the CLI can format a single-line
+    error message naming the field, file path, expected type, and observed
+    type — without exposing the underlying ``AttributeError`` that would
+    otherwise surface from ``_slugify`` downstream.
+
+    Per lead-393: the launch path must convert this into a non-zero exit
+    with a clean stderr message; a Python traceback is only acceptable when
+    the operator opts in via ``--debug`` (or ``BCLAUNCHER_DEBUG=1``).
+    """
+
+    def __init__(
+        self,
+        manifest_path: Path,
+        observed_type: str,
+        *,
+        field: str = "product",
+        expected_type: str = "string",
+    ) -> None:
+        self.manifest_path = manifest_path
+        self.field = field
+        self.expected_type = expected_type
+        self.observed_type = observed_type
+        super().__init__(self.format_message())
+
+    def format_message(self) -> str:
+        """Single-line stderr-ready message naming field, file, types."""
+        return (
+            f"bc-manifest.yaml: field {self.field!r} in {self.manifest_path} "
+            f"has wrong type: expected {self.expected_type}, "
+            f"got {self.observed_type}"
+        )
+
+
+
+def _resolve_manifest_remote(manifest_path: Path, bc_name: str) -> str | None:
+    """Resolve the git remote URL registered for ``bc_name`` in bc-manifest.yaml.
+
+    lead-uiwu FACET 1.  bc-manifest.yaml registers each BC with its remote URL
+    and is "the declared source of remote URLs when launching BCs".  When a
+    ``bc-container launch`` carries NO ``--repo-url`` and NO
+    ``--workspace-mount``, the launcher resolves the BC's clone source from the
+    manifest's ``bcs[].remote`` entry for the named BC and clones it into
+    ``/workspace`` — rather than starting a container with a SILENT empty,
+    non-git ``/workspace``.
+
+    This is DISTINCT from ``_read_product_from_manifest`` (the manifest
+    ``product:`` field, used for network/system-slug derivation): this reads the
+    per-BC ``remote:`` field.  Returns the remote URL string for ``bc_name``, or
+    ``None`` when the manifest is absent / unparseable / carries no resolvable
+    remote for that BC, so the caller can apply the no-source loud-failure path
+    (FACET 1 negative, scenario 0b50d090c9cc3c45).
+    """
+    import yaml
+    from bc_launcher.manifest import load_manifest
+    if not manifest_path.exists():
+        return None
+    try:
+        manifest = load_manifest(manifest_path)
+    except (yaml.YAMLError, ValueError):
+        return None
+    for entry in manifest.entries:
+        if entry.name == bc_name:
+            remote = (entry.remote or "").strip()
+            return remote or None
+    return None
+
+
+
+def _read_product_from_manifest(manifest_path: Path) -> str | None:
+    """Read the 'product' field from a bc-manifest.yaml file.
+
+    Returns None if the file does not exist or has no 'product' key.
+    Raises yaml.YAMLError on parse failure.
+    Raises ManifestProductTypeError if 'product' is present but not a string.
+    """
+    import yaml
+    if not manifest_path.exists():
+        return None
+    data = yaml.safe_load(manifest_path.read_text())
+    if not isinstance(data, dict):
+        return None
+    if "product" not in data:
+        return None
+    product = data["product"]
+    if product is None:
+        # `product: null` (explicitly null) is just as broken as `product: 42`
+        # for the downstream slugify call — name the field rather than silently
+        # falling through to the "no network" branch, which would otherwise
+        # hide the malformed-field root cause behind an unrelated error.
+        raise ManifestProductTypeError(
+            manifest_path=manifest_path,
+            observed_type="null",
+        )
+    if not isinstance(product, str):
+        raise ManifestProductTypeError(
+            manifest_path=manifest_path,
+            observed_type=type(product).__name__,
+        )
+    return product
