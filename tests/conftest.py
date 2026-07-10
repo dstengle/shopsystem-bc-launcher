@@ -284,15 +284,6 @@ def _baked_placeholder_credentials() -> dict:
     return _baked_credentials_json()
 
 
-def _baked_oauth_access_token() -> str | None:
-    """The accessToken INSIDE the nested claudeAiOauth stanza, or None."""
-    creds = _baked_credentials_json()
-    oauth = creds.get("claudeAiOauth")
-    if isinstance(oauth, dict):
-        return oauth.get("accessToken")
-    return None
-
-
 def _agent_vault_launch(ctx, controller, fake_driver, tmp_path, bc_name,
                         *, startup_prompt=None, broker=None, dsn=None):
     """Run a launch under the agent-vault model and stash the result in ctx."""
@@ -839,11 +830,6 @@ def _strip_yaml_comments(text: str) -> str:
             continue
         out.append(line)
     return "\n".join(out)
-
-
-def _step_order(text, *needles):
-    """Return the index of the FIRST occurrence of each needle (or -1)."""
-    return [text.find(n) for n in needles]
 
 
 def _find_step(doc, pred):
@@ -1805,35 +1791,6 @@ def _parse_seed_create_fresh(script: str):
         before_remote_add,
         before_dolt_push,
     )
-
-
-def _model_create_fresh_seed_outcome(create_fresh_before_seed: bool) -> dict:
-    """Reference model of the empty-remote seed outcome, keyed on whether the
-    seed FIRST establishes a prefixed local dolt DB create-fresh from the
-    committed metadata.json BEFORE its `bd dolt push` seed step (lead-vb6j /
-    ROOT / GAP G).
-
-    create-fresh-BEFORE-seed present (POST-FIX): the seed pushes a PREFIXED
-    database, so refs/dolt/* seed WITH the prefix, the retried `bd bootstrap`
-    exits zero, and `bd create` yields a `<prefix>-<n>` id.
-
-    create-fresh-before-seed ABSENT (PRE-FIX / ROOT): `bd bootstrap` clone-hard-
-    fails the empty remote, so no prefixed local DB exists at seed time; the
-    seed's `bd dolt push` seeds nothing / a prefix-less DB, the retried
-    bootstrap hard-fails "contains no Dolt data", and `bd create` fails
-    "issue_prefix config is missing".
-    """
-    if create_fresh_before_seed:
-        return {
-            "dolt_refs_seeded": "present",
-            "bootstrap_exit": "zero",
-            "bd_create": "prefixed-id",
-        }
-    return {
-        "dolt_refs_seeded": "absent-or-prefixless",
-        "bootstrap_exit": "nonzero",
-        "bd_create": "issue_prefix-config-missing",
-    }
 
 
 _GAPH_SYNC_REMOTE_LINE = (
