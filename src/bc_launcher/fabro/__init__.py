@@ -46,6 +46,7 @@ from bc_launcher.fabro.provider import (  # noqa: F401
     _fabro_shim_start_script,
 )
 from bc_launcher.fabro.engage import (  # noqa: F401
+    _fabro_exec_env,
     _fabro_server_start_argv,
     _fabro_server_install_argv,
     _fabro_run_argv,

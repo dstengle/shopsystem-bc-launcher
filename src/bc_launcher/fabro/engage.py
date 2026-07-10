@@ -267,3 +267,17 @@ def _fabro_engage_script(bc_name: str) -> str:
         f"{{ nohup {server_argv} >{server_log} 2>&1 & }} && "
         f"{run_argv} >{run_log} 2>&1\n"
     )
+
+
+def _fabro_exec_env() -> dict[str, str]:
+    """The extra exec env the launcher pins on the fabro shim + engage execs.
+
+    lead-ze4w BUG#3: these execs run in a non-login `/bin/sh -c` that never
+    sources /etc/profile.d/agent-vault-ca.sh, so SSL_CERT_FILE (the python /
+    urllib CA-trust var) is empty and the shim's upstream HTTPS through
+    HTTPS_PROXY fails CERTIFICATE_VERIFY_FAILED.  Set SSL_CERT_FILE explicitly
+    to the SAME materialized broker CA path the clone path points git at via
+    GIT_SSL_CAINFO, so the shim + engage trust the agent-vault MITM CA without
+    a login shell.
+    """
+    return {SSL_CERT_FILE_ENV: AGENT_VAULT_CONTAINER_CA_PATH}
