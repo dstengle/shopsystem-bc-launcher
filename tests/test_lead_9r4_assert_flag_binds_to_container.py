@@ -41,7 +41,7 @@ from __future__ import annotations
 
 import pytest
 
-from tests.conftest import assert_docker_run_includes_flag
+from tests.steps.container import assert_docker_run_includes_flag
 from tests.fake_driver import FakeDockerDriver
 
 
