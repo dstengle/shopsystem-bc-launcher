@@ -77,6 +77,7 @@ from bc_launcher.agent_vault import (  # noqa: F401,E402
     _build_runtime_proxy_url,
 )
 from bc_launcher.fabro import (  # noqa: E402,F401  (re-export for compat)
+    _fabro_exec_env,
     FABRO_DEF_CONTAINER_DIR,
     FABRO_DEF_ASSET_SUBDIR,
     FABRO_DEF_FILES,

@@ -14,6 +14,7 @@ from bc_launcher.driver import DockerDriver, RegistryDriver
 from bc_launcher.controller._launch import LaunchMixin
 from bc_launcher.controller._provisioning import ProvisioningMixin
 from bc_launcher.controller._agent_session import AgentSessionMixin
+from bc_launcher.controller._engage import EngageMixin
 from bc_launcher.controller._commands import CommandsMixin
 
 
@@ -21,6 +22,7 @@ class BcContainerController(
     LaunchMixin,
     ProvisioningMixin,
     AgentSessionMixin,
+    EngageMixin,
     CommandsMixin,
 ):
     """Pure-Python controller for bc-container operations.
