@@ -6,11 +6,24 @@ running the controller under test, then assert on the recorded calls.
 """
 from __future__ import annotations
 
+import errno
+import os
 import re
 import subprocess
 from dataclasses import dataclass, field
 
 from bc_launcher.driver import ContainerInfo, ContainerMount
+
+# Linux MAX_ARG_STRLEN — the kernel's limit on the length of a SINGLE argv
+# element (128 KiB), independent of ARG_MAX (~2 MiB for the whole argv+env).
+# An execve whose single argument exceeds this fails with E2BIG
+# ("Argument list too long"), which Python surfaces as OSError(errno.E2BIG).
+# lead-m4zt models this boundary so a launcher that carries a >128 KiB content
+# blob (def-bundle / startup-prompt) as one argv element fails here exactly as
+# the real docker spawn does.  Modelled OPT-IN (see
+# ``enforce_argv_strlen_limit``) so it is inert for every pre-existing scenario
+# and only the oversized-bundle scenario arms it.
+MAX_ARG_STRLEN = 128 * 1024
 
 # Mirror the launcher's container-side constants so the fake can model
 # `.beads` ownership transfer (lead-kjv7 DEFECT 3) without importing
@@ -139,6 +152,11 @@ class ExecCall:
     # when the exec carries no extra env).  bclaunch-5fji uses this to pin the
     # launch-time clone's brokered HTTPS_PROXY + GIT_SSL_CAINFO trust env.
     env: dict[str, str] | None = None
+    # lead-m4zt: the payload streamed to the exec's STDIN (``docker exec -i``),
+    # or None when nothing is piped in.  The content-placement fix carries the
+    # def-bundle / oversized-prompt blob HERE — on STDIN, never on argv — so it
+    # is immune to the MAX_ARG_STRLEN per-argument kernel limit.
+    input: str | None = None
     # lead-lwk4 R7: True when the exec was issued DETACHED (``docker exec -d``),
     # so `subprocess.run` returns immediately without reading the exec's pipes.
     # The fabro ENGAGE is issued detached so `launch()` returns after starting
@@ -186,6 +204,21 @@ class FakeDockerDriver:
     def __init__(self) -> None:
         # Set of currently 'running' containers by name
         self._running: set[str] = set()
+
+        # lead-m4zt: when True, exec_run / run enforce the Linux MAX_ARG_STRLEN
+        # per-single-argument limit (128 KiB) and RAISE OSError(errno.E2BIG,
+        # "Argument list too long", "docker") when ANY single argv element
+        # exceeds it — modelling the kernel refusing an over-long argument at
+        # the docker spawn boundary.  A blob carried on STDIN (docker exec -i)
+        # is NOT an argv element and never trips this.  Opt-in so it is inert
+        # for every pre-existing scenario.
+        self._enforce_arg_limit: bool = False
+
+        # lead-m4zt: per-container tmux paste-buffer contents, loaded from the
+        # exec's STDIN by `tmux load-buffer -` (the off-argv prompt-injection
+        # path).  A subsequent `tmux paste-buffer` deposits this into the
+        # agent's input buffer, and a discrete Enter commits it.
+        self._tmux_loaded_buffer: dict[str, str] = {}
 
         # Canned tmux session map: container_name -> set of session names
         self._tmux_sessions: dict[str, set[str]] = {}
@@ -755,6 +788,34 @@ class FakeDockerDriver:
         else:
             self._running.discard(container_name)
             self._all_containers[container_name] = False
+
+    def enforce_argv_strlen_limit(self, enforce: bool = True) -> None:
+        """lead-m4zt: arm the Linux MAX_ARG_STRLEN per-argument kernel limit.
+
+        Once armed, ``exec_run`` / ``run`` raise
+        ``OSError(errno.E2BIG, "Argument list too long", "docker")`` when ANY
+        single argv element exceeds 128 KiB — exactly as the real docker spawn
+        does when a launcher carries an oversized content blob (def-bundle /
+        startup-prompt) as one argv element.  A blob streamed on STDIN
+        (``docker exec -i``) is not an argv element and never trips this.
+        """
+        self._enforce_arg_limit = enforce
+
+    def _assert_within_arg_strlen(self, argv: list[str]) -> None:
+        """Raise E2BIG if any single argv element exceeds MAX_ARG_STRLEN.
+
+        No-op unless ``enforce_argv_strlen_limit`` armed the limit.  Modelled
+        on the kernel's per-argument check: execve inspects EACH argument's
+        length and fails the WHOLE spawn with E2BIG if any one is too long,
+        independent of the total env size.
+        """
+        if not self._enforce_arg_limit:
+            return
+        for elem in argv:
+            if len(str(elem).encode("utf-8", "surrogatepass")) > MAX_ARG_STRLEN:
+                raise OSError(
+                    errno.E2BIG, os.strerror(errno.E2BIG), "docker"
+                )
 
     # --- lead-h755: runtime in-container tool-PATH model -------------------
     # A launched bc-base BC ALREADY has gh and agent-vault resolvable on PATH
@@ -1717,6 +1778,7 @@ class FakeDockerDriver:
         if network:
             cmd += ["--network", network]
         cmd.append(image)
+        self._assert_within_arg_strlen(cmd + ["sleep", "infinity"])
         self._last_command = cmd
         self._last_run_command = cmd
         self._run_commands_by_container[container_name] = list(cmd)
@@ -2043,7 +2105,15 @@ class FakeDockerDriver:
         user: str | None = None,
         env: dict[str, str] | None = None,
         detach: bool = False,
+        input: str | None = None,
     ) -> subprocess.CompletedProcess:
+        # lead-m4zt: model the kernel's MAX_ARG_STRLEN per-argument limit FIRST
+        # — before recording the call or mutating any state — so an over-long
+        # single argv element fails the spawn with E2BIG exactly as the real
+        # docker exec does (the container is left without the intended effect).
+        # A blob on STDIN (``input``) is not an argv element, so streaming it
+        # keeps every argv element small and never trips the limit.
+        self._assert_within_arg_strlen(command)
         self._op_seq += 1
         self.exec_calls.append(
             ExecCall(
@@ -2052,6 +2122,7 @@ class FakeDockerDriver:
                 user=user,
                 env=dict(env) if env else None,
                 detach=detach,
+                input=input,
             )
         )
         # lead-j351: record the op index of any send-keys carrying a non-empty
@@ -3000,6 +3071,17 @@ class FakeDockerDriver:
         """Return text sitting unsubmitted in the input buffer (or ``None``)."""
         state = self._agent_state.get(container_name)
         return state.get("buffer") if state else None
+
+    def agent_committed_input(self, container_name: str) -> str | None:
+        """lead-m4zt: the prompt text the modelled agent has COMMITTED and is
+        processing (its input was submitted), or None when the agent is idle at
+        an unsubmitted buffer.  This is the "the BC is engaged / online" signal
+        for the tmux engage path — the startup prompt reached the agent loop and
+        was submitted, regardless of whether it arrived via a small
+        send-keys text write or an off-argv load-buffer/paste-buffer stream.
+        """
+        state = self._agent_state.get(container_name)
+        return state.get("processing") if state else None
 
     def send_keys_calls(self, container_name: str) -> list[ExecCall]:
         """Return all recorded tmux send-keys exec calls for the container."""
