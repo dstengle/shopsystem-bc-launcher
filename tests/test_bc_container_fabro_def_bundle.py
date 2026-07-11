@@ -42,6 +42,9 @@ import re
 import tomllib
 from pathlib import Path
 
+import io
+import tarfile
+
 from bc_launcher.controller import (
     AGENT_CONTAINER_USER,
     BcContainerController,
@@ -49,10 +52,24 @@ from bc_launcher.controller import (
     FABRO_DEF_CONTAINER_DIR,
     FABRO_DEF_FILES,
     _fabro_def_asset_root,
+    _fabro_def_bundle_tar_b64,
     _fabro_def_install_script,
     _load_fabro_def_files,
 )
 from tests.fake_driver import FakeDockerDriver
+
+
+def _unpack_streamed_bundle(tar_b64: str) -> dict[str, bytes]:
+    """Decode the base64 tar the placement streams on STDIN into a
+    def-root-relative path -> bytes map, mirroring the in-container
+    `base64 -d | tar -x`."""
+    raw = base64.b64decode(tar_b64)
+    out: dict[str, bytes] = {}
+    with tarfile.open(fileobj=io.BytesIO(raw), mode="r") as tar:
+        for member in tar.getmembers():
+            if member.isfile():
+                out[member.name] = tar.extractfile(member).read()
+    return out
 
 
 BC_NAME = "shopsystem-messaging"
@@ -254,22 +271,31 @@ def test_launch_places_the_def_bundle_into_the_container(tmp_path):
     )
 
 
-def test_placement_script_carries_all_fifteen_files_byte_verbatim(tmp_path):
-    """The placement script base64-decodes each of the 15 def files into its
-    def-root-relative path under /workspace/.fabro/, byte-identical to the
+def test_placement_streams_all_fifteen_files_byte_verbatim_off_argv(tmp_path):
+    """The placement streams a base64 tar of the def bundle on the exec's
+    STDIN (never on the argv, lead-m4zt) that unpacks each of the def files into
+    its def-root-relative path under /workspace/.fabro/, byte-identical to the
     shipped asset."""
     driver = _launch(tmp_path)
     idx = _def_placement_call_index(driver)
     assert idx is not None
-    script = driver.exec_calls[idx].command[2]
+    call = driver.exec_calls[idx]
 
+    # The blob rides STDIN, not the argv — no argv element carries file content.
+    assert call.input is not None, "def bundle must be streamed on the exec STDIN"
+    script = call.command[2]
+    assert "base64 -d" in script and "tar -x" in script, (
+        f"placement script must base64-decode + untar the STDIN stream: {script!r}"
+    )
+
+    placed = _unpack_streamed_bundle(call.input)
     assets = _load_fabro_def_files()
+    assert set(placed) == set(EXPECTED_DEF_FILES), (
+        f"streamed bundle files mismatch: {set(placed) ^ set(EXPECTED_DEF_FILES)}"
+    )
     for rel in EXPECTED_DEF_FILES:
-        target = f"{FABRO_DEF_CONTAINER_DIR}/{rel}"
-        assert target in script, f"placement script does not target {target}"
-        b64 = base64.b64encode(assets[rel]).decode("ascii")
-        assert b64 in script, (
-            f"placement script does not carry byte-verbatim base64 for {rel}"
+        assert placed[rel] == assets[rel], (
+            f"streamed bundle does not carry byte-verbatim content for {rel}"
         )
 
 
@@ -279,13 +305,16 @@ def test_placement_writes_nothing_but_placeholder_into_the_container_vault(tmp_p
     driver = _launch(tmp_path)
     idx = _def_placement_call_index(driver)
     assert idx is not None
-    script = driver.exec_calls[idx].command[2]
+    call = driver.exec_calls[idx]
+    assert call.input is not None
 
     vault_bytes = _load_fabro_def_files()["vaults/default/secrets.json"]
     doc = json.loads(vault_bytes.decode())
     assert all(e.get("value") == "__PLACEHOLDER__" for e in doc.values())
-    # The exact placeholder-only vault bytes appear in the placement payload.
-    assert base64.b64encode(vault_bytes).decode("ascii") in script
+    # The exact placeholder-only vault bytes are what the streamed bundle
+    # unpacks into the container vault path.
+    placed = _unpack_streamed_bundle(call.input)
+    assert placed["vaults/default/secrets.json"] == vault_bytes
 
 
 def test_placement_runs_as_vscode_before_the_final_ownership_chown(tmp_path):
@@ -348,12 +377,35 @@ def test_placement_is_additive_tmux_launch_default_unchanged(tmp_path):
 # Script builder unit checks
 # ---------------------------------------------------------------------------
 
-def test_install_script_targets_all_files_and_makes_parent_dirs():
+def test_install_script_is_fixed_size_and_carries_no_file_content():
+    """lead-m4zt: the install script is a FIXED, tiny constant that unpacks the
+    STDIN-streamed tar into the dest dir — it carries NO file content, so its
+    length does not grow with the bundle and never approaches MAX_ARG_STRLEN."""
     files = _load_fabro_def_files()
-    script = _fabro_def_install_script(files)
+    script = _fabro_def_install_script()
     assert f"mkdir -p {FABRO_DEF_CONTAINER_DIR}" in script
+    assert "base64 -d" in script and "tar -x" in script
+    assert FABRO_DEF_CONTAINER_DIR in script
+    # No file content is inlined: the script is far smaller than any single
+    # file's base64, and smaller than the per-argument kernel limit.
+    from bc_launcher.controller import MAX_ARG_STRLEN
+    assert len(script.encode()) < 512
+    assert len(script.encode()) < MAX_ARG_STRLEN
     for rel in EXPECTED_DEF_FILES:
-        assert f"{FABRO_DEF_CONTAINER_DIR}/{rel}" in script
-    # nested subtrees (nodes/, vaults/default/) get their parent dir made
-    assert f"{FABRO_DEF_CONTAINER_DIR}/nodes" in script
-    assert f"{FABRO_DEF_CONTAINER_DIR}/vaults/default" in script
+        b64 = base64.b64encode(files[rel]).decode("ascii")
+        assert b64 not in script, (
+            f"install script must NOT inline file content for {rel} (E2BIG)"
+        )
+
+
+def test_streamed_tar_reproduces_every_file_and_subtree_byte_verbatim():
+    """The STDIN-streamed base64 tar packs every def file at its def-root path
+    (reproducing the nodes/ and vaults/default/ subtrees) byte-verbatim."""
+    files = _load_fabro_def_files()
+    placed = _unpack_streamed_bundle(_fabro_def_bundle_tar_b64(files))
+    assert set(placed) == set(EXPECTED_DEF_FILES)
+    for rel in EXPECTED_DEF_FILES:
+        assert placed[rel] == files[rel]
+    # the nested subtrees are represented by their member paths
+    assert any(name.startswith("nodes/") for name in placed)
+    assert any(name.startswith("vaults/default/") for name in placed)

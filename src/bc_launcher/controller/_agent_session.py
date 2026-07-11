@@ -11,6 +11,7 @@ from pathlib import Path
 from bc_launcher.constants import (
     AGENT_CONTAINER_USER,
     AGENT_TMUX_SESSION,
+    MAX_ARG_STRLEN,
     SHOPMSG_DSN_ENV,
 )
 from bc_launcher.controller._result import (
@@ -441,26 +442,63 @@ class AgentSessionMixin:
 
             # Step 5: inject the startup prompt into Claude Code's input.
             #
-            # Two DISCRETE send-keys invocations (text first, Enter second),
-            # NOT one invocation carrying both (lead-lez1 / lead-9q0f root
-            # cause).  A single `send-keys <text> Enter` exec_run concatenates
-            # the whole keystream into ONE pty write() syscall; Claude Code's
-            # TUI treats single-write payloads above ~70 bytes as a paste and
-            # absorbs the trailing CR into the input buffer instead of
-            # submitting.  Two exec_run calls are two discrete pty writes
-            # separated by a kernel-scheduling gap, which the TUI processes as
-            # a discrete submit keypress.
-            self._driver.exec_run(
-                container,
-                ["tmux", "send-keys", "-t", AGENT_TMUX_SESSION, startup_prompt],
-                user=AGENT_CONTAINER_USER,
-            )
-            self._driver.exec_run(
-                container,
-                ["tmux", "send-keys", "-t", AGENT_TMUX_SESSION, "Enter"],
-                user=AGENT_CONTAINER_USER,
-            )
-            out_lines.append(f"Injected startup prompt: {startup_prompt!r}\n")
+            # Two DISCRETE writes (the prompt text as a paste first, a bare
+            # Enter second), NOT one write carrying both (lead-lez1 / lead-9q0f
+            # root cause).  A single keystream concatenated into ONE pty write()
+            # is absorbed by the TUI as a paste above ~70 bytes, swallowing the
+            # trailing CR into the input buffer instead of submitting.  Two
+            # discrete writes separated by a kernel-scheduling gap are processed
+            # as a paste followed by a discrete submit keypress.
+            #
+            # lead-m4zt: a startup prompt above the Linux MAX_ARG_STRLEN 128 KiB
+            # per-single-argument limit can NOT ride the send-keys argv — the
+            # `docker exec` spawn fails E2BIG ("Argument list too long") and the
+            # prompt is never injected, so the BC never engages.  When the prompt
+            # exceeds the limit, stream it OFF the argv: `tmux load-buffer -`
+            # reads it from the exec's STDIN into a tmux buffer, `paste-buffer`
+            # deposits it into the agent pane as the SAME single paste write, and
+            # a discrete Enter send-keys submits it — preserving the
+            # two-discrete-writes submit contract with no argv-carried blob.  A
+            # normal-size prompt keeps the exact unchanged two-send-keys shape.
+            if len(startup_prompt.encode("utf-8")) > MAX_ARG_STRLEN:
+                startup_buffer = "bc-startup-prompt"
+                self._driver.exec_run(
+                    container,
+                    ["tmux", "load-buffer", "-b", startup_buffer, "-"],
+                    user=AGENT_CONTAINER_USER,
+                    input=startup_prompt,
+                )
+                self._driver.exec_run(
+                    container,
+                    ["tmux", "paste-buffer", "-t", AGENT_TMUX_SESSION,
+                     "-b", startup_buffer, "-d"],
+                    user=AGENT_CONTAINER_USER,
+                )
+                self._driver.exec_run(
+                    container,
+                    ["tmux", "send-keys", "-t", AGENT_TMUX_SESSION, "Enter"],
+                    user=AGENT_CONTAINER_USER,
+                )
+                out_lines.append(
+                    "Injected startup prompt "
+                    f"({len(startup_prompt.encode('utf-8'))} bytes) via a tmux "
+                    "buffer streamed on STDIN (off the docker argv, lead-m4zt)\n"
+                )
+            else:
+                self._driver.exec_run(
+                    container,
+                    ["tmux", "send-keys", "-t", AGENT_TMUX_SESSION,
+                     startup_prompt],
+                    user=AGENT_CONTAINER_USER,
+                )
+                self._driver.exec_run(
+                    container,
+                    ["tmux", "send-keys", "-t", AGENT_TMUX_SESSION, "Enter"],
+                    user=AGENT_CONTAINER_USER,
+                )
+                out_lines.append(
+                    f"Injected startup prompt: {startup_prompt!r}\n"
+                )
 
         return CommandResult(
             exit_code=0, stdout="".join(out_lines), stderr="".join(err_lines)

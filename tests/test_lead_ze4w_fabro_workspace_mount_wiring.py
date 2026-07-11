@@ -131,12 +131,18 @@ def _container(bc_name: str = BC_NAME) -> str:
 # --- record locators (bound to the launcher's ACTUAL exec_calls) -----------
 
 def _def_placement_call(driver: FakeDockerDriver):
+    # lead-m4zt: the def-bundle placement now base64-decodes + untars the bundle
+    # streamed on the exec's STDIN into the placement dir (the bytes ride STDIN,
+    # never the argv, to escape MAX_ARG_STRLEN E2BIG).  It is the sole `/bin/sh
+    # -c` placement that untars into FABRO_DEF_CONTAINER_DIR; the workflow.toml
+    # rewrite and settings write still use `printf %s <b64> | base64 -d > path`.
     for c in driver.exec_calls:
         if (
             c.command[:2] == ["/bin/sh", "-c"]
             and len(c.command) >= 3
-            and f"{FABRO_DEF_CONTAINER_DIR}/workflow.fabro" in c.command[2]
+            and "tar -x" in c.command[2]
             and "base64 -d" in c.command[2]
+            and FABRO_DEF_CONTAINER_DIR in c.command[2]
         ):
             return c
     return None

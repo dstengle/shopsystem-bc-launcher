@@ -49,6 +49,19 @@ SSL_CERT_FILE_ENV = "SSL_CERT_FILE"
 # @scenario_hash:ff370a4e7e9dac5e / e177655ba09a73fa).
 DOCKER_SOCKET_PATH = "/var/run/docker.sock"
 AGENT_TMUX_SESSION = "agent"
+
+# Linux MAX_ARG_STRLEN — the kernel's hard limit on the length of a SINGLE
+# argv element (128 KiB), independent of ARG_MAX (~2 MiB for the whole
+# argv+env).  An execve whose single argument exceeds this fails the WHOLE
+# spawn with E2BIG ("Argument list too long"); Python surfaces it as
+# OSError(errno.E2BIG).  A large content blob (the fabro def-bundle or the
+# startup prompt) carried as one argv element to `docker exec`/`docker run`
+# therefore blocks bring-up even when the total env is tiny (lead-m4zt).  The
+# fix keeps every argv element small by streaming the blob on STDIN; this
+# constant is the threshold above which the launcher routes a payload off the
+# argv rather than carrying it inline.
+MAX_ARG_STRLEN = 128 * 1024
+
 BC_IMAGE = "ghcr.io/dstengle/shopsystem-bc-base:latest"
 BC_IMAGE_ENV = "BC_IMAGE"
 SHOPMSG_DSN_ENV = "SHOPMSG_DSN"

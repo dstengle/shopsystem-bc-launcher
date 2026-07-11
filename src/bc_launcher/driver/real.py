@@ -89,7 +89,15 @@ class RealDockerDriver:
         user: str | None = None,
         env: dict[str, str] | None = None,
         detach: bool = False,
+        input: str | None = None,
     ) -> subprocess.CompletedProcess:
+        # lead-m4zt: ``input`` streams a payload to the exec's STDIN
+        # (``docker exec -i``) instead of carrying it on the argv.  This is how
+        # a large content blob (the fabro def-bundle or an oversized startup
+        # prompt) is placed WITHOUT tripping the Linux MAX_ARG_STRLEN 128 KiB
+        # per-single-argument limit (E2BIG "Argument list too long") — the blob
+        # rides stdin, every argv element stays small.
+        #
         # lead-lwk4 R7: ``detach=True`` issues ``docker exec -d`` so the docker
         # daemon runs the command in the BACKGROUND and the exec RETURNS
         # IMMEDIATELY without attaching to (or reading) the command's
@@ -102,6 +110,10 @@ class RealDockerDriver:
         cmd = ["docker", "exec"]
         if detach:
             cmd.append("-d")
+        if input is not None:
+            # Keep the exec's STDIN open so the piped payload reaches the
+            # in-container command (`docker exec -i`).
+            cmd.append("-i")
         if user is not None:
             cmd += ["-u", user]
         if env:
@@ -109,7 +121,9 @@ class RealDockerDriver:
                 cmd += ["-e", f"{key}={val}"]
         cmd += [container_name] + command
         self._last_command = cmd
-        return subprocess.run(cmd, capture_output=True, text=True, check=False)
+        return subprocess.run(
+            cmd, input=input, capture_output=True, text=True, check=False
+        )
 
     def exec_interactive(
         self,

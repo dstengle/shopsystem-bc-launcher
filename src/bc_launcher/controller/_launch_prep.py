@@ -23,6 +23,7 @@ from bc_launcher.fabro import (
     FABRO_SHIM_HOST,
     FABRO_SHIM_PORT,
     FABRO_WORKFLOW_TOML_CONTAINER_PATH,
+    _fabro_def_bundle_tar_b64,
     _fabro_def_install_script,
     _fabro_exec_env,
     _fabro_settings_install_script,
@@ -166,19 +167,26 @@ class LaunchPrepMixin:
         """Place the 15 packaged fabro loop def-bundle asset files into the
         launched container at FABRO_DEF_CONTAINER_DIR (lead-h2bj, ADR-051).
 
-        Placed via a single exec_run running a base64-decode script (the driver
-        exposes no `docker cp` seam), so each file lands byte-identical to the
-        shipped asset regardless of content.  NATIVE-VAULT INVARIANT (ADR-049):
-        the placed vaults/default/secrets.json is the `__PLACEHOLDER__`-only
-        asset; placement introduces no real secret.  Run as vscode so the def
-        is agent-owned; a failed placement is a boot-convenience warning, not a
-        fatal abort that strands a healthy container with no agent.
+        Placed via a single exec_run whose FIXED, tiny `/bin/sh -c` script
+        base64-decodes and untars the bundle streamed on the exec's STDIN
+        (`docker exec -i`), so the def-bundle bytes NEVER ride the argv.  This
+        is the lead-m4zt E2BIG fix: the real 18-file bundle exceeds 136 KiB,
+        past the Linux MAX_ARG_STRLEN 128 KiB per-single-argument limit, so the
+        old base64-INLINED-on-argv script failed the spawn with E2BIG and the
+        container got no def.  Each file still lands byte-identical to the
+        shipped asset (tar preserves content verbatim).  NATIVE-VAULT INVARIANT
+        (ADR-049): the placed vaults/default/secrets.json is the
+        `__PLACEHOLDER__`-only asset; placement introduces no real secret.  Run
+        as vscode so the def is agent-owned; a failed placement is a
+        boot-convenience warning, not a fatal abort that strands a healthy
+        container with no agent.
         """
         def_files = _load_fabro_def_files()
         def_place_result = self._driver.exec_run(
             container,
-            ["/bin/sh", "-c", _fabro_def_install_script(def_files)],
+            ["/bin/sh", "-c", _fabro_def_install_script()],
             user=AGENT_CONTAINER_USER,
+            input=_fabro_def_bundle_tar_b64(def_files),
         )
         if def_place_result.returncode != 0:
             err_lines.append(

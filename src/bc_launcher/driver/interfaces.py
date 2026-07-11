@@ -97,8 +97,19 @@ class DockerDriver(Protocol):
         command: list[str],
         user: str | None = None,
         env: dict[str, str] | None = None,
+        detach: bool = False,
+        input: str | None = None,
     ) -> subprocess.CompletedProcess:
         """Execute a command inside a running container.
+
+        If ``input`` is provided it is streamed to the exec's STDIN
+        (``docker exec -i``) instead of being carried on the argv.  This is
+        REQUIRED for placing a large content blob (the fabro def-bundle, or an
+        oversized startup prompt) WITHOUT tripping the Linux MAX_ARG_STRLEN
+        128 KiB per-single-argument limit — a blob carried as one argv element
+        fails the spawn with E2BIG ("Argument list too long") even when the
+        total env is tiny, so the blob must leave the argv entirely (lead-m4zt).
+        ``detach=True`` issues ``docker exec -d`` (background, returns at once).
 
         If ``user`` is provided, run the command as that container user
         (``docker exec -u <user>``).  This is required for tmux client

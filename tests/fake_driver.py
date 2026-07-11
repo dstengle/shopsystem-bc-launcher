@@ -2206,6 +2206,27 @@ class FakeDockerDriver:
                 pane = self._tmux_pane.get(container_name, "")
             return subprocess.CompletedProcess(command, 0, pane, "")
 
+        # lead-m4zt: `tmux load-buffer -` reads the off-argv prompt from the
+        # exec's STDIN into a named tmux buffer.  The blob rides ``input``
+        # (docker exec -i), never the argv, so it is immune to MAX_ARG_STRLEN.
+        if command[:2] == ["tmux", "load-buffer"]:
+            self._tmux_loaded_buffer[container_name] = input or ""
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+        # lead-m4zt: `tmux paste-buffer` deposits the loaded buffer into the
+        # agent's input as a SINGLE paste write (the same paste shape a text
+        # send-keys produces) — unsubmitted, exactly like the text-token half of
+        # the two-discrete-writes submit.  The discrete Enter send-keys that
+        # follows commits it via the existing bare-Enter model below.
+        if command[:2] == ["tmux", "paste-buffer"]:
+            state = self._agent_state.setdefault(
+                container_name, {"buffer": None, "processing": None}
+            )
+            pasted = self._tmux_loaded_buffer.get(container_name, "")
+            if pasted:
+                state["buffer"] = pasted
+            return subprocess.CompletedProcess(command, 0, "", "")
+
         # Simulate tmux send-keys with faithful submit semantics (see
         # _agent_state above).  Strip the "-t <session>" target tokens, then
         # treat the remaining tokens as the send-keys payload.  Input is
