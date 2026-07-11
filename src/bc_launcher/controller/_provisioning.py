@@ -304,15 +304,18 @@ class ProvisioningMixin:
 
         self._refresh_shop_templates(container, out_lines, err_lines)
 
-        # Self-contained fabro loop def bundle placement (lead-h2bj — S2
-        # def-bundle delivery, ADR-051).  Placed on EVERY clone launch
-        # (tmux AND fabro) so the cloned container carries the def runnable
-        # FROM THE DEF ALONE.  On the fabro path the ADDITIONAL wiring
-        # (workflow.toml rewrite + shim + settings) runs OUTSIDE this guard
-        # via _place_fabro_def_and_wiring(place_def=False) — see lead-ze4w
-        # BUG#1 below.  Runs BEFORE the FINAL ownership assertion so the
-        # final chown hands the freshly-placed .fabro/ tree to the agent.
-        self._place_fabro_def_bundle(container, out_lines, err_lines)
+        # Self-contained fabro loop def bundle delivery (lead-ona9, scenario
+        # 7700eea079ffe1d8 — reworked lead-h2bj / ADR-051 delivery).  The def is
+        # now delivered by the shop-templates POUR just above
+        # (`_refresh_shop_templates`), which emits "/workspace/.fabro/" EXACTLY
+        # as it emits ".claude/skills/" — the fabro loop def is no longer
+        # streamed from a BAKED asset off the docker exec STDIN.  So there is NO
+        # separate `_place_fabro_def_bundle` step on the clone path anymore; the
+        # pour is the sole delivery surface (`src/bc_launcher/assets/fabro-def/`
+        # remains only as the def SOURCE mirror).  On the fabro path the
+        # ADDITIONAL wiring (workflow.toml rewrite + shim + settings) still runs
+        # OUTSIDE this guard via _place_fabro_def_and_wiring(place_def=False),
+        # operating on the poured "/workspace/.fabro/" — see lead-ze4w BUG#1.
 
         # FINAL ownership assertion (lead-mf15, scenario
         # @scenario_hash:d9e4ce60e03df361).  TIGHTENS the lead-d64 /

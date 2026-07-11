@@ -67,6 +67,14 @@ LABEL shopsystem.shop-templates.version=${SHOP_TEMPLATES_VERSION}
 # shop-templates takes its version from the SHOP_TEMPLATES_VERSION build ARG
 # (default above) which the centralized scheduled poll bumps in place to the
 # resolved latest release (lead-czwo).
+# lead-ona9 (scenario 7700eea079ffe1d8): the fabro loop def bundle (formerly
+# baked from src/bc_launcher/assets/fabro-def/) is NO LONGER a baked delivery
+# surface in this image.  The shopsystem-bc-launcher install below no longer
+# carries the def as wheel package-data (pruned in pyproject.toml), and NOTHING
+# in this Dockerfile COPYs or bakes the fabro-def tree.  Instead the def is
+# delivered at launch by the shop-templates pour (installed just above), which
+# emits "/workspace/.fabro/" exactly as it emits ".claude/skills/".  The repo's
+# src/bc_launcher/assets/fabro-def/ remains only as the def SOURCE mirror.
 RUN pip install --no-cache-dir \
     "shopsystem-messaging @ git+https://github.com/dstengle/shopsystem-messaging.git@v0.4.4" \
     "scenarios @ git+https://github.com/dstengle/shopsystem-scenarios@v0.2.0" \

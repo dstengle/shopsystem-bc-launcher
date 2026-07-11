@@ -684,6 +684,14 @@ class FakeDockerDriver:
         # false-success "Poured ..." log it used to append on that failure is
         # now caught because the controller checks the result and fails.
         self._workspace_skills: dict[str, set[str]] = {}
+        # lead-ona9 — the workspace's "/workspace/.fabro/" fabro loop def,
+        # modelled per container as a present/absent flag.  Delivered by the
+        # SAME shop-templates pour that emits ".claude/skills/" (scenario
+        # 7700eea079ffe1d8): a successful `shop-templates update --target
+        # /workspace` emits it, exactly as it emits the skill-group.  Empty /
+        # missing means the pour has NOT delivered it (e.g. a workspace-mount
+        # launch that skips the pour, or a failed pour).
+        self._workspace_fabro: dict[str, bool] = {}
         # The bc-base image's shop-type marker per container ("bc"/"lead"),
         # read by the controller from `.claude/shop/type.md`.  Defaults to
         # "bc"; tests may override via set_shop_type().
@@ -2848,6 +2856,11 @@ class FakeDockerDriver:
                 self._workspace_skills.setdefault(container_name, set()).update(
                     self.SHOP_TEMPLATES_SKILL_GROUP
                 )
+                # lead-ona9 (7700eea079ffe1d8): the SAME pour that emits
+                # ".claude/skills/" also emits "/workspace/.fabro/" — the fabro
+                # loop def is delivered by the pour exactly as the skill-group
+                # is, no longer streamed from a baked asset.
+                self._workspace_fabro[container_name] = True
             return subprocess.CompletedProcess(command, 0, "", "")
 
         # Simulate `chown [-R] <user>:<group> <path...>` — lead-kjv7 DEFECT 3.
@@ -2934,6 +2947,12 @@ class FakeDockerDriver:
     def workspace_skills(self, container_name: str) -> set[str]:
         """Return the skill-group entries present in the workspace .claude/skills/."""
         return set(self._workspace_skills.get(container_name, set()))
+
+    def workspace_fabro(self, container_name: str) -> bool:
+        """True if the shop-templates pour has emitted "/workspace/.fabro/" into
+        the workspace (lead-ona9, 7700eea079ffe1d8) — the fabro loop def
+        delivered by the SAME pour that emits ".claude/skills/"."""
+        return bool(self._workspace_fabro.get(container_name, False))
 
     def exec_interactive(
         self,
@@ -3147,15 +3166,25 @@ class FakeDockerDriver:
     # RED here (the byte-unchanged assertion fails), giving the scenario teeth.
 
     def set_host_tree_snapshot(
-        self, host_path: str, beads_registry: str, claude_skills: str
+        self,
+        host_path: str,
+        beads_registry: str,
+        claude_skills: str,
+        fabro_def: str | None = None,
     ) -> None:
-        """Record the host working tree's committed `.beads` registry blob and
-        poured `.claude/skills` content prior to launch (lead-zxtk)."""
+        """Record the host working tree's committed `.beads` registry blob,
+        poured `.claude/skills` content, and (lead-ona9) committed
+        `/workspace/.fabro/` def content prior to launch (lead-zxtk).
+
+        ``fabro_def`` models a committed `.fabro/` tree exactly as a
+        poured-then-committed BC repo carries it; on a workspace-mount launch it
+        must be presented byte-unchanged (the pour is skipped)."""
         if not hasattr(self, "_host_tree_snapshot"):
             self._host_tree_snapshot: dict[str, dict[str, str]] = {}
         self._host_tree_snapshot[host_path] = {
             "beads": beads_registry,
             "skills": claude_skills,
+            "fabro": fabro_def or "",
         }
 
     def bd_bootstrap_ran(self, container_name: str) -> bool:
