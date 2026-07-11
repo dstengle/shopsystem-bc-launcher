@@ -440,12 +440,15 @@ class LaunchMixin:
         # either clone or workspace-mount — is UNCHANGED (no fabro writes, no
         # placement, tree presented unchanged).
         #
-        # place_def: on the CLONE path the def bundle was ALREADY placed inside
-        # the clone guard (lead-h2bj, every clone launch), so we do NOT re-place
-        # it here — only the fabro-specific wiring runs.  On the WORKSPACE-MOUNT
-        # path the clone guard never ran, so the def bundle must be placed here
-        # too.  Placement runs BEFORE the engage in `_start_agent_session`, so
-        # the fabro server + run find the placed def + settings.
+        # place_def: on the CLONE path the def is now DELIVERED BY THE
+        # SHOP-TEMPLATES POUR inside the clone guard (lead-ona9, scenario
+        # 7700eea079ffe1d8 — the pour emits "/workspace/.fabro/" parallel to
+        # ".claude/skills/"), so we do NOT stream-place it here — only the
+        # fabro-specific wiring runs on the poured def.  On the WORKSPACE-MOUNT
+        # path the clone guard never ran AND the pour is skipped, so the def
+        # bundle is placed here from the committed/source def.  Placement runs
+        # BEFORE the engage in `_start_agent_session`, so the fabro server + run
+        # find the def + settings.
         if launch_path == LAUNCH_PATH_FABRO:
             already_placed = bool(repo_url and not workspace_mount)
             self._place_fabro_def_and_wiring(

@@ -4,15 +4,18 @@ Unit tests pinning the self-contained fabro loop def-bundle delivery
 
 Background
 ----------
-shopsystem-bc-launcher ships the bc-shop Implementer->Reviewer loop fabro
-def (ADR-051) as packaged asset files under
-``src/bc_launcher/assets/fabro-def/`` and PLACES them into every launched
-container at ``/workspace/.fabro/`` so the container carries a
-self-contained fabro def runnable FROM THE DEF ALONE — nothing fetched at
-run time.
+shopsystem-bc-launcher keeps the bc-shop Implementer->Reviewer loop fabro
+def (ADR-051) as SOURCE-mirror asset files under
+``src/bc_launcher/assets/fabro-def/``.  Since lead-ona9 (scenario
+7700eea079ffe1d8) the def is DELIVERED into every launched container at
+``/workspace/.fabro/`` by the shop-templates POUR — exactly as the pour emits
+``.claude/skills/`` — and is NO LONGER streamed from a baked wheel asset off
+the docker exec STDIN.  The container still carries a self-contained fabro def
+runnable FROM THE DEF ALONE, now sourced from the pour.
 
-These tests guard the delivery so a future refactor cannot silently drop a
-def file, mangle its bytes, break the placement wiring, or leak a real
+These tests guard the SOURCE mirror (files present, verbatim bytes, vault
+placeholder-only) and the pour-delivery wiring so a future refactor cannot
+silently drop a def file, mangle its bytes, re-bake the def, or leak a real
 credential into the fabro vault.  They are plain unit tests (NO
 ``@scenario_hash`` tag): the block-only scenario pin is a SEPARATE companion
 dispatch (lead-ky63, @scenario_hash:2dfefe2ba81e418d) and is NOT authored
@@ -20,16 +23,16 @@ here.
 
 Invariants pinned
 -----------------
-* All 15 def-root files are present as launcher assets, verbatim-shaped
-  (acceptance criterion 0).
-* ``bc-container launch`` places the 15 files into the container at
-  ``/workspace/.fabro/`` (acceptance criterion 1).
+* All 15 def-root files are present as launcher SOURCE-mirror assets,
+  verbatim-shaped (acceptance criterion 0).
+* ``bc-container launch`` DELIVERS ``/workspace/.fabro/`` via the shop-templates
+  pour, not a baked-asset stream (lead-ona9 — reworked criterion 1).
 * The def's native fabro vault (``vaults/default/secrets.json``) holds ONLY
   ``__PLACEHOLDER__`` for every slot — no real credential (ADR-049,
   acceptance criterion 3).
 * Every ``prompt_file=`` node reference in ``workflow.fabro`` resolves to a
   present node asset (structural "runnable-from-the-def-alone" check).
-* The placement is ADDITIVE: the tmux launch default and the prior
+* The pour delivery is ADDITIVE: the tmux launch default and the prior
   provisioning steps are unchanged (acceptance criterion 4).
 
 The launch tests use FakeDockerDriver and require no live Docker.
@@ -259,118 +262,60 @@ def _def_placement_call_index(driver: FakeDockerDriver):
     return None
 
 
-def test_launch_places_the_def_bundle_into_the_container(tmp_path):
-    """bc-container launch execs a placement step writing the def bundle to
-    /workspace/.fabro/ (criterion 1)."""
+def test_launch_delivers_the_def_via_the_shop_templates_pour(tmp_path):
+    """lead-ona9 (reworked criterion 1): bc-container launch DELIVERS
+    /workspace/.fabro/ via the shop-templates pour — the pour runs
+    `shop-templates update --target /workspace` inside the workspace and emits
+    the fabro def, exactly as it emits .claude/skills/."""
     driver = _launch(tmp_path)
-    idx = _def_placement_call_index(driver)
-    assert idx is not None, (
-        "Expected a def-bundle placement exec_run targeting "
-        f"{FABRO_DEF_CONTAINER_DIR}.  exec_calls: "
-        f"{[c.command[:3] for c in driver.exec_calls]!r}"
+    container = f"bc-{BC_NAME}"
+
+    pour = [
+        c for c in driver.exec_calls
+        if c.container == container
+        and c.command[:2] == ["shop-templates", "update"]
+        and "--target" in c.command
+        and c.command[c.command.index("--target") + 1] == "/workspace"
+    ]
+    assert pour, (
+        "Expected a `shop-templates update --target /workspace` pour to deliver "
+        f"the fabro def. exec_calls: {[c.command[:3] for c in driver.exec_calls]!r}"
+    )
+    assert driver.workspace_fabro(container), (
+        "the shop-templates pour must emit /workspace/.fabro/ at launch"
     )
 
 
-def test_placement_streams_all_fifteen_files_byte_verbatim_off_argv(tmp_path):
-    """The placement streams a base64 tar of the def bundle on the exec's
-    STDIN (never on the argv, lead-m4zt) that unpacks each of the def files into
-    its def-root-relative path under /workspace/.fabro/, byte-identical to the
-    shipped asset."""
+def test_clone_launch_does_not_stream_the_def_off_a_baked_asset(tmp_path):
+    """lead-ona9 retirement teeth: the CLONE path no longer streams the def
+    bundle from a baked asset (base64 tar over docker exec STDIN targeting
+    /workspace/.fabro/).  Delivery is the pour, so NO such placement exec runs.
+
+    TEETH: reintroduce `_place_fabro_def_bundle` on the clone path -> a base64
+    tar def-placement exec targeting FABRO_DEF_CONTAINER_DIR reappears -> RED
+    (the def is baked/streamed again, contradicting the pour delivery)."""
     driver = _launch(tmp_path)
-    idx = _def_placement_call_index(driver)
-    assert idx is not None
-    call = driver.exec_calls[idx]
-
-    # The blob rides STDIN, not the argv — no argv element carries file content.
-    assert call.input is not None, "def bundle must be streamed on the exec STDIN"
-    script = call.command[2]
-    assert "base64 -d" in script and "tar -x" in script, (
-        f"placement script must base64-decode + untar the STDIN stream: {script!r}"
+    assert _def_placement_call_index(driver) is None, (
+        "the clone path must NOT stream the def bundle from a baked asset; "
+        "the def is delivered by the shop-templates pour. Offending exec: "
+        f"{driver.exec_calls[_def_placement_call_index(driver)].command[:3]!r}"
     )
 
-    placed = _unpack_streamed_bundle(call.input)
-    assets = _load_fabro_def_files()
-    assert set(placed) == set(EXPECTED_DEF_FILES), (
-        f"streamed bundle files mismatch: {set(placed) ^ set(EXPECTED_DEF_FILES)}"
-    )
-    for rel in EXPECTED_DEF_FILES:
-        assert placed[rel] == assets[rel], (
-            f"streamed bundle does not carry byte-verbatim content for {rel}"
-        )
 
-
-def test_placement_writes_nothing_but_placeholder_into_the_container_vault(tmp_path):
-    """The vault bytes placed into the container are the __PLACEHOLDER__-only
-    asset — no real secret is introduced by placement (ADR-049)."""
+def test_pour_delivery_is_additive_tmux_launch_default_unchanged(tmp_path):
+    """ADDITIVE (criterion 4): the pour delivery of /workspace/.fabro/ does not
+    disturb the tmux launch default — a tmux new-session still starts the
+    agent, and the fabro def is still delivered (now by the pour)."""
     driver = _launch(tmp_path)
-    idx = _def_placement_call_index(driver)
-    assert idx is not None
-    call = driver.exec_calls[idx]
-    assert call.input is not None
-
-    vault_bytes = _load_fabro_def_files()["vaults/default/secrets.json"]
-    doc = json.loads(vault_bytes.decode())
-    assert all(e.get("value") == "__PLACEHOLDER__" for e in doc.values())
-    # The exact placeholder-only vault bytes are what the streamed bundle
-    # unpacks into the container vault path.
-    placed = _unpack_streamed_bundle(call.input)
-    assert placed["vaults/default/secrets.json"] == vault_bytes
-
-
-def test_placement_runs_as_vscode_before_the_final_ownership_chown(tmp_path):
-    """The placement runs as the vscode agent user and BEFORE the final
-    /workspace ownership assertion, so the placed .fabro/ tree is handed to
-    the agent (ordering + ownership check)."""
-    driver = _launch(tmp_path)
-    idx = _def_placement_call_index(driver)
-    assert idx is not None
-    assert driver.exec_calls[idx].user == AGENT_CONTAINER_USER
-
-    # A `chown -R vscode:vscode /workspace` runs AFTER the placement and
-    # BEFORE the tmux new-session, covering the freshly-placed .fabro/ tree.
-    def is_ws_chown(c) -> bool:
-        cmd = c.command
-        return (
-            bool(cmd)
-            and cmd[0] == "chown"
-            and "-R" in cmd
-            and f"{AGENT_CONTAINER_USER}:{AGENT_CONTAINER_USER}" in cmd
-            and any(a.rstrip("/") == CONTAINER_WORKSPACE for a in cmd)
-        )
-
-    tmux_idx = next(
-        (
-            i for i, c in enumerate(driver.exec_calls)
-            if c.command[:3] == ["tmux", "new-session", "-d"]
-        ),
-        None,
-    )
-    assert tmux_idx is not None
-    chown_after = next(
-        (
-            i for i, c in enumerate(driver.exec_calls)
-            if is_ws_chown(c) and i > idx and i < tmux_idx
-        ),
-        None,
-    )
-    assert chown_after is not None, (
-        "Expected a `chown -R vscode:vscode /workspace` AFTER the def "
-        "placement and BEFORE tmux new-session so the placed .fabro/ tree "
-        "is agent-owned."
-    )
-
-
-def test_placement_is_additive_tmux_launch_default_unchanged(tmp_path):
-    """ADDITIVE (criterion 4): the def-bundle placement does not disturb the
-    tmux launch default — a tmux new-session still starts the agent, and the
-    placement is a pure add (present in the exec sequence, retiring nothing)."""
-    driver = _launch(tmp_path)
+    container = f"bc-{BC_NAME}"
     # The tmux agent session still starts (launch default unchanged).
     assert any(
         c.command[:3] == ["tmux", "new-session", "-d"] for c in driver.exec_calls
     ), "tmux new-session (the launch default) must still run"
-    # The placement step is present (purely additive).
-    assert _def_placement_call_index(driver) is not None
+    # The fabro def is still delivered (purely additive), now via the pour.
+    assert driver.workspace_fabro(container), (
+        "the pour must still deliver /workspace/.fabro/ (additive)"
+    )
 
 
 # ---------------------------------------------------------------------------

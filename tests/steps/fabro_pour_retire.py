@@ -23,6 +23,7 @@ The Given/When steps are reused from tests/steps/container.py.
 """
 from __future__ import annotations
 
+import tomllib
 from pathlib import Path
 
 from pytest_bdd import then
@@ -175,12 +176,22 @@ def then_workspace_mount_skips_pour(ctx, tmp_path):
 )
 def then_fabro_def_unbaked(ctx, fake_driver):
     # (a) ABSENT from the packaged wheel: the pyproject package-data must NOT
-    #     ship the fabro-def bundle.
-    pyproject = (_REPO_ROOT / "pyproject.toml").read_text()
-    assert "fabro-def" not in pyproject, (
-        "pyproject.toml still ships the fabro-def bundle as package-data; it "
-        "must be pruned so the wheel no longer bakes the def (it is delivered "
-        f"by the shop-templates pour). pyproject:\n{pyproject}"
+    #     enumerate the fabro-def bundle (parse the actual TOML package-data
+    #     globs, not documenting comments).
+    doc = tomllib.loads((_REPO_ROOT / "pyproject.toml").read_text())
+    package_data = (
+        doc.get("tool", {}).get("setuptools", {}).get("package-data", {})
+    )
+    baked_globs = [
+        glob
+        for globs in package_data.values()
+        for glob in globs
+        if "fabro-def" in glob
+    ]
+    assert not baked_globs, (
+        "pyproject.toml still ships the fabro-def bundle as package-data "
+        f"({baked_globs}); it must be pruned so the wheel no longer bakes the "
+        "def (it is delivered by the shop-templates pour)."
     )
 
     # (b) ABSENT from the bc-base image: the Dockerfile must NOT bake the

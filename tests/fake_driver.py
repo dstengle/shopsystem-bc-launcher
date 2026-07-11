@@ -2856,6 +2856,11 @@ class FakeDockerDriver:
                 self._workspace_skills.setdefault(container_name, set()).update(
                     self.SHOP_TEMPLATES_SKILL_GROUP
                 )
+                # lead-ona9 (7700eea079ffe1d8): the SAME pour that emits
+                # ".claude/skills/" also emits "/workspace/.fabro/" — the fabro
+                # loop def is delivered by the pour exactly as the skill-group
+                # is, no longer streamed from a baked asset.
+                self._workspace_fabro[container_name] = True
             return subprocess.CompletedProcess(command, 0, "", "")
 
         # Simulate `chown [-R] <user>:<group> <path...>` — lead-kjv7 DEFECT 3.
