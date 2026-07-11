@@ -9,7 +9,6 @@ ABOVE this subpackage — so the asset root resolves via ``__file__`` with
 """
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 from bc_launcher.fabro.constants import *  # noqa: F401,F403  (sibling constants)
@@ -45,30 +44,63 @@ def _load_fabro_def_files() -> dict[str, bytes]:
 
 
 def _fabro_def_install_script(
-    files: dict[str, bytes],
     dest_dir: str = FABRO_DEF_CONTAINER_DIR,
 ) -> str:
-    """Build a ``/bin/sh -c`` script that places the def bundle into a container.
+    """Build the FIXED, tiny ``/bin/sh -c`` script that unpacks the def bundle.
 
-    lead-h2bj.  Each file's bytes are base64-encoded on the HOST and decoded on
-    the CONTAINER into ``<dest_dir>/<relpath>``, so the placed def is
-    byte-identical to the shipped asset regardless of file content (no shell
-    quoting/escaping/newline hazards).  The script creates each file's parent
-    directory first so the ``nodes/`` and ``vaults/default/`` subtrees are
-    reproduced exactly.
+    lead-m4zt (E2BIG fix).  The prior form INLINED every file's base64 into the
+    script, making the ``/bin/sh -c`` argument grow with the bundle — the real
+    18-file bundle already exceeds 136 KiB, past the Linux MAX_ARG_STRLEN 128
+    KiB per-single-argument limit, so the placement exec failed the spawn with
+    E2BIG ("Argument list too long") and the container never got its def.
+
+    The bundle bytes now travel on STDIN (``docker exec -i``) as a
+    base64-encoded tar (see ``_fabro_def_bundle_tar_b64``); this script is a
+    CONSTANT that reads that stream, base64-decodes it, and untars it into
+    ``dest_dir``.  Because the script carries NO file content its length is
+    fixed and tiny regardless of bundle size — the placement is immune to the
+    per-argument limit at any bundle size.  Each file lands byte-identical to
+    the shipped asset (tar preserves content verbatim), reproducing the
+    ``nodes/`` and ``vaults/default/`` subtrees exactly, and the native
+    ``vaults/default/secrets.json`` remains the ``__PLACEHOLDER__``-only asset
+    (ADR-049).  ``base64 -d`` and ``tar`` are POSIX-portable on the bc-base
+    image (coreutils + tar).
     """
-    import base64
     import shlex
 
-    lines = ["set -e", f"mkdir -p {shlex.quote(dest_dir)}"]
-    for rel in FABRO_DEF_FILES:
-        data = files[rel]
-        b64 = base64.b64encode(data).decode("ascii")
-        target = f"{dest_dir}/{rel}"
-        parent = os.path.dirname(target)
-        q_target = shlex.quote(target)
-        q_parent = shlex.quote(parent)
-        lines.append(f"mkdir -p {q_parent}")
-        # base64 -d is POSIX-portable on the bc-base image (coreutils).
-        lines.append(f"printf %s {shlex.quote(b64)} | base64 -d > {q_target}")
-    return "\n".join(lines) + "\n"
+    q_dest = shlex.quote(dest_dir)
+    return (
+        "set -e\n"
+        f"mkdir -p {q_dest}\n"
+        f"base64 -d | tar -x -f - -C {q_dest}\n"
+    )
+
+
+def _fabro_def_bundle_tar_b64(files: dict[str, bytes]) -> str:
+    """Build the base64-encoded tar stream of the def bundle for STDIN placement.
+
+    lead-m4zt.  Packs the 18 def-root files into a deterministic, reproducible
+    (mtime/uid/gid zeroed) tar, base64-encoded to a plain ASCII string so it
+    streams cleanly through ``docker exec -i`` STDIN.  Each entry carries its
+    def-root-relative path so ``tar -x`` reproduces the ``nodes/`` and
+    ``vaults/default/`` subtrees under the placement dir.  The content is
+    written into the tar verbatim, so every placed file is byte-identical to
+    the shipped asset — the placement introduces no shell-quoting/escaping or
+    newline hazard, and no real secret (the vault stays placeholder-only).
+    """
+    import base64
+    import io
+    import tarfile
+
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w") as tar:
+        for rel in FABRO_DEF_FILES:
+            data = files[rel]
+            info = tarfile.TarInfo(name=rel)
+            info.size = len(data)
+            info.mtime = 0
+            info.uid = 0
+            info.gid = 0
+            info.mode = 0o644
+            tar.addfile(info, io.BytesIO(data))
+    return base64.b64encode(buf.getvalue()).decode("ascii")

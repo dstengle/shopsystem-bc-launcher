@@ -40,6 +40,7 @@ from bc_launcher.fabro.def_bundle import (  # noqa: F401
     _fabro_def_asset_root,
     _load_fabro_def_files,
     _fabro_def_install_script,
+    _fabro_def_bundle_tar_b64,
 )
 from bc_launcher.fabro.provider import (  # noqa: F401
     _fabro_shim_start_argv,

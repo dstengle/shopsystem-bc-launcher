@@ -20,6 +20,7 @@ from bc_launcher.constants import (  # shared primitives (single source of truth
 from bc_launcher.constants import (  # noqa: F401,E402
     DOCKER_SOCKET_PATH,
     AGENT_TMUX_SESSION,
+    MAX_ARG_STRLEN,
     BC_IMAGE,
     BC_IMAGE_ENV,
     SHOPMSG_DSN_ENV,
@@ -84,6 +85,7 @@ from bc_launcher.fabro import (  # noqa: E402,F401  (re-export for compat)
     _fabro_def_asset_root,
     _load_fabro_def_files,
     _fabro_def_install_script,
+    _fabro_def_bundle_tar_b64,
     LAUNCH_PATH_TMUX,
     LAUNCH_PATH_FABRO,
     ANTHROPIC_OAUTH_SHIM_BIN,
