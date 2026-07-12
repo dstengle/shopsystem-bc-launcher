@@ -42,6 +42,15 @@ _ASSET_WORKFLOW_TOML = (
     os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     + "/src/bc_launcher/assets/fabro-def/workflow.toml"
 )
+# lead-e5jx — the poured "/workspace/.fabro/dispatcher.toml" the reactive
+# engage (`fabro run dispatcher.toml`) reads $BC_NAME from.  Its content
+# matches the canonical def-source mirror the pour delivers when a test has not
+# seeded distinctive poured content.
+FABRO_DISPATCHER_TOML_CONTAINER_PATH = "/workspace/.fabro/dispatcher.toml"
+_ASSET_DISPATCHER_TOML = (
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    + "/src/bc_launcher/assets/fabro-def/dispatcher.toml"
+)
 
 
 def is_bd_bootstrap_command(command: list[str]) -> bool:
@@ -713,6 +722,18 @@ class FakeDockerDriver:
         # read of the poured file falls back to the canonical def-source mirror
         # bytes (what the shop-templates pour delivers).
         self._poured_workflow_toml: dict[str, str] = {}
+        # lead-e5jx — the CONTENT of the poured/committed
+        # "/workspace/.fabro/dispatcher.toml" as it stands INSIDE the
+        # container.  The reactive-dispatcher engage (`fabro run
+        # dispatcher.toml`) reads $BC_NAME from dispatcher.toml's
+        # [run.environment.env] overlay, so the launcher must rewrite THIS
+        # file's BC_NAME/WORK_ID to the launch identity too (not only
+        # workflow.toml) or the reactive watcher runs against the bundle
+        # default `fabro-throwaway`.  Same read/rewrite/write-back channel as
+        # the poured workflow.toml; seed distinctive content via
+        # ``set_poured_dispatcher_toml``.  When unset, a read falls back to the
+        # canonical def-source mirror bytes the pour delivers.
+        self._poured_dispatcher_toml: dict[str, str] = {}
         # The bc-base image's shop-type marker per container ("bc"/"lead"),
         # read by the controller from `.claude/shop/type.md`.  Defaults to
         # "bc"; tests may override via set_shop_type().
@@ -2907,6 +2928,28 @@ class FakeDockerDriver:
             encoded = _b64.b64encode(content.encode("utf-8")).decode("ascii")
             return subprocess.CompletedProcess(command, 0, encoded, "")
 
+        # lead-e5jx — read the poured "/workspace/.fabro/dispatcher.toml" IN the
+        # container (a `base64 <path>` exec).  The reactive engage runs `fabro
+        # run dispatcher.toml`; its native watch/dispatch nodes read $BC_NAME
+        # from dispatcher.toml's [run.environment.env] overlay, so the launcher
+        # must rewrite THIS file's BC_NAME/WORK_ID to the launch identity too.
+        # Returns the seeded poured content (or, unseeded, the canonical
+        # def-source mirror bytes the pour delivers), base64-encoded on stdout.
+        if (
+            command[:2] == ["/bin/sh", "-c"]
+            and len(command) >= 3
+            and FABRO_DISPATCHER_TOML_CONTAINER_PATH in command[2]
+            and "base64" in command[2]
+            and "base64 -d" not in command[2]
+        ):
+            content = self._poured_dispatcher_toml.get(container_name)
+            if content is None:
+                with open(_ASSET_DISPATCHER_TOML, encoding="utf-8") as fh:
+                    content = fh.read()
+            import base64 as _b64
+            encoded = _b64.b64encode(content.encode("utf-8")).decode("ascii")
+            return subprocess.CompletedProcess(command, 0, encoded, "")
+
         # Simulate `chown [-R] <user>:<group> <path...>` — lead-kjv7 DEFECT 3.
         # Ownership of `/workspace/.beads` is transferred to vscode ONLY when a
         # chown to vscode actually COVERS the `.beads` tree.  Two shapes cover
@@ -3004,6 +3047,22 @@ class FakeDockerDriver:
         prove the rewrite was derived from the CONTAINER file rather than the
         retired baked host asset."""
         self._poured_workflow_toml[container_name] = content
+
+    def set_poured_dispatcher_toml(
+        self, container_name: str, content: str
+    ) -> None:
+        """lead-e5jx — seed the CONTENT of the poured/committed
+        "/workspace/.fabro/dispatcher.toml" as it stands inside
+        ``container_name``.
+
+        The reactive engage (`fabro run dispatcher.toml`) reads $BC_NAME from
+        this file's [run.environment.env] overlay, so the launcher rewrites its
+        BC_NAME/WORK_ID to the launch identity in-container (a `base64 <path>`
+        read + `base64 -d` write-back).  Seeding distinctive content (e.g. the
+        bundle-default identity plus a unique sentinel) lets a test prove the
+        rewrite was derived from the CONTAINER file and targets the launch BC
+        rather than the bundle default `fabro-throwaway`."""
+        self._poured_dispatcher_toml[container_name] = content
 
     def workspace_fabro(self, container_name: str) -> bool:
         """True if the shop-templates pour has emitted "/workspace/.fabro/" into
