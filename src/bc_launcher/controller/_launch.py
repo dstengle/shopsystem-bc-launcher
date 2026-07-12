@@ -41,12 +41,9 @@ from bc_launcher.fabro import (
     FABRO_WORKFLOW_TOML_CONTAINER_PATH,
     LAUNCH_PATH_FABRO,
     LAUNCH_PATH_TMUX,
-    _fabro_def_install_script,
     _fabro_exec_env,
     _fabro_settings_install_script,
     _fabro_shim_start_script,
-    _fabro_workflow_toml_install_script,
-    _load_fabro_def_files,
 )
 from bc_launcher.manifest import (
     ManifestProductTypeError,
@@ -457,24 +454,22 @@ class LaunchMixin:
         # either clone or workspace-mount — is UNCHANGED (no fabro writes, no
         # placement, tree presented unchanged).
         #
-        # place_def: on the CLONE path the def is now DELIVERED BY THE
-        # SHOP-TEMPLATES POUR inside the clone guard (lead-ona9, scenario
+        # lead-a3kg / uyj1 completion (folds lead-bq2z): the def is DELIVERED BY
+        # THE SHOP-TEMPLATES POUR on the CLONE path (lead-ona9, scenario
         # 7700eea079ffe1d8 — the pour emits "/workspace/.fabro/" parallel to
-        # ".claude/skills/"), so we do NOT stream-place it here — only the
-        # fabro-specific wiring runs on the poured def.  On the WORKSPACE-MOUNT
-        # path the clone guard never ran AND the pour is skipped, so the def
-        # bundle is placed here from the committed/source def.  Placement runs
-        # BEFORE the engage in `_start_agent_session`, so the fabro server + run
-        # find the def + settings.
+        # ".claude/skills/") and is ALREADY COMMITTED in the mounted tree on the
+        # WORKSPACE-MOUNT path.  The baked-asset bundle is retired, so there is
+        # NO stream-placement step here — only the fabro-specific wiring
+        # (workflow.toml in-container rewrite + shim + settings) runs on the
+        # POURED def.  It runs BEFORE the engage in `_start_agent_session`, so
+        # the fabro server + run find the def + settings.
         if launch_path == LAUNCH_PATH_FABRO:
-            already_placed = bool(repo_url and not workspace_mount)
             self._place_fabro_def_and_wiring(
                 bc_name,
                 container,
                 work_id,
                 out_lines,
                 err_lines,
-                place_def=not already_placed,
             )
 
         # Agent-start sequence (shared with `start_agent`, lead-k4k7).  This is

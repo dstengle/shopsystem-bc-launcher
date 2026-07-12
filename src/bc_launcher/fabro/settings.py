@@ -9,7 +9,6 @@ import os
 import re
 
 from bc_launcher.fabro.constants import *  # noqa: F401,F403  (sibling constants)
-from bc_launcher.fabro.def_bundle import _fabro_def_asset_root
 
 
 
@@ -114,27 +113,48 @@ def _fabro_workflow_toml_rewrite(source: str, bc_name: str, work_id: str) -> str
 
 
 
-def _fabro_workflow_toml_install_script(
-    bc_name: str,
-    work_id: str,
+def _fabro_workflow_toml_read_script(
+    source_path: str = FABRO_WORKFLOW_TOML_CONTAINER_PATH,
+) -> str:
+    """Build a ``/bin/sh -c`` script that READS the POURED workflow.toml IN the
+    container and base64-encodes it to stdout (lead-a3kg / uyj1 completion).
+
+    Under N4 (lead-ona9) the fabro loop def is delivered into the container by
+    the shop-templates POUR (or, on the workspace-mount path, is already
+    committed) at ``/workspace/.fabro/`` — the baked ``src/bc_launcher/assets/
+    fabro-def/`` bundle is RETIRED from the wheel/image.  So the BC_NAME /
+    WORK_ID rewrite must operate on the POURED file actually present in the
+    container, NOT the retired baked host asset (which FileNotFoundErrors in a
+    real installed wheel).  This script emits the poured file's bytes
+    base64-encoded on stdout so the launcher can capture them off the exec's
+    STDOUT (never the argv), rewrite them on the host, and write them back.
+    ``base64`` is POSIX-portable on the bc-base image (coreutils).
+    """
+    import shlex
+
+    q_source = shlex.quote(source_path)
+    return f"base64 {q_source}\n"
+
+
+def _fabro_workflow_toml_writeback_script(
+    rewritten: str,
     dest_path: str = FABRO_WORKFLOW_TOML_CONTAINER_PATH,
 ) -> str:
-    """Build a ``/bin/sh -c`` script that (re)writes the placed workflow.toml
-    with the launch's ACTUAL BC_NAME / WORK_ID (lead-ze4w BUG#2).
+    """Build a ``/bin/sh -c`` script that WRITES the rewritten workflow.toml
+    bytes back over the poured file (lead-a3kg / uyj1 completion; lead-ze4w
+    BUG#2 rewrite target).
 
-    Reads the packaged workflow.toml asset, rewrites the BC_NAME / WORK_ID
-    assignments in ``[run.inputs]`` and ``[run.environment.env]`` to the
-    launch's values, then base64-decode-writes the corrected bytes over the
-    placed ``workflow.toml`` — the SAME byte-safe channel + overwrite
-    mechanism the launcher uses to (re)write settings.toml.
+    The corrected bytes are produced on the host (from the in-container read
+    via ``_fabro_workflow_toml_rewrite``) and base64-decode-written over the
+    poured ``workflow.toml`` — the SAME byte-safe overwrite channel the
+    launcher uses to (re)write settings.toml.  workflow.toml is a small config
+    file (well under MAX_ARG_STRLEN), so its base64 rides the argv safely; the
+    lead-m4zt E2BIG concern is the 136 KiB def BUNDLE, which is delivered by
+    the pour and never streamed here.
     """
     import base64
     import shlex
 
-    asset = (_fabro_def_asset_root() / "workflow.toml").read_text(
-        encoding="utf-8"
-    )
-    rewritten = _fabro_workflow_toml_rewrite(asset, bc_name, work_id)
     b64 = base64.b64encode(rewritten.encode("utf-8")).decode("ascii")
     q_target = shlex.quote(dest_path)
     q_parent = shlex.quote(os.path.dirname(dest_path))

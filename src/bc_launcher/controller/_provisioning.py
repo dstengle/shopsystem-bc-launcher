@@ -309,13 +309,15 @@ class ProvisioningMixin:
         # now delivered by the shop-templates POUR just above
         # (`_refresh_shop_templates`), which emits "/workspace/.fabro/" EXACTLY
         # as it emits ".claude/skills/" — the fabro loop def is no longer
-        # streamed from a BAKED asset off the docker exec STDIN.  So there is NO
-        # separate `_place_fabro_def_bundle` step on the clone path anymore; the
-        # pour is the sole delivery surface (`src/bc_launcher/assets/fabro-def/`
-        # remains only as the def SOURCE mirror).  On the fabro path the
-        # ADDITIONAL wiring (workflow.toml rewrite + shim + settings) still runs
-        # OUTSIDE this guard via _place_fabro_def_and_wiring(place_def=False),
-        # operating on the poured "/workspace/.fabro/" — see lead-ze4w BUG#1.
+        # streamed from a BAKED asset off the docker exec STDIN.  lead-a3kg /
+        # uyj1 completion (folds lead-bq2z): the baked-asset placement helper is
+        # retired entirely — the pour is the sole delivery surface on the clone
+        # path and the committed tree is the surface on the workspace-mount path
+        # (`src/bc_launcher/assets/fabro-def/` remains only as the def SOURCE
+        # mirror).  On the fabro path the ADDITIONAL wiring (in-container
+        # workflow.toml rewrite + shim + settings) runs OUTSIDE this guard via
+        # _place_fabro_def_and_wiring, operating on the poured/committed
+        # "/workspace/.fabro/" — see lead-ze4w BUG#1 / lead-a3kg.
 
         # FINAL ownership assertion (lead-mf15, scenario
         # @scenario_hash:d9e4ce60e03df361).  TIGHTENS the lead-d64 /
