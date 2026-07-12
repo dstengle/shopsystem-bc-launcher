@@ -57,6 +57,120 @@ def _is_empty_remote_failure(message: str) -> bool:
 
 
 
+def _is_schema_skew_migration_refusal(message: str) -> bool:
+    """Whether a `bd bootstrap` failure was caused by bd REFUSING to auto-apply
+    schema migrations to a REMOTE-BACKED Dolt DB (fork hazard, bd upstream
+    #4259) — lead-915f.
+
+    DISTINCT from the empty-remote family (`_is_empty_remote_failure`): that
+    fires when the `<bc>-beads` remote carries NO Dolt data ("no branches" /
+    "contains no Dolt data"), so the clone itself fails.  HERE the remote DOES
+    carry Dolt data — just at an OLD schema (e.g. v32) BEHIND the baked bd's
+    CURRENT target (e.g. v53) — so the clone SUCCEEDS and `bd bootstrap` fails
+    because bd will not auto-apply the migrations to a remote-backed database
+    (it would fork the shared Dolt history).  Observed live at lead-4qqi:
+    "Bootstrap failed ... 21 schema migrations (v32 -> v53) that bd will not
+    auto-apply to a remote-backed database (#4259)".
+
+    The schema-skew heal (rebuild-from-JSONL + reseed) recovers this — and ONLY
+    this — condition; the two predicates must not misfire on each other's
+    precondition, so this one is guarded to NOT match the empty-remote texts.
+    """
+    text = message.lower()
+    if _is_empty_remote_failure(message):
+        return False
+    if "#4259" in text:
+        return True
+    mentions_schema_migration = (
+        "migration" in text or "migrate" in text or "schema" in text
+    )
+    mentions_remote_backed = "remote-backed" in text or "remote backed" in text
+    refuses = (
+        "will not" in text
+        or "won't" in text
+        or "wont" in text
+        or "refus" in text
+        or "not auto-apply" in text
+        or "cannot auto-apply" in text
+        or "can't auto-apply" in text
+    )
+    return mentions_schema_migration and mentions_remote_backed and refuses
+
+
+
+def _schema_skew_heal_script(beads_remote_url: str, shop_type: str) -> str:
+    """Shell to HEAL a remote-backed beads schema-skew wall (lead-915f).
+
+    On bd's #4259 refusal to auto-apply schema migrations to a remote-backed DB
+    (the remote carries Dolt data at an OLD schema behind the baked bd's CURRENT
+    target), REBUILD a fresh local dolt DB at the current schema from the
+    schema-independent committed `.beads/issues.jsonl` via `bd init
+    --from-jsonl` — NOT an in-place `bd migrate`, which #4259 refuses and
+    lead-065a proved HARD-FAILS at migration 0047 ("table not found: wisps").
+
+    Ordering (load-bearing):
+      0. IDEMPOTENT NO-OP guard — if `bd ready` already exits zero (healthy at
+         the current schema, no #4259 signal), do nothing: no rebuild, no reseed
+         force-push, exit zero.  Re-running the standup is safe.
+      1. LEAD-ROLE REFUSAL — the reseed force-push is HISTORY-REPLACING and safe
+         only when the container is the SOLE clone of its beads remote, which
+         holds for a BC but NOT for the lead.  Refuse a lead-role beads (exit
+         nonzero, directing a manual migrate) BEFORE any destructive step.
+      2. PRE-HEAL EXPORT — take a full `bd export --all` safety-net capture to a
+         backup path BEFORE any destructive step.  If the old DB is unreadable
+         the export fails; proceed anyway from the committed issues.jsonl (the
+         export is only a forensic net, never the rebuild's source of truth).
+      3. DESTROY — remove the broken remote-backed embedded-Dolt working set.
+      4. REBUILD — `bd init --from-jsonl .beads/issues.jsonl` create-freshes a
+         DB at the baked bd's CURRENT schema; the committed issues.jsonl is the
+         authoritative SOURCE OF TRUTH, preserving every committed issue.
+      5. RESEED — durably reseed the remote via a HISTORY-REPLACING `bd dolt
+         push --force` through the agent-vault brokered non-interactive
+         dolt-push credential path.  Until that brokered path is wired (lead-
+         tc38, the SAME create-bc seed credential gap pinned at
+         @scenario_hash:5351a4a8071b594f / e3a0ec19298e7ce7) the raw push hits
+         the MITM SSL / non-interactive-credential gap and fails, leaving the
+         remote behind — NON-FATAL: the BC is online locally and a subsequent
+         launch re-heals.
+    """
+    # Strip the `git+` transport prefix so raw git accepts the URL; the dolt
+    # remote itself keeps the original `git+https://` scheme.
+    _git_push_url = beads_remote_url.removeprefix("git+")  # noqa: F841 (parity)
+    return (
+        f"set -e; cd {CONTAINER_WORKSPACE}; "
+        # (0) IDEMPOTENT NO-OP guard.
+        "if BD_NON_INTERACTIVE=1 bd ready >/dev/null 2>&1; then "
+        "echo 'schema-skew heal: bd already healthy at the current schema; "
+        "no-op (no rebuild, no reseed)'; exit 0; fi; "
+        # (1) LEAD-ROLE REFUSAL (before any destructive step).
+        f"shop_type='{shop_type}'; "
+        "if [ \"$shop_type\" = 'lead' ]; then "
+        "echo 'schema-skew heal: REFUSED for a lead-role beads; the "
+        "history-replacing reseed force-push is safe only for a sole-clone BC, "
+        "NOT the lead (it would discard non-reconstructable Dolt history); "
+        "directing a manual migrate on the lead host instead' >&2; exit 1; fi; "
+        # (2) PRE-HEAL EXPORT (safety net) BEFORE any destructive step.
+        "bd export --all > .beads/pre-heal-export.jsonl 2>/dev/null || "
+        "echo 'schema-skew heal: pre-heal export failed (old DB unreadable); "
+        "proceeding from the committed .beads/issues.jsonl source of truth' >&2; "
+        # (3) DESTROY the broken remote-backed embedded-Dolt working set.
+        "rm -rf .beads/embeddeddolt; "
+        # (4) REBUILD a fresh CURRENT-schema DB from the committed issues.jsonl
+        #     (NOT bd migrate).
+        "BD_NON_INTERACTIVE=1 bd init --from-jsonl .beads/issues.jsonl; "
+        # (5) RESEED the remote durably via a history-replacing brokered
+        #     force-push; NON-FATAL on the (as-yet-unwired) credential gap.
+        f"bd dolt remote add origin {beads_remote_url} 2>/dev/null || true; "
+        "BD_NON_INTERACTIVE=1 bd dolt push --force || "
+        "echo 'schema-skew heal: reseed force-push failed on the brokered "
+        "dolt-push credential path (lead-tc38); remote stays behind, a "
+        "subsequent launch will re-heal' >&2; "
+        "echo 'schema-skew heal: rebuilt a fresh current-schema DB from the "
+        "committed issues.jsonl via bd init --from-jsonl'"
+    )
+
+
+
 def _beads_dolt_repo_slug(bc_name: str) -> str:
     """The `<owner>/<bc>-beads` GitHub slug for a BC's beads tracker repo.
 

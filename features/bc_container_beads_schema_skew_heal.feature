@@ -1,28 +1,17 @@
 @bc:shopsystem-bc-launcher @origin:lead-915f
 Feature: bc-container standup heals a remote-backed beads schema-skew wall by rebuilding a fresh current-schema dolt DB from the committed issues.jsonl and reseeding the remote (lead-915f)
 
-  ADDITIVE to the empty-remote provisioning family
-  (bc_container_beads_bootstrap_resilience @scenario_hash:ada742d33c996d34,
-  GAP D/E/G/H/I) — retires/supersedes NOTHING.  That family fires when the
-  BC's `<bc>-beads` Dolt remote carries NO Dolt data; HERE the remote DOES
-  carry Dolt data, just at a SKEWED OLD schema (v32) BEHIND the baked bd's
-  CURRENT target (v53), so the clone SUCCEEDS and `bd bootstrap` fails on the
-  #4259 migration-refusal instead.
-
-  Observed live (lead-4qqi, fabro launch on a new bc-base): "Bootstrap
-  failed ... 21 schema migrations (v32 -> v53) that bd will not auto-apply to
-  a remote-backed database (#4259)" — so the BC never onlines.  bd REFUSES to
-  auto-apply schema migrations to a remote-backed DB (fork hazard, bd upstream
-  #4259).  In-place `bd migrate` is proven DEAD (lead-065a: hard-fails at
-  migration 0047 "table not found: wisps").
-
-  The heal, pinned here in the standup's beads-provisioning orchestration:
-  on detecting the #4259 refusal, REBUILD a fresh local dolt DB at the baked
-  bd's CURRENT schema from the schema-independent committed
-  `.beads/issues.jsonl` via `bd init --from-jsonl` (NOT `bd migrate`), taking a
-  pre-heal `bd export --all` safety net FIRST, REFUSING for a lead-role beads
-  (sole-clone invariant), and durably reseeding the remote via a brokered
-  force-push.
+  ADDITIVE to the empty-remote provisioning family (bootstrap-resilience
+  ada742d33c996d34 plus GAP D/E/G/H/I) and retires nothing. That family fires
+  when the BC beads Dolt remote carries no Dolt data. Here the remote does
+  carry Dolt data, just at an old schema behind the baked bd current target,
+  so the clone succeeds and bd bootstrap fails because bd refuses to
+  auto-apply the migrations to a remote-backed database (fork hazard, bd
+  upstream 4259). Observed live at lead-4qqi; in-place bd migrate is proven
+  dead at lead-065a. The heal rebuilds a fresh current-schema DB from the
+  committed issues.jsonl via bd init from-jsonl (never bd migrate), takes a
+  pre-heal bd export all safety net first, refuses for a lead-role beads
+  (sole-clone invariant), and reseeds the remote via a brokered force-push.
 
   @scenario_hash:dc9a29a746921a14 @bc:shopsystem-bc-launcher
   Scenario: standup reseeds a fresh current-schema dolt DB from the committed issues.jsonl when the remote-backed DB is behind the baked bd's target schema, so the BC onlines with full issue parity
