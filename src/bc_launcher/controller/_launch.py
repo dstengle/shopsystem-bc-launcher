@@ -34,6 +34,7 @@ from bc_launcher.fabro import (
     FABRO_ANTHROPIC_BASE_URL,
     FABRO_DEF_CONTAINER_DIR,
     FABRO_DEF_FILES,
+    FABRO_SERVER_INSTALL_GH_TOKEN,
     FABRO_SETTINGS_CONTAINER_PATH,
     FABRO_SHIM_HOST,
     FABRO_SHIM_PORT,
@@ -297,6 +298,22 @@ class LaunchMixin:
             env[AGENT_VAULT_TOKEN_ENV] = resolved_av_token
         if resolved_av_vault:
             env[AGENT_VAULT_VAULT_ENV] = resolved_av_vault
+
+        # --- Runtime GH_TOKEN placeholder (lead-za30) ---
+        # `gh` insists on a NON-EMPTY token in its own env before it will emit
+        # any request: a bare `gh api user` from inside the container otherwise
+        # pre-flight-refuses ("gh auth login" / "populate GH_TOKEN") BEFORE its
+        # request ever reaches the agent-vault MITM proxy above — even though
+        # the broker IS wired and WOULD substitute the real GitHub credential on
+        # the wire. git already rides agent-vault transparently off the runtime
+        # HTTPS_PROXY; gh did not, purely for this reason. Carry the existing
+        # dummy PLACEHOLDER constant into the persistent runtime env so gh
+        # becomes symmetric to git — the placeholder grants NO access (it is a
+        # sentinel, never a real token; the broker substitutes the real
+        # credential on the outbound request). Extends the already-blessed
+        # exec-scope precedent (GAP-A / lead-3mez, beads-provisioning exec env)
+        # to the persistent runtime env the agent inherits.
+        env["GH_TOKEN"] = FABRO_SERVER_INSTALL_GH_TOKEN
 
         # --- Container runtime HTTPS_PROXY (bclaunch-3q12) ---
         # Route the agent's outbound HTTPS through the broker's MITM proxy
