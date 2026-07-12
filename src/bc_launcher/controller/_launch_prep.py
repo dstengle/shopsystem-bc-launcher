@@ -19,6 +19,7 @@ from bc_launcher.fabro import (
     FABRO_ANTHROPIC_ADAPTER,
     FABRO_ANTHROPIC_BASE_URL,
     FABRO_DEF_CONTAINER_DIR,
+    FABRO_DISPATCHER_TOML_CONTAINER_PATH,
     FABRO_SETTINGS_CONTAINER_PATH,
     FABRO_SHIM_HOST,
     FABRO_SHIM_PORT,
@@ -164,10 +165,20 @@ class LaunchPrepMixin:
         work_id: str | None,
         out_lines: list[str],
         err_lines: list[str],
+        toml_path: str = FABRO_WORKFLOW_TOML_CONTAINER_PATH,
     ) -> None:
-        """READ the poured /workspace/.fabro/workflow.toml in-container, rewrite
-        its BC_NAME / WORK_ID to the launch's ACTUAL identity on the host, and
-        WRITE it back over the poured path (lead-a3kg / uyj1 completion).
+        """READ the poured ``toml_path`` in-container, rewrite its BC_NAME /
+        WORK_ID to the launch's ACTUAL identity on the host, and WRITE it back
+        over the poured path (lead-a3kg / uyj1 completion).
+
+        Parameterized by ``toml_path`` (lead-e5jx) so it operates on ANY poured
+        run-config toml, not only workflow.toml: the caller invokes it for BOTH
+        ``/workspace/.fabro/workflow.toml`` (the ADR-051 child def's run config)
+        AND ``/workspace/.fabro/dispatcher.toml`` (the ADR-058 reactive engage's
+        entrypoint).  Both ship the bundle-default identity in their
+        [run.environment.env] / [run.inputs] tables, and the shared
+        ``_fabro_workflow_toml_rewrite`` substitutes every BC_NAME/WORK_ID line
+        in either table regardless of which file it came from.
 
         This replaces the retired baked-host-asset read (lead-ze4w BUG#2's
         original mechanism), which FileNotFoundErrors in an installed wheel once
@@ -176,15 +187,15 @@ class LaunchPrepMixin:
         """
         read_result = self._driver.exec_run(
             container,
-            ["/bin/sh", "-c", _fabro_workflow_toml_read_script()],
+            ["/bin/sh", "-c", _fabro_workflow_toml_read_script(toml_path)],
             user=AGENT_CONTAINER_USER,
         )
         if read_result.returncode != 0:
             err_lines.append(
-                "warning: fabro workflow.toml read failed (exit "
+                "warning: fabro run-config toml read failed (exit "
                 f"{read_result.returncode}): "
                 f"{(read_result.stderr or read_result.stdout).strip()}"
-                f"; {FABRO_WORKFLOW_TOML_CONTAINER_PATH} could not be read to "
+                f"; {toml_path} could not be read to "
                 "rewrite BC_NAME/WORK_ID but the agent will still be started "
                 "(lead-a3kg)\n"
             )
@@ -194,8 +205,8 @@ class LaunchPrepMixin:
             source = base64.b64decode(read_result.stdout).decode("utf-8")
         except (ValueError, UnicodeDecodeError) as exc:
             err_lines.append(
-                "warning: fabro workflow.toml read returned undecodable bytes "
-                f"({exc}); {FABRO_WORKFLOW_TOML_CONTAINER_PATH} may carry the "
+                "warning: fabro run-config toml read returned undecodable bytes "
+                f"({exc}); {toml_path} may carry the "
                 "bundle defaults but the agent will still be started "
                 "(lead-a3kg)\n"
             )
@@ -205,23 +216,24 @@ class LaunchPrepMixin:
         workflow_result = self._driver.exec_run(
             container,
             ["/bin/sh", "-c",
-             _fabro_workflow_toml_writeback_script(rewritten)],
+             _fabro_workflow_toml_writeback_script(rewritten, toml_path)],
             user=AGENT_CONTAINER_USER,
         )
         if workflow_result.returncode != 0:
             err_lines.append(
-                "warning: fabro workflow.toml BC_NAME/WORK_ID rewrite failed "
+                "warning: fabro run-config toml BC_NAME/WORK_ID rewrite failed "
                 f"(exit {workflow_result.returncode}): "
                 f"{(workflow_result.stderr or workflow_result.stdout).strip()}"
-                f"; {FABRO_WORKFLOW_TOML_CONTAINER_PATH} may carry the bundle "
+                f"; {toml_path} may carry the bundle "
                 "defaults but the agent will still be started (lead-ze4w)\n"
             )
         else:
             out_lines.append(
                 "Rewrote the poured "
-                f"{FABRO_WORKFLOW_TOML_CONTAINER_PATH} [run.environment.env] / "
+                f"{toml_path} [run.environment.env] / "
                 f"[run.inputs] BC_NAME={bc_name} WORK_ID={work_id or ''} "
-                "(lead-ze4w BUG#2, lead-a3kg in-container)\n"
+                "(lead-ze4w BUG#2, lead-a3kg in-container; lead-e5jx both "
+                "workflow.toml + dispatcher.toml)\n"
             )
 
     def _place_fabro_def_and_wiring(
@@ -278,8 +290,22 @@ class LaunchPrepMixin:
         #     [run.environment.env] overlay (which `fabro run -I` does NOT
         #     override), so this rewrite is what carries the launch's real
         #     identity into every native node.
+        #     lead-e5jx: rewrite BOTH poured run-config tomls.  The reactive
+        #     engage is `fabro run dispatcher.toml`, and the dispatcher's native
+        #     watch/dispatch nodes read $BC_NAME from dispatcher.toml's
+        #     [run.environment.env] overlay — so dispatcher.toml MUST be
+        #     rewritten too, or the reactive watcher runs
+        #     `dispatch_acp_agent.py --bc fabro-throwaway` / `shop-msg watch
+        #     --bc fabro-throwaway` (the bundle default) instead of the launch
+        #     BC.  workflow.toml carries the ADR-051 child def's identity; both
+        #     go through the same in-container read/rewrite/write-back.
         self._rewrite_poured_workflow_toml(
-            bc_name, container, work_id, out_lines, err_lines
+            bc_name, container, work_id, out_lines, err_lines,
+            toml_path=FABRO_WORKFLOW_TOML_CONTAINER_PATH,
+        )
+        self._rewrite_poured_workflow_toml(
+            bc_name, container, work_id, out_lines, err_lines,
+            toml_path=FABRO_DISPATCHER_TOML_CONTAINER_PATH,
         )
 
         # (2) Start the baked so2h shim as a background listener, with

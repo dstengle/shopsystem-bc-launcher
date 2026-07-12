@@ -141,6 +141,23 @@ FABRO_SETTINGS_CONTAINER_PATH = f"{FABRO_DEF_CONTAINER_DIR}/settings.toml"
 # on the host and base64-decode-writes them over the placed path.
 FABRO_WORKFLOW_TOML_CONTAINER_PATH = f"{FABRO_DEF_CONTAINER_DIR}/workflow.toml"
 
+# The placed def's dispatcher.toml — the reactive-persistent engage's actual
+# entrypoint (`fabro run dispatcher.toml`, ADR-058).  lead-e5jx: the packaged
+# asset carries byte-verbatim BC_NAME=fabro-throwaway in BOTH [run.inputs]
+# (agent prompts) AND [run.environment.env] (the native script= sandbox
+# overlay); the dispatcher's native watch/dispatch nodes read $BC_NAME from the
+# [run.environment.env] overlay, and `fabro run -I` overrides ONLY [run.inputs]
+# — so WITHOUT rewriting dispatcher.toml the reactive watcher runs
+# `dispatch_acp_agent.py --bc fabro-throwaway` / `shop-msg watch --bc
+# fabro-throwaway` (the bundle default) instead of the launch BC.  The launcher
+# rewrites this file the SAME in-container read/rewrite/write-back way it
+# rewrites workflow.toml.  (dispatcher.toml deliberately carries NO WORK_ID —
+# the dispatcher discovers per-child work_ids at runtime; the shared rewrite
+# simply finds no WORK_ID line to substitute.)
+FABRO_DISPATCHER_TOML_CONTAINER_PATH = (
+    f"{FABRO_DEF_CONTAINER_DIR}/dispatcher.toml"
+)
+
 # The bundle-default identity values the packaged workflow.toml ships (the
 # values the rewrite must REPLACE).  Named so a test can assert the placed
 # file no longer carries them.

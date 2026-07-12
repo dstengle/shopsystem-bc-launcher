@@ -3169,7 +3169,7 @@ def then_bss3_bumps_only_strictly_greater(ctx):
 
 @then(
     'when the resolved latest for "shop-templates" is "v0.45.0" while the '
-    'pin is "v0.52.2", the executable body treats the behind-or-equal result '
+    'pin is "v0.52.3", the executable body treats the behind-or-equal result '
     "as a no-op: it does not rewrite the pin to the lower \"v0.45.0\" and "
     "does not exit non-zero")
 def then_bss3_behind_is_noop_no_downgrade(ctx):
@@ -3279,7 +3279,7 @@ def then_bss3_strictly_greater_bumps_then_rebuilds(ctx):
 
 
 @then(
-    'an executable body that rewrote the "shop-templates" pin from "v0.52.2" '
+    'an executable body that rewrote the "shop-templates" pin from "v0.52.3" '
     'down to "v0.45.0" or exited non-zero on that behind-resolution would '
     "not satisfy this behavior")
 def then_bss3_downgrade_or_nonzero_insufficient(ctx):
