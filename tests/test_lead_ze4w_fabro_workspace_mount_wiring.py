@@ -106,6 +106,11 @@ def _launch_workspace_mount_fabro(tmp_path: Path) -> FakeDockerDriver:
         HOST_TREE,
         beads_registry='{"id":"seed-1","title":"committed"}\n',
         claude_skills="poured-skill-group/bc-router-health\n",
+        # lead-a3kg / uyj1 completion: under N4 the workspace-mount tree carries
+        # a COMMITTED /workspace/.fabro/ def (the pour is skipped on this path),
+        # so the wiring rewrites the committed workflow.toml IN-CONTAINER rather
+        # than streaming a baked-asset def.
+        fabro_def="committed-fabro-def/workflow.fabro\n",
     )
     controller = BcContainerController(driver)
     result = controller.launch(
@@ -213,31 +218,47 @@ def _recover_written_bytes(script: str) -> str:
 # BUG#1 — placement executes on the --workspace-mount path (not only clone)
 # ===========================================================================
 
-def test_bug1_def_placement_runs_on_workspace_mount_fabro_path(tmp_path):
-    """(i) The def/shim/settings placement EXECUTES on the workspace-mount
-    fabro path — the launcher issues the def-bundle placement, the shim start,
-    and the settings write even though NO clone ran.
+def test_bug1_wiring_runs_on_workspace_mount_fabro_path(tmp_path):
+    """(i) The fabro WIRING (workflow.toml in-container rewrite + shim start +
+    settings write) EXECUTES on the workspace-mount fabro path — the launcher
+    issues it OUTSIDE the clone guard even though NO clone ran.
 
-    TEETH: revert BUG#1 (put the placement back inside
-    `if repo_url and not workspace_mount:`) -> on the workspace-mount path
-    these calls are never issued -> the locators return None -> RED.
+    lead-a3kg / uyj1 completion (folds lead-bq2z): under N4 the def is DELIVERED
+    by the shop-templates pour (clone) or is ALREADY COMMITTED in the mounted
+    tree (workspace-mount), so the retired BAKED def-bundle placement no longer
+    runs on ANY path — the wiring operates on the committed/poured def in place.
+
+    TEETH: revert BUG#1 (put the wiring back inside
+    `if repo_url and not workspace_mount:`) -> on the workspace-mount path the
+    shim/settings/rewrite calls are never issued -> the locators return None ->
+    RED.  Separately, if the retired baked def-placement were reintroduced,
+    `_def_placement_call` would go non-None -> RED.
     """
     driver = _launch_workspace_mount_fabro(tmp_path)
 
     # No clone ran (workspace-mount): confirm the guard the bug lived under is
-    # genuinely not taken, so placement running is NOT a clone-path artifact.
+    # genuinely not taken, so the wiring running is NOT a clone-path artifact.
     clone_calls = [
         c for c in driver.exec_calls
         if c.container == _container() and c.command[:2] == ["git", "clone"]
     ]
     assert not clone_calls, (
-        "workspace-mount launch must not clone; placement below must therefore "
+        "workspace-mount launch must not clone; the wiring below must therefore "
         "run OUTSIDE the clone guard"
     )
 
-    assert _def_placement_call(driver) is not None, (
-        "BUG#1: the fabro def bundle must be placed on the workspace-mount "
-        "fabro path (no /workspace/.fabro otherwise)"
+    # The retired baked def-bundle placement runs on NO path anymore — the def
+    # comes from the committed tree here (and from the pour on the clone path).
+    assert _def_placement_call(driver) is None, (
+        "lead-a3kg: the retired baked def-bundle placement must NOT run on the "
+        "workspace-mount fabro path; the committed /workspace/.fabro/ is used "
+        "in place"
+    )
+    # The wiring still runs on the committed def: the workflow.toml is rewritten
+    # in-container, the shim starts, and the settings are written.
+    assert _workflow_toml_write_call(driver) is not None, (
+        "BUG#1/lead-a3kg: the committed workflow.toml must be rewritten "
+        "in-container on the workspace-mount fabro path"
     )
     assert _shim_start_call(driver) is not None, (
         "BUG#1: the shim must be started on the workspace-mount fabro path"

@@ -114,7 +114,8 @@ from bc_launcher.fabro import (  # noqa: E402,F401  (re-export for compat)
     _fabro_settings_toml,
     _fabro_settings_install_script,
     _fabro_workflow_toml_rewrite,
-    _fabro_workflow_toml_install_script,
+    _fabro_workflow_toml_read_script,
+    _fabro_workflow_toml_writeback_script,
 )
 from bc_launcher.readiness import (  # noqa: F401,E402
     CLAUDE_READY_MARKER,

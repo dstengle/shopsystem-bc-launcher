@@ -33,6 +33,15 @@ AGENT_CONTAINER_USER = "vscode"
 # lead-z0v2 — the fixed container CA path (mirrors the controller constant);
 # used by the CA-materialization filesystem model below.
 AGENT_VAULT_CONTAINER_CA_PATH = "/home/vscode/.config/agent-vault/ca.pem"
+# lead-a3kg — the poured "/workspace/.fabro/workflow.toml" the N4 fabro wiring
+# reads in-container.  Its content matches the canonical def-source mirror the
+# shop-templates pour delivers, so the fake serves that mirror's bytes when a
+# test has not seeded distinctive poured content.
+FABRO_WORKFLOW_TOML_CONTAINER_PATH = "/workspace/.fabro/workflow.toml"
+_ASSET_WORKFLOW_TOML = (
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    + "/src/bc_launcher/assets/fabro-def/workflow.toml"
+)
 
 
 def is_bd_bootstrap_command(command: list[str]) -> bool:
@@ -692,6 +701,18 @@ class FakeDockerDriver:
         # missing means the pour has NOT delivered it (e.g. a workspace-mount
         # launch that skips the pour, or a failed pour).
         self._workspace_fabro: dict[str, bool] = {}
+        # lead-a3kg — the CONTENT of the poured/committed
+        # "/workspace/.fabro/workflow.toml" as it stands INSIDE the container.
+        # The N4 fabro-orchestrator wiring reads THIS file in-container (via a
+        # `base64 <path>` exec), rewrites its BC_NAME/WORK_ID on the host, and
+        # writes the result back — it no longer reads the retired baked host
+        # asset.  Keyed per container; a test may seed distinctive content via
+        # ``set_poured_workflow_toml`` (e.g. the bundle-default identity plus a
+        # sentinel) so a rewrite derived from the CONTAINER file is
+        # distinguishable from one derived from the host asset.  When unset, a
+        # read of the poured file falls back to the canonical def-source mirror
+        # bytes (what the shop-templates pour delivers).
+        self._poured_workflow_toml: dict[str, str] = {}
         # The bc-base image's shop-type marker per container ("bc"/"lead"),
         # read by the controller from `.claude/shop/type.md`.  Defaults to
         # "bc"; tests may override via set_shop_type().
@@ -2863,6 +2884,29 @@ class FakeDockerDriver:
                 self._workspace_fabro[container_name] = True
             return subprocess.CompletedProcess(command, 0, "", "")
 
+        # lead-a3kg — read the poured "/workspace/.fabro/workflow.toml" IN the
+        # container (a `base64 <path>` exec that base64-encodes the poured file
+        # to stdout).  The N4 fabro wiring reads THIS file — not the retired
+        # baked host asset — so its BC_NAME/WORK_ID rewrite operates on the
+        # poured/committed def actually present in the container.  Returns the
+        # seeded poured content (or, unseeded, the canonical def-source mirror
+        # bytes the pour delivers), base64-encoded on stdout exactly as the real
+        # `base64` coreutil would.
+        if (
+            command[:2] == ["/bin/sh", "-c"]
+            and len(command) >= 3
+            and FABRO_WORKFLOW_TOML_CONTAINER_PATH in command[2]
+            and "base64" in command[2]
+            and "base64 -d" not in command[2]
+        ):
+            content = self._poured_workflow_toml.get(container_name)
+            if content is None:
+                with open(_ASSET_WORKFLOW_TOML, encoding="utf-8") as fh:
+                    content = fh.read()
+            import base64 as _b64
+            encoded = _b64.b64encode(content.encode("utf-8")).decode("ascii")
+            return subprocess.CompletedProcess(command, 0, encoded, "")
+
         # Simulate `chown [-R] <user>:<group> <path...>` — lead-kjv7 DEFECT 3.
         # Ownership of `/workspace/.beads` is transferred to vscode ONLY when a
         # chown to vscode actually COVERS the `.beads` tree.  Two shapes cover
@@ -2947,6 +2991,19 @@ class FakeDockerDriver:
     def workspace_skills(self, container_name: str) -> set[str]:
         """Return the skill-group entries present in the workspace .claude/skills/."""
         return set(self._workspace_skills.get(container_name, set()))
+
+    def set_poured_workflow_toml(
+        self, container_name: str, content: str
+    ) -> None:
+        """lead-a3kg — seed the CONTENT of the poured/committed
+        "/workspace/.fabro/workflow.toml" as it stands inside ``container_name``.
+
+        The N4 fabro wiring reads this file in-container (a `base64 <path>`
+        exec) and rewrites its BC_NAME/WORK_ID.  Seeding distinctive content
+        (e.g. the bundle-default identity plus a unique sentinel) lets a test
+        prove the rewrite was derived from the CONTAINER file rather than the
+        retired baked host asset."""
+        self._poured_workflow_toml[container_name] = content
 
     def workspace_fabro(self, container_name: str) -> bool:
         """True if the shop-templates pour has emitted "/workspace/.fabro/" into
