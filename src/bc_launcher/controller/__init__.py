@@ -49,6 +49,8 @@ from bc_launcher.tracker_provision import (  # noqa: F401,E402
     TRACKER_PROVISION_GH_TOKEN,
     _beads_dolt_remote_url,
     _is_empty_remote_failure,
+    _is_schema_skew_migration_refusal,
+    _schema_skew_heal_script,
     _beads_dolt_repo_slug,
     _is_repo_not_found_failure,
     _create_absent_tracker_repo_script,

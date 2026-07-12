@@ -15,6 +15,8 @@ from bc_launcher.tracker_provision import (
     _empty_remote_seed_script,
     _is_empty_remote_failure,
     _is_repo_not_found_failure,
+    _is_schema_skew_migration_refusal,
+    _schema_skew_heal_script,
     _tracker_provision_exec_env,
 )
 
@@ -149,6 +151,66 @@ class BeadsProvisioningMixin:
                     f"{(seed_result.stderr or seed_result.stdout).strip()}; "
                     "proceeding to agent-start so the agent can self-heal "
                     "(lead-5k8c)\n"
+                )
+
+        # lead-915f — REMOTE-BACKED SCHEMA-SKEW HEAL.  DISTINCT from the
+        # empty-remote family above: here the `<bc>-beads` remote DOES carry
+        # Dolt data, just at an OLD schema (e.g. v32) BEHIND the baked bd's
+        # CURRENT target (e.g. v53), so the clone SUCCEEDS and `bd bootstrap`
+        # fails because bd REFUSES to auto-apply the migrations to a
+        # remote-backed database (fork hazard, bd upstream #4259).  Observed
+        # live at lead-4qqi ("21 schema migrations (v32 -> v53) that bd will
+        # not auto-apply to a remote-backed database (#4259)"); it hits EVERY
+        # BC.  In-place `bd migrate` is proven DEAD (lead-065a: hard-fails at
+        # migration 0047 "table not found: wisps").  The heal REBUILDS a fresh
+        # local dolt DB at the CURRENT schema from the schema-independent
+        # committed `.beads/issues.jsonl` via `bd init --from-jsonl` (taking a
+        # pre-heal `bd export --all` safety net first), REFUSES for a lead-role
+        # beads (sole-clone invariant), and durably reseeds the remote via a
+        # brokered force-push — INSTEAD of fatal-stranding the container.  The
+        # reseed force-push runs through the agent-vault brokered
+        # non-interactive dolt-push path (lead-tc38, @scenario_hash
+        # 5351a4a8071b594f / e3a0ec19298e7ce7); until that path is wired the
+        # raw push hits the credential gap and the remote stays behind, but the
+        # BC is online locally and a subsequent launch re-heals.
+        if boot_result.returncode != 0 and _is_schema_skew_migration_refusal(
+            boot_result.stderr or boot_result.stdout or ""
+        ):
+            beads_remote = _beads_dolt_remote_url(bc_name)
+            shop_type = self._read_shop_type(container)
+            heal_result = self._driver.exec_run(
+                container,
+                ["bash", "-lc",
+                 _schema_skew_heal_script(beads_remote, shop_type)],
+                user=AGENT_CONTAINER_USER,
+            )
+            if heal_result.returncode == 0:
+                out_lines.append(
+                    "Remote-backed beads schema-skew heal (#4259): rebuilt a "
+                    "fresh current-schema dolt DB from the committed "
+                    ".beads/issues.jsonl via bd init --from-jsonl and reseeded "
+                    f"the remote ({beads_remote}) (lead-915f)\n"
+                )
+                # Re-assert vscode ownership (the rebuild re-rooted .beads),
+                # then treat the heal as the provisioning result — do NOT retry
+                # `bd bootstrap` (it would re-clone the still-old remote and
+                # re-hit the #4259 refusal); the from-JSONL rebuild already
+                # brought the local DB online at the current schema.
+                self._driver.exec_run(
+                    container,
+                    ["chown", "-R",
+                     f"{AGENT_CONTAINER_USER}:{AGENT_CONTAINER_USER}",
+                     CONTAINER_WORKSPACE],
+                )
+                boot_result = heal_result
+            else:
+                err_lines.append(
+                    "warning: remote-backed beads schema-skew (#4259) heal "
+                    f"could not complete ({beads_remote}, exit "
+                    f"{heal_result.returncode}): "
+                    f"{(heal_result.stderr or heal_result.stdout).strip()}; "
+                    "proceeding to agent-start so the agent can self-heal "
+                    "(lead-915f)\n"
                 )
 
         if boot_result.returncode != 0:
