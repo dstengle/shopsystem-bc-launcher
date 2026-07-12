@@ -187,9 +187,14 @@ RUN set -e && \
     bd --version
 
 # tmux + git are required by the launcher's in-container agent session and
-# repository clone steps.
+# repository clone steps. tini is a minimal reaping init: it becomes PID 1 (via
+# the ENTRYPOINT wrap below) and reaps orphaned <defunct> children that reparent
+# to PID 1 when their parents exit unreaped. Without it, in-container tooling
+# (bd, git, fabro, gh, shop-msg) leaks zombies forever — an --orchestrator fabro
+# BC was observed accumulating 540 zombies (532 bd) in ~15 minutes because the
+# ADR-058 dispatcher poll spawns bd every ~5s (lead-xnop).
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends tmux git \
+    && apt-get install -y --no-install-recommends tmux git tini \
     && rm -rf /var/lib/apt/lists/*
 
 # GitHub CLI (gh) — required for a BC container to authenticate git pushes to
@@ -336,5 +341,14 @@ RUN mkdir -p /home/vscode/.config \
     && chown -R vscode:vscode /home/vscode/.config
 USER vscode
 
-ENTRYPOINT ["/usr/local/bin/agent-vault-ca.sh"]
+# tini is PID 1 (a reaping init) and WRAPS — does not replace — the
+# CA-materialization entrypoint. tini reaps orphaned <defunct> children
+# regardless of run flags (covers the clone-path AND the workspace-mount
+# launch), then execs agent-vault-ca.sh as its child so the broker CA is still
+# materialized and the five trust vars exported on container start; that script
+# in turn execs CMD (`sleep infinity`) to keep the container alive. This is the
+# fix for the PID1-has-no-reaper zombie leak (lead-xnop). The agent-vault CA
+# entrypoint remains the CA entrypoint — the pinned agent-vault entrypoint
+# scenario still holds.
+ENTRYPOINT ["tini", "--", "/usr/local/bin/agent-vault-ca.sh"]
 CMD ["sleep", "infinity"]
