@@ -76,8 +76,8 @@ LABEL shopsystem.shop-templates.version=${SHOP_TEMPLATES_VERSION}
 # emits "/workspace/.fabro/" exactly as it emits ".claude/skills/".  The repo's
 # src/bc_launcher/assets/fabro-def/ remains only as the def SOURCE mirror.
 RUN pip install --no-cache-dir \
-    "shopsystem-messaging @ git+https://github.com/dstengle/shopsystem-messaging.git@v0.4.4" \
-    "scenarios @ git+https://github.com/dstengle/shopsystem-scenarios@v0.2.0" \
+    "shopsystem-messaging @ git+https://github.com/dstengle/shopsystem-messaging.git@v0.4.6" \
+    "scenarios @ git+https://github.com/dstengle/shopsystem-scenarios@v0.3.1" \
     "shop-templates @ git+https://github.com/dstengle/shopsystem-templates.git@${SHOP_TEMPLATES_VERSION}" \
     "shopsystem-bc-launcher @ git+https://github.com/dstengle/shopsystem-bc-launcher.git@v0.3.59"
 
