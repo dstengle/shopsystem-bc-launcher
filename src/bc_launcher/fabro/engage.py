@@ -243,7 +243,7 @@ run_finite() {{
   _rf_sw="$(printf '%s' "$_rf_wid" | tr -c 'A-Za-z0-9._-' '_')"
   _rf_child={def_dir}/child-"$_rf_sw".toml
   materialize_child "$_rf_wid" "$_rf_child" || {{ echo "materialize $_rf_wid failed (non-fatal)" >>{run_log} 2>&1; }}
-  fabro run "child-$_rf_sw.toml" --auto-approve >>{run_log} 2>&1
+  fabro run --server "$FABRO_SERVER" "child-$_rf_sw.toml" --auto-approve >>{run_log} 2>&1
   _rf_rc=$?
   echo "$(( $(cat {q_completed} 2>/dev/null || echo 0) + 1 ))" > {q_completed} 2>/dev/null || true
   rm -f "$_rf_child" 2>/dev/null || true
