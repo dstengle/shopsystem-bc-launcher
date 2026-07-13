@@ -155,28 +155,9 @@ def _schema_skew_heal_script(beads_remote_url: str, shop_type: str) -> str:
         "proceeding from the committed .beads/issues.jsonl source of truth' >&2; "
         # (3) DESTROY the broken remote-backed embedded-Dolt working set.
         "rm -rf .beads/embeddeddolt; "
-        # (3a) STRIP sync.remote from .beads/config.yaml BEFORE the reinit so the
-        #      from-jsonl rebuild does NOT hit bd's remote-history guard ("remote
-        #      has Dolt history and you selected local history without
-        #      --discard-remote", exit 10).  Driving that --discard-remote branch
-        #      is history-REPLACING and would diverge the BC's beads remote
-        #      (lead-oqaw / v0.3.67 prod defect); stripping the remote lets the
-        #      LOCAL reinit succeed without --discard-remote.  RESTORED at (4a).
-        "if [ -f .beads/config.yaml ]; then "
-        "cp .beads/config.yaml .beads/config.yaml.heal-bak; "
-        "grep -v '^sync\\.remote:' .beads/config.yaml.heal-bak "
-        "> .beads/config.yaml || true; fi; "
         # (4) REBUILD a fresh CURRENT-schema DB from the committed issues.jsonl
-        #     (NOT bd migrate).  --reinit-local: create-fresh LOCAL history; with
-        #     sync.remote stripped there is no configured remote to conflict, so
-        #     the remote-history guard never fires and no --discard-remote is used.
-        "BD_NON_INTERACTIVE=1 bd init --from-jsonl .beads/issues.jsonl "
-        "--reinit-local; "
-        # (4a) RESTORE sync.remote so the remote stays configured for the
-        #      deferred durable reseed (lead-tc38) and future launches — the
-        #      strip is TEMPORARY, never a divergence.
-        "if [ -f .beads/config.yaml.heal-bak ]; then "
-        "mv .beads/config.yaml.heal-bak .beads/config.yaml; fi; "
+        #     (NOT bd migrate).
+        "BD_NON_INTERACTIVE=1 bd init --from-jsonl .beads/issues.jsonl; "
         # (5) RESEED the remote durably via a history-replacing brokered
         #     force-push; NON-FATAL on the (as-yet-unwired) credential gap.
         f"bd dolt remote add origin {beads_remote_url} 2>/dev/null || true; "

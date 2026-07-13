@@ -243,15 +243,7 @@ run_finite() {{
   _rf_sw="$(printf '%s' "$_rf_wid" | tr -c 'A-Za-z0-9._-' '_')"
   _rf_child={def_dir}/child-"$_rf_sw".toml
   materialize_child "$_rf_wid" "$_rf_child" || {{ echo "materialize $_rf_wid failed (non-fatal)" >>{run_log} 2>&1; }}
-  # DIRECT the finite child at the ONE already-running shared server via
-  # --server "$FABRO_SERVER" (lead-oqaw / scenario 9f785e78ed55da4b).  Exporting
-  # FABRO_SERVER into the ambient shell is NOT enough: without an explicit server
-  # target on the `fabro run` command the child AUTOSTARTS its own server and
-  # fabro refuses `Server already running (pid <n>)` — the child exits 1 with no
-  # work_done and the dispatch stays stuck pending.  Passing --server attaches
-  # this child to the shared server, so the resident fabro-server count stays
-  # EXACTLY 1 no matter how many finite children are in flight.
-  fabro run --server "$FABRO_SERVER" "child-$_rf_sw.toml" --auto-approve >>{run_log} 2>&1
+  fabro run "child-$_rf_sw.toml" --auto-approve >>{run_log} 2>&1
   _rf_rc=$?
   echo "$(( $(cat {q_completed} 2>/dev/null || echo 0) + 1 ))" > {q_completed} 2>/dev/null || true
   rm -f "$_rf_child" 2>/dev/null || true
@@ -284,16 +276,8 @@ drain() {{
     [ -n "$_dr_wid" ] && dispatch "$_dr_wid"
   done
 }}
-# Startup drain (scenario 9d737 + 32009f85a099be62 / lead-oqaw.1): fire ONE
-# finite child for each PRE-EXISTING pending work id so nothing that arrived
-# before the watcher started is missed.  This runs AFTER the shared-server
-# readiness wait, and each startup-drain child reaches the SAME shared-server
-# finite worker as the message path (drain -> dispatch -> run_finite, which
-# targets the ONE shared server via --server "$FABRO_SERVER").  So N>=2
-# pre-existing pending work_ids all attach to the ONE shared server — the
-# resident fabro-server count stays EXACTLY 1, no child fails "Server already
-# running (pid <n>)", and each is processed to a Reviewer-gated work_done
-# rather than left stuck pending.
+# Startup drain (scenario 9d737): fire a finite child for each pre-existing
+# pending work id so nothing that arrived between sessions is missed.
 drain
 # Supervise: the ONLY always-resident process is `shop-msg watch --bc <name>`
 # (LISTEN/NOTIFY wake + bc_presence heartbeat — scenario e94a01 / lead-8hpz).
