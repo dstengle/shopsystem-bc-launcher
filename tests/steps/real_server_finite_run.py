@@ -46,9 +46,7 @@ from __future__ import annotations
 import os
 import re
 import shlex
-import shutil
 import subprocess
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -276,21 +274,25 @@ def drive_finite_run_to_real_terminal(server: dict, work_id: str) -> dict:
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture(scope="module")
-def shared_server():
+@pytest.fixture
+def shared_server(tmp_path, monkeypatch):
+    """A fresh REAL shared per-container fabro server per scenario, brought up via
+    the REAL engage bootstrap and torn down (incl. any stray fallback server the
+    negative control spawns) afterwards, so the resident-count invariant is
+    measured against an isolated server.
+    """
     _kill_stray_fabro_servers()
-    mp = pytest.MonkeyPatch()
-    tmp = Path(tempfile.mkdtemp(prefix="rsfr-"))
+    server = None
     try:
-        server = build_and_start_shared_server(tmp, mp)
+        server = build_and_start_shared_server(tmp_path, monkeypatch)
         yield server
     finally:
-        try:
-            teardown_server(server)  # type: ignore[possibly-undefined]
-        except Exception:
-            pass
-        mp.undo()
-        shutil.rmtree(tmp, ignore_errors=True)
+        if server is not None:
+            try:
+                teardown_server(server)
+            except Exception:
+                pass
+        _kill_stray_fabro_servers()
 
 
 def _require_real_terminal(res: dict) -> None:

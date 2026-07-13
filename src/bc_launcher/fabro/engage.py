@@ -176,6 +176,25 @@ def _fabro_engage_script(bc_name: str) -> str:
         f"export ANTHROPIC_API_KEY={dummy_key} && "
         f"export ANTHROPIC_BASE_URL={base_url} && "
         f"GH_TOKEN={gh_token} {install_argv} && "
+        # (lead-01jw.2 P0 — iteration-3 durable fix for "Server already running")
+        # `fabro install` DAEMONIZES a server on fabro's DEFAULT TCP endpoint
+        # (127.0.0.1:32276) AND writes SESSION_SECRET + FABRO_DEV_TOKEN to the
+        # DEFAULT storage dir's server.env ($HOME/.fabro/storage/server.env).  The
+        # ONE shared server below is started with a CUSTOM --storage-dir (the
+        # container-scoped .watch dir) which has NO server.env, so without the two
+        # steps here it DIES "auth is configured but SESSION_SECRET is not set" and
+        # never binds the socket — leaving the install daemon on TCP 32276 as the
+        # only resident server while FABRO_SERVER points at a socket nothing
+        # listens on.  Each finite `fabro run --server "$FABRO_SERVER"` child then
+        # cannot connect, falls back to `fabro server start` (default TCP 32276),
+        # collides with the install daemon, and fails "Server already running
+        # (pid <n>)".  FIX: (a) STOP the install daemon so the ONLY resident server
+        # is the ONE shared socket server (resident count stays EXACTLY 1); and
+        # (b) EXPORT the install-written SESSION_SECRET + FABRO_DEV_TOKEN so the
+        # shared server binds the socket (the SAME address exported as
+        # FABRO_SERVER) and every finite child authenticates to it.  Bind == target.
+        f"{FABRO_BIN} server stop >/dev/null 2>&1 || true && "
+        f'set -a && . "$HOME/.fabro/storage/server.env" && set +a && '
         f"{provider_register} && "
         f"mkdir -p {q_state} {q_inflight} {q_store} && "
         f": > {q_completed} && "
