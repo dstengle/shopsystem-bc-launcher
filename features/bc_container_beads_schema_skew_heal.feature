@@ -67,3 +67,12 @@ Feature: bc-container standup heals a remote-backed beads schema-skew wall by re
       | shop_type | heal_action                                              | heal_exit |
       | bc        | proceeds with the from-JSONL rebuild and reseed          | zero      |
       | lead      | refuses the rebuild and reseed, directing manual migrate | nonzero   |
+
+  @scenario_hash:fdfaaa78dc322bbc @bc:shopsystem-bc-launcher @origin:lead-16zo
+  Scenario: when the standup self-heal hits the remote-backed schema-skew wall it rebuilds a WORKING local current-schema beads DB WITHOUT the --discard-remote path and WITHOUT diverging the remote
+    Given a BC standup clones a remote-backed beads DB whose Dolt data sits at an OLD schema behind the baked bd's CURRENT target schema, so "bd bootstrap" fails on the bd upstream #4259 migration refusal
+    And the committed ".beads/issues.jsonl" carries a known issue count that is the schema-independent source of truth
+    When the standup's beads self-heal runs against that remote-backed schema-skew wall
+    Then the self-heal rebuilds a fresh local current-schema dolt DB from the committed ".beads/issues.jsonl" WITHOUT driving the "--discard-remote" branch, so it does NOT fail exit 10 on the "remote has Dolt history and you selected local history without --discard-remote" guard
+    And after the heal "bd ready" exits zero so the BC comes up with LIVE beads rather than dead beads, and the rebuilt DB's issue count equals the count committed in ".beads/issues.jsonl" at the baked bd's CURRENT target schema
+    And the heal reaches this working local state WITHOUT diverging the BC's beads remote — no history-replacing push and no "--discard-remote" — so the durable remote reseed (@scenario_hash:df748234563bdedb / lead-mv16) remains DEFERRED on lead-tc38 and every relaunch heals locally rather than re-breaking on the remote-history guard
