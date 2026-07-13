@@ -644,19 +644,24 @@ def test_8q2x_defect_b_run_resolves_def_dir_workflow_not_workspace_root(
         f"parent cwd at the image WORKDIR); script:\n{script}"
     )
 
-    # (3) `fabro run dispatcher.toml` (lead-b3f0 / ADR-058 AMENDED replaced the
-    # bare `fabro run dispatcher.fabro` graph-def run with the `.toml`
-    # entrypoint, @scenario_hash:24d94274b9cbc2b0) runs AFTER the backgrounded
-    # server group, in the SAME (cwd=/workspace/.fabro) shell -> resolves
-    # /workspace/.fabro/dispatcher.toml, NOT /workspace/dispatcher.toml.
-    run_pos = script.find("fabro run dispatcher.toml")
+    # (3) The external watcher supervisor (lead-1vbw / ADR-058 AMENDMENT-3
+    # replaced the retired persistent `fabro run dispatcher.toml` engage) runs
+    # AFTER the backgrounded server group, in the SAME (cwd=/workspace/.fabro)
+    # shell -> its finite `fabro run` children resolve /workspace/.fabro/
+    # workflow.fabro, NOT /workspace/workflow.fabro.
+    run_pos = script.find("fabro run")
     assert run_pos != -1, (
-        f"Defect B: engage must issue `fabro run dispatcher.toml`; "
+        f"Defect B: the watcher must issue finite `fabro run` children; "
         f"script:\n{script}"
     )
     assert run_pos > m.start(), (
-        "Defect B: `fabro run` must run AFTER the backgrounded server group, "
-        f"in the foreground shell; script:\n{script}"
+        "Defect B: the finite `fabro run` children must run AFTER the "
+        f"backgrounded server group, in the foreground-cwd shell; script:\n{script}"
+    )
+    # The retired infinite dispatcher.toml engage is gone.
+    assert "fabro run dispatcher.toml" not in script, (
+        "lead-1vbw: the retired infinite `fabro run dispatcher.toml` engage "
+        f"must be gone; script:\n{script}"
     )
     assert "/workspace/dispatcher.toml" not in script, (
         "Defect B: the engage must NOT resolve /workspace/dispatcher.toml "

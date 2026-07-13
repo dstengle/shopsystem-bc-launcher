@@ -289,3 +289,69 @@ FABRO_SERVER_DUMMY_ANTHROPIC_KEY = "sk-ant-dummy-agent-vault-rides-the-wire"
 FABRO_SERVER_SETTINGS_CONTAINER_PATH = (
     f"/home/{AGENT_CONTAINER_USER}/.fabro/settings.toml"
 )
+
+
+# ---------------------------------------------------------------------------
+# lead-1vbw / ADR-058 AMENDMENT-3 — the EXTERNAL agent-free message-driven
+# watcher supervisor engage (replaces the infinite `fabro run dispatcher.toml`).
+# ---------------------------------------------------------------------------
+#
+# ROOT CAUSE (lead-01jw, P0): the prior `--orchestrator fabro` engage ran ONE
+# never-ending `fabro run dispatcher.toml` — a cyclic poll->dispatch->wait->poll
+# loop whose per-5s-tick run-graph events accumulate UNBOUNDED in the fabro
+# server heap (RSS grew 18->28GiB during PURE idle polling, OOM-bound).  The
+# same infinite engage also failed the liveness heartbeat (lead-8hpz): a fabro
+# BC was live-and-working yet reported offline because no shop-msg heartbeat was
+# maintained.
+#
+# THE FIX: the engage becomes an EXTERNAL, agent-free, message-driven watcher
+# supervisor whose ONLY always-resident process is `shop-msg watch --bc <name>`
+# (a LISTEN/NOTIFY event source that emits a line only on a real message, never
+# per poll tick, and that DOUBLES as the bc_presence liveness heartbeat — the
+# lead-8hpz fix).  Each inbound inbox message fires ONE FINITE `fabro run
+# workflow.fabro` child — the UNCHANGED ADR-051 child def, provider=local,
+# WORK_ID/BC_NAME delivered via the per-child `[run.environment.env]` overlay.
+# Idle => zero resident runs.
+#
+# PRODUCT-AUTHORITY DIRECTIVE (David, scenario 728871aca27b0d8f): the reference
+# workaround (bin/bc-fabro-watch) started ONE EPHEMERAL server PER RUN and killed
+# it on completion.  This engage instead starts EXACTLY ONE long-lived fabro
+# server PER CONTAINER, bound to a container-scoped socket, persisting the whole
+# container lifetime; every finite child fires against that ONE shared server
+# (FABRO_SERVER targets the shared socket).  RATIONALE: a single persistent
+# per-container server is OBSERVABLE — it exposes a scrapeable telemetry/metrics
+# surface (scenario edc035fdde4062df) — whereas an ephemeral-per-run server
+# vanishes before it can be measured.  CONSEQUENCE THE BC OWNS: memory safety no
+# longer comes "for free" from per-run process death, so the watcher publishes a
+# telemetry surface (resident memory + active/completed finite-run counts).
+
+# The watcher's per-container state root (locks, the shared server socket +
+# storage, the completed-run counter, the telemetry file).  Container-scoped so
+# the ONE server + its telemetry persist the whole container lifetime.
+FABRO_WATCH_STATE_DIR = f"{FABRO_DEF_CONTAINER_DIR}/.watch"
+
+# The ONE long-lived per-container fabro server's container-scoped socket.  Every
+# finite `fabro run workflow.fabro` child targets this via FABRO_SERVER, so the
+# resident-server count is exactly 1 whether 0, 1, or many runs are in flight.
+FABRO_WATCH_SERVER_SOCKET = f"{FABRO_WATCH_STATE_DIR}/fabro-server.sock"
+
+# The ONE shared server's storage dir (its event heap lives here — the thing
+# lead-01jw watches for monotonic growth).
+FABRO_WATCH_SERVER_STORAGE = f"{FABRO_WATCH_STATE_DIR}/server-store"
+
+# One lock subdir per live work_id — the atomic-mkdir in-flight dedup set, so
+# exactly one finite child runs per work_id concurrently (scenario 9d737).
+FABRO_WATCH_INFLIGHT_DIR = f"{FABRO_WATCH_STATE_DIR}/inflight"
+
+# Monotonic completed-finite-run counter (bumped as each child reaches terminal)
+# — one of the counts the telemetry surface publishes.
+FABRO_WATCH_COMPLETED_FILE = f"{FABRO_WATCH_STATE_DIR}/completed.count"
+
+# The scrapeable telemetry/metrics surface (scenario edc035fdde4062df): the ONE
+# server's current resident memory + its active/completed finite-run counts,
+# continuously observable across the container lifetime.
+FABRO_WATCH_TELEMETRY_FILE = f"{FABRO_WATCH_STATE_DIR}/telemetry.json"
+
+# The telemetry sampling cadence (seconds) — how often the supervisor refreshes
+# the server RSS + run-count sample into the telemetry file.
+FABRO_WATCH_TELEMETRY_INTERVAL_SECS = 15

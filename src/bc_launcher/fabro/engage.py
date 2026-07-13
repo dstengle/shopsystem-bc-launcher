@@ -37,89 +37,85 @@ def _fabro_server_install_argv() -> list[str]:
 
 
 def _fabro_run_argv(bc_name: str) -> list[str]:
-    """The argv the launcher uses to RUN the PERSISTENT REACTIVE DISPATCHER def
-    against the ephemeral fabro server as the ENGAGE step (lead-odd9 / ADR-058
-    D1, correcting lead-cadr's one-shot).
+    """The argv the launcher's watcher fires for each FINITE child run
+    (lead-1vbw / ADR-058 AMENDMENT-3, superseding the retired persistent
+    ``fabro run dispatcher.toml`` engage).
 
-    `fabro run dispatcher.fabro -I BC_NAME=<bc_name>` — ONE persistent run that
-    OWNS the container's lifecycle and discovers work_ids at RUNTIME.  It
-    carries ONLY the constant BC_NAME into the run via the def's
-    [run.environment.env]; it supplies NO `-I WORK_ID` and requires NO launch-
-    time work id (ADR-058 D1/D6).  The prior one-shot `fabro run workflow.fabro
-    -I BC_NAME -I WORK_ID` engage (retired) ran the child def directly on a
-    launch-time work id; under ADR-058 the dispatcher's Haiku launch node spawns
-    one detached `fabro run workflow.fabro` child per pending work item at
-    runtime instead.  Returned as a list so the test can assert the launcher
-    issues exactly this argv with the scenario's BC_NAME.
+    Each inbound inbox message fires ONE FINITE ``fabro run`` child that runs the
+    UNCHANGED ADR-051 ``workflow.fabro`` graph against the ONE long-lived
+    per-container fabro server.  The per-child WORK_ID/BC_NAME are delivered via
+    the materialized child config's ``[run.environment.env]`` overlay (NOT via
+    ``-I``, which does not reach the native ``script=`` nodes — the byte-identical
+    reference recipe), so this argv carries no ``-I`` and runs a per-child config
+    file.  ``bc_name`` is accepted for signature compatibility with the historical
+    import sites; the concrete finite-child argv is issued inside the watcher
+    supervisor (``_fabro_engage_script``).  Returned as a list so callers can
+    describe the finite-child run.
     """
-    return [
-        FABRO_BIN,
-        "run",
-        FABRO_DISPATCHER_FILE,
-        "-I",
-        f"BC_NAME={bc_name}",
-    ]
+    return [FABRO_BIN, "run", FABRO_WORKFLOW_FILE]
 
 
 
 def _fabro_engage_script(bc_name: str) -> str:
-    """Build the ``/bin/sh -c`` script that drives the fabro ENGAGE step in the
-    placed def dir (lead-cadr + lead-ze4w BUG#4 + lead-odd9 / ADR-058).
+    """Build the ``/bin/sh -c`` script that drives the fabro ENGAGE step — the
+    EXTERNAL agent-free message-driven watcher supervisor (lead-1vbw / ADR-058
+    AMENDMENT-3, superseding the retired infinite ``fabro run dispatcher.toml``
+    engage; keeps lead-cadr + lead-ze4w BUG#4 + lead-esy4 Defect D + lead-8q2x
+    bootstrap invariants intact).
 
-    lead-odd9 / ADR-058 D1: the ENGAGE run is now the PERSISTENT REACTIVE
-    ``fabro run dispatcher.fabro -I BC_NAME=<bc>`` (no WORK_ID), not the retired
-    one-shot ``fabro run workflow.fabro -I BC_NAME -I WORK_ID``.  Everything else
-    on this path — the ~/.fabro server-config bootstrap (BUG#4), the
-    env-before-install ordering (esy4 Defect D), the cwd=/workspace/.fabro run
-    (Defect B) — is UNCHANGED and is exactly the ADR-058 bundled clone-path fix
-    (@scenario_hash:cacccc52ba0b0766).
+    ROOT CAUSE the watcher fixes (lead-01jw, P0): the prior engage ran ONE
+    never-ending ``fabro run dispatcher.toml`` — a cyclic
+    poll->dispatch->wait->poll loop whose per-tick run-graph events accumulated
+    UNBOUNDED in the fabro server heap (RSS 18->28GiB during PURE idle polling,
+    OOM-bound), and it maintained NO shop-msg heartbeat (lead-8hpz:
+    live-but-offline).
 
-    lead-ze4w BUG#4: BEFORE `fabro server start`, bootstrap the SERVER-level
-    fabro config so the server does not abort
-    ``server.auth.methods: field is required``:
-      1. `fabro install --non-interactive --skip-llm --overwrite-settings
-         --github-strategy token --github-username <dummy>` (GH_TOKEN set)
-         writes a valid server-level ~/.fabro/settings.toml.
-      2. register the anthropic provider pointed at the shim base_url
-         (http://127.0.0.1:8788/v1) with a DUMMY ANTHROPIC_API_KEY in the
-         server env (ADR-049 D1: no real credential — the real cred rides
-         agent-vault on the wire).
+    THE ENGAGE IS NOW A WATCHER SUPERVISOR.  The recorded ``command[2]`` script,
+    read top to bottom, is:
 
-    lead-8q2x — the ze4w Fix#4 bootstrap was broken 3 ways at runtime; all
-    three are corrected here:
+      1. UNCHANGED server-config bootstrap (the clone-path fix the watcher STILL
+         needs): ``cd`` into the def dir FIRST (so ``fabro run`` children resolve
+         the poured ``workflow.fabro``, not ``/workspace/workflow.fabro``); export
+         SSL_CERT_FILE + the DUMMY ANTHROPIC_API_KEY + the shim ANTHROPIC_BASE_URL
+         BEFORE ``fabro install`` (esy4 Defect D); ``fabro install`` writes a
+         VALID server-level ``~/.fabro/settings.toml`` ([server.auth] methods +
+         64-hex SESSION_SECRET + ``fabro_dev_``+64hex FABRO_DEV_TOKEN) so the
+         server does not die ``server.auth.methods: field is required``; append
+         the ``[llm.providers.anthropic]`` provider block (adapter + shim
+         base_url, NO api_key — lead-sp2m) at the server.
+      2. Start EXACTLY ONE long-lived per-container fabro server, bound to a
+         container-scoped socket + storage dir, FOREGROUND, NO web UI
+         (``fabro server start --foreground --no-web``), backgrounded inside its
+         OWN brace group so ONLY the server detaches and the ``cd``/install stay
+         synchronous (lead-8q2x Defect B).  This is the ONE shared server for the
+         whole container lifetime (product-authority directive, scenario
+         728871aca27b0d8f) — NOT one ephemeral server per run.
+      3. Publish a scrapeable telemetry surface (scenario edc035fdde4062df): the
+         supervisor samples the ONE server's resident memory (``VmRSS``) + its
+         active/completed finite-run counts into a telemetry file, refreshed on a
+         cadence, so memory safety — which no longer comes "for free" from per-run
+         process death — is CONTINUOUSLY observable.
+      4. STARTUP DRAIN + per-message dispatch (scenario 9d737bcd0f4473e9): the
+         authoritative pending set is ``shop-msg pending inbox --bc <name>``;
+         each pending/incoming work_id fires ONE FINITE child, guarded by an
+         atomic ``mkdir`` in-flight lock (dedup — exactly one child per work_id
+         concurrently).  Each finite child runs the UNCHANGED ADR-051
+         ``workflow.fabro`` graph via a byte-identical materialized child config
+         (provider=local, WORK_ID/BC_NAME via ``[run.environment.env]`` — the
+         f38ab guarantee) against the ONE shared server (``FABRO_SERVER`` targets
+         the shared socket).  A finite child failure is logged and SWALLOWED as
+         NON-FATAL: the lock is released and the supervisor keeps serving
+         (scenario 7a4f7eed52594107).  The dispatch path is AGENT-FREE — no
+         claude / LLM anywhere; steady-state supervision spends ZERO model tokens.
+      5. The ONLY always-resident process is ``shop-msg watch --bc <name>`` — a
+         LISTEN/NOTIFY event source that emits a line only on a real message
+         (never per poll tick) AND doubles as the bc_presence liveness HEARTBEAT
+         (scenario e94a01b26ed6a4cc, the lead-8hpz fix).  Idle => ZERO resident
+         fabro runs (scenario 47da82f60bbd47a9).
 
-      A) INSTALL-FLAG DRIFT: on fabro 0.254.0 the bare install aborts
-         ``x non-interactive install requires --github-strategy``.
-         `_fabro_server_install_argv` now emits
-         `--github-strategy token --github-username <dummy>` and the install
-         runs with a DUMMY `GH_TOKEN` inline (github token not exercised on
-         this path).
-      B) `&` CWD-SCOPING: previously the trailing `&` backgrounded the WHOLE
-         `cd && install && ... && nohup server` AND-list, so the `cd` ran
-         inside the backgrounded subshell and the PARENT shell cwd stayed
-         /workspace (the image WORKDIR) — `fabro run workflow.fabro` then
-         resolved /workspace/workflow.fabro -> "x workflow not found".  Now
-         the `cd {def_dir}` + install + provider registration run
-         SYNCHRONOUSLY in the SAME shell as `fabro run`, and ONLY the
-         foreground server is backgrounded (`nohup ... &` on its own line).
-         `fabro run` therefore executes with cwd=/workspace/.fabro and
-         resolves /workspace/.fabro/workflow.fabro.
-      C) PROVIDER NOT REGISTERED AT SERVER: `--skip-llm` skips server-level
-         provider registration, so `fabro model test` reported "not
-         configured" even with the server up — the SERVER does not read the
-         workflow-level settings for model resolution.  The bootstrap now
-         APPENDS a schema-valid `[llm.providers.anthropic]` block
-         (adapter="anthropic" + shim base_url, NO api_key — lead-sp2m) to the
-         server-level ~/.fabro/settings.toml AFTER install, so the provider is
-         registered AT THE SERVER.  The DUMMY key rides the ANTHROPIC_API_KEY
-         server-env export, never the settings file.
-
-    Then start the ephemeral fabro server in the FOREGROUND with no web UI and
-    run the loop def against it.  The server's foreground serve loop blocks, so
-    ONLY the server is backgrounded; the ``fabro run`` engage runs
-    synchronously in the same shell (cwd=/workspace/.fabro) so
-    ``workflow.fabro`` resolves and the server picks up the effective settings
-    the launcher wrote alongside it.
+    The engage exec is issued DETACHED at the docker level (``exec -d``, lead-lwk4
+    R7) by ``_fabro_engage``, so ``launch()`` returns after issuing this long-lived
+    supervisor rather than blocking on it.
     """
     import shlex
 
@@ -129,32 +125,38 @@ def _fabro_engage_script(bc_name: str) -> str:
     server_argv = " ".join(
         shlex.quote(tok) for tok in _fabro_server_start_argv()
     )
-    run_argv = " ".join(
-        shlex.quote(tok) for tok in _fabro_run_argv(bc_name)
-    )
     def_dir = shlex.quote(FABRO_DEF_CONTAINER_DIR)
-    server_log = shlex.quote(f"{FABRO_DEF_CONTAINER_DIR}/fabro-server.log")
-    # lead-i0wi F3: the backgrounded (detached) `fabro run` engage's stdout/stderr
-    # is captured to a run log so detaching does not discard the run's output.
-    run_log = shlex.quote(f"{FABRO_DEF_CONTAINER_DIR}/fabro-run.log")
     base_url = shlex.quote(FABRO_ANTHROPIC_BASE_URL)
     dummy_key = shlex.quote(FABRO_SERVER_DUMMY_ANTHROPIC_KEY)
     gh_token = shlex.quote(FABRO_SERVER_INSTALL_GH_TOKEN)
     server_settings = shlex.quote(FABRO_SERVER_SETTINGS_CONTAINER_PATH)
-    # (Defect C) The [llm.providers.anthropic] block appended to the
-    # server-level ~/.fabro/settings.toml so the provider is registered AT THE
-    # SERVER pointed at the shim.  Written with printf via a here-doc-free
-    # append so it needs no base64 helper on the container.
-    #
-    # lead-sp2m (Fix C correction): the block writes ONLY schema-valid fields
-    # — `adapter = "anthropic"` + `base_url = "<shim>/v1"`.  It writes NO
-    # `api_key` line: fabro 0.254.0 REJECTS `api_key` under
-    # [llm.providers.anthropic] ("unknown field `api_key`") so `fabro validate`
-    # exits 1 and the server can't start.  The DUMMY key is supplied instead
-    # via the ANTHROPIC_API_KEY ENVIRONMENT VARIABLE in the server's exec env
-    # (the export below), exactly the Slice-0/Slice-3 spike recipe.  ADR-049
-    # D1: no real credential anywhere in fabro's settings/vault — the real
-    # cred rides agent-vault on the wire.
+    server_log = shlex.quote(f"{FABRO_DEF_CONTAINER_DIR}/fabro-server.log")
+    run_log = shlex.quote(f"{FABRO_DEF_CONTAINER_DIR}/fabro-watch.log")
+
+    # Watcher state (container-scoped: the ONE server + its telemetry persist the
+    # whole container lifetime).  Bare (unquoted) forms are used where they are
+    # embedded in shell word positions with no special chars; quoted forms guard
+    # redirections / arguments.
+    state_dir = FABRO_WATCH_STATE_DIR
+    sock = FABRO_WATCH_SERVER_SOCKET
+    store = FABRO_WATCH_SERVER_STORAGE
+    inflight = FABRO_WATCH_INFLIGHT_DIR
+    completed = FABRO_WATCH_COMPLETED_FILE
+    telemetry = FABRO_WATCH_TELEMETRY_FILE
+    interval = FABRO_WATCH_TELEMETRY_INTERVAL_SECS
+    q_state = shlex.quote(state_dir)
+    q_sock = shlex.quote(sock)
+    q_store = shlex.quote(store)
+    q_inflight = shlex.quote(inflight)
+    q_completed = shlex.quote(completed)
+    q_telemetry = shlex.quote(telemetry)
+    q_bc = shlex.quote(bc_name)
+    workflow = FABRO_WORKFLOW_FILE
+
+    # (Defect C) the [llm.providers.anthropic] block appended to the SERVER-level
+    # ~/.fabro/settings.toml so the provider is registered AT THE SERVER
+    # (adapter + shim base_url, NO api_key — lead-sp2m; the DUMMY key rides the
+    # ANTHROPIC_API_KEY server-env export, never the settings TOML — ADR-049 D1).
     provider_block = (
         "\\n[llm.providers.anthropic]\\n"
         f'adapter = "{FABRO_ANTHROPIC_ADAPTER}"\\n'
@@ -163,110 +165,136 @@ def _fabro_engage_script(bc_name: str) -> str:
     provider_register = (
         f"printf '%b' {shlex.quote(provider_block)} >> {server_settings}"
     )
-    # (Defect A/B/C + lead-esy4 Defect D) Bootstrap the server-level config
-    # SYNCHRONOUSLY, then background ONLY the foreground server, then run the
-    # def in the SAME shell (cwd=/workspace/.fabro):
-    #   * `cd {def_dir}` first, SYNCHRONOUS — so `fabro run` resolves
-    #     /workspace/.fabro/workflow.fabro (NOT /workspace/workflow.fabro);
-    #   * export the DUMMY ANTHROPIC_API_KEY + agent-vault CA (SSL_CERT_FILE) +
-    #     shim base_url (ANTHROPIC_BASE_URL) BEFORE `fabro install` — see the
-    #     lead-esy4 Defect D note below;
-    #   * `GH_TOKEN=<dummy> fabro install ... --github-strategy token
-    #     --github-username <dummy>` writes a valid ~/.fabro/settings.toml and
-    #     no longer aborts on the flag chain;
-    #   * append [llm.providers.anthropic] (adapter="anthropic" + shim
-    #     base_url, NO api_key — schema-valid; lead-sp2m) to the SERVER-level
-    #     settings so the provider is registered at the server;
-    #   * background ONLY `nohup {server} ... &` (its OWN line) so the run can
-    #     engage against it while the parent shell stays in {def_dir}.
-    #
-    # lead-esy4 Defect D (the FINAL fabro engage bug): `fabro install
-    # --non-interactive ...` STARTS the fabro serving daemon.  Previously the
-    # `export ANTHROPIC_API_KEY=<dummy>` (+ SSL_CERT_FILE + ANTHROPIC_BASE_URL)
-    # exports came AFTER `fabro install`, so the daemon `fabro install` spawned
-    # had NO LLM key in its env; the subsequent `fabro server start` could not
-    # bind ("× Server already running", a no-op) and `fabro run` then targeted
-    # the keyless install-daemon whose preflight FAILED "No LLM providers
-    # configured. Set ANTHROPIC_API_KEY or OPENAI_API_KEY".  FIX: move the three
-    # exports to BEFORE `fabro install`, so the install-spawned daemon inherits
-    # ANTHROPIC_API_KEY (+ the shim base_url + the broker CA) and `fabro run`
-    # preflight passes.  ADR-049 D1 invariant intact: the key is a DUMMY
-    # placeholder; the real credential rides agent-vault on the wire, and the
-    # fabro settings/vault stay __PLACEHOLDER__ (no api_key in the TOML).
-    #
-    # The now-redundant `fabro server start` (its serving daemon is already the
-    # install-daemon that inherited the key) is KEPT but backgrounded inside the
-    # brace group so its "× Server already running" no-op returns 0 immediately
-    # and does not break the `&&` chain before `fabro run`.  It is retained
-    # because scenario 77 (@scenario_hash:68e14cdcd8b7c145) structurally pins
-    # the `fabro server start --foreground --no-web` argv in the rendered engage
-    # script (both `_fabro_server_start_argv()` and `assert server_argv in
-    # call.command[2]`); dropping it would RED that signed-off lead pin, which
-    # lead-esy4 acceptance (iv) requires green.  The FUNCTIONAL fix is the
-    # env-before-install reordering; the retained server-start is harmless.
-    #
-    # NOTE (Defect B): the server is backgrounded via a brace group
-    # ``{ nohup ... & }`` so ONLY the server subprocess is detached; the
-    # surrounding `&&` chain (cd, exports, install, provider-register) runs
-    # SYNCHRONOUSLY in the CURRENT shell, so the cwd set by `cd {def_dir}`
-    # persists to `fabro run` on the last line.  (If the whole `cd && ... &&
-    # nohup server` list were terminated by a bare trailing `&`, the entire
-    # list — including the `cd` — would run in a backgrounded subshell and the
-    # parent shell cwd would stay at the image WORKDIR; that was the bug.)
-    # lead-lwk4 R7 (LAUNCH ACTUALLY RETURNS AFTER ENGAGE — DOCKER-LEVEL DETACH):
-    # `_fabro_engage` issues this script through `driver.exec_run`.  The v0.3.49
-    # lead-i0wi F3 fix backgrounded the `fabro run` engage INSIDE the script
-    # (`{ nohup ... & }`), but that was INEFFECTIVE: a synchronous `docker exec`
-    # captures the exec's stdout/stderr via pipes and reads them to EOF, and the
-    # backgrounded `{ nohup server & }` / `{ nohup run & }` children INHERIT
-    # those pipes, so `subprocess.run` never sees EOF and `docker exec` (hence
-    # `launch()`) BLOCKS for the lifetime of the foreground fabro server —
-    # nohup-inside-the-script does NOT detach the child stdio from the exec.
-    #
-    # FIX: detach at the DOCKER level.  `_fabro_engage` now issues this SAME
-    # script via `driver.exec_run(..., detach=True)` (docker `exec -d`), so the
-    # docker daemon runs the engage in the background and `docker exec -d`
-    # RETURNS IMMEDIATELY without attaching to (or reading) the exec's
-    # stdout/stderr — the child stdio never rides the launcher's pipes, so the
-    # blocking `subprocess.run` returns at once and `launch()` RETURNS after the
-    # engage is issued.  This mirrors the tmux path (a detached `tmux
-    # new-session -d` that daemonizes and returns), but detaches at the EXEC
-    # level so the ENGAGE SCRIPT itself is UNCHANGED — the `command[2]` payload
-    # the launcher records is byte-for-byte the same `cd {def_dir} && ... &&
-    # fabro run ...` chain, so every structural pin that reads command[2] as a
-    # prefix/substring (scn 77 @scenario_hash:68e14cdcd8b7c145, the esy4
-    # Defect-D ordering, the 8q2x Defect B/C shape) stays green verbatim.  The
-    # fabro server + run keep running headless in the container after `exec -d`
-    # returns.
-    #
-    # The script keeps the foreground `fabro server start` backgrounded (its OWN
-    # brace group, log-redirected) so ONLY the server is detached WITHIN the
-    # script, and `fabro run` runs synchronously in the engage shell AFTER it —
-    # exactly the 8q2x Defect-B shape.  The engage exec being `exec -d`, the
-    # launcher does not block on that synchronous `fabro run` either.
-    #
-    # INVARIANTS PRESERVED:
-    #   * esy4 Defect D: the three exports still PRECEDE `fabro install`, and the
-    #     `cd {def_dir}` + install + provider-register still run SYNCHRONOUSLY in
-    #     the engage shell BEFORE the run is engaged, so the run inherits
-    #     cwd=/workspace/.fabro (workflow.fabro resolves) and the LLM key.
-    #   * esy4 (ii) + scn 77 (@scenario_hash:68e14cdcd8b7c145): the
-    #     `fabro server start --foreground --no-web` argv stays RETAINED inside its
-    #     `{ nohup ... & }` brace group, and the `fabro run workflow.fabro -I
-    #     BC_NAME=... -I WORK_ID=...` argv is still ISSUED — detaching at the
-    #     DOCKER (`exec -d`) level changes HOW the exec is issued, not WHAT.
-    #   Teeth (lead-lwk4 R7): issue the engage exec WITHOUT detach (synchronous
-    #   `exec_run(detach=False)`) -> the R7 detach test REDs.
-    return (
+
+    # --- (1)/(2) bootstrap + start the ONE per-container server -------------
+    # SYNCHRONOUS `&&` chain (cd first, exports before install — esy4/ze4w),
+    # backgrounding ONLY the foreground server inside its own brace group
+    # (lead-8q2x Defect B); the whole AND-list is NOT terminated by a bare `&`.
+    bootstrap = (
         f"cd {def_dir} && "
         f'export {SSL_CERT_FILE_ENV}={shlex.quote(AGENT_VAULT_CONTAINER_CA_PATH)} && '
         f"export ANTHROPIC_API_KEY={dummy_key} && "
         f"export ANTHROPIC_BASE_URL={base_url} && "
         f"GH_TOKEN={gh_token} {install_argv} && "
         f"{provider_register} && "
-        f"{{ nohup {server_argv} >{server_log} 2>&1 & }} && "
-        f"{run_argv} >{run_log} 2>&1\n"
+        f"mkdir -p {q_state} {q_inflight} {q_store} && "
+        f": > {q_completed} && "
+        f"{{ nohup {server_argv} --bind {q_sock} --storage-dir {q_store} "
+        f">{server_log} 2>&1 & }} && "
+        f"FABRO_SERVER_PID=$!"
     )
+
+    # --- (3)/(4)/(5) the external agent-free watcher supervisor -------------
+    # Plain shell (functions + loops) after the bootstrap AND-chain.  Every finite
+    # child targets the ONE shared server via the exported FABRO_SERVER; run_finite
+    # never starts or kills a server (negative control for scenario 728871).
+    watcher = f"""
+BC_NAME={q_bc}
+FABRO_SERVER={sock}
+export FABRO_SERVER
+# Bounded readiness wait for the ONE shared server socket.
+_waited=0
+while [ ! -S {sock} ]; do
+  kill -0 "$FABRO_SERVER_PID" 2>/dev/null || break
+  _waited=$((_waited + 1)); [ "$_waited" -ge 150 ] && break
+  sleep 0.2
+done
+# Telemetry (scenario edc035): sample the ONE server's resident memory (VmRSS)
+# + active (in-flight lock count) and completed finite-run counts into a
+# scrapeable telemetry file, so bounded-vs-monotonic memory is observable.
+sample_telemetry() {{
+  _rss="$(awk '/VmRSS/ {{ print $2 " " $3 }}' /proc/"$FABRO_SERVER_PID"/status 2>/dev/null)"
+  _active="$(ls -1 {q_inflight} 2>/dev/null | wc -l | tr -d ' ')"
+  _completed="$(cat {q_completed} 2>/dev/null || echo 0)"
+  printf '{{"server_pid":"%s","resident_memory":"%s","active_runs":%s,"completed_runs":%s}}\\n' \\
+    "$FABRO_SERVER_PID" "$_rss" "${{_active:-0}}" "${{_completed:-0}}" > {q_telemetry}
+}}
+sample_telemetry
+( while kill -0 "$FABRO_SERVER_PID" 2>/dev/null; do sample_telemetry; sleep {interval}; done ) &
+# Materialize the finite child config — BYTE-IDENTICAL to the reference's
+# materialize_child: UNCHANGED ADR-051 workflow.fabro graph, provider=local,
+# WORK_ID/BC_NAME delivered to the native script= nodes via [run.environment.env]
+# (the f38ab guarantee — `-I WORK_ID` does NOT reach them).
+materialize_child() {{
+  _mc_wid="$1"; _mc_path="$2"
+  cat > "$_mc_path" <<EOF
+[workflow]
+graph = "{workflow}"
+[run.inputs]
+BC_NAME = "$BC_NAME"
+WORK_ID = "$_mc_wid"
+[run.environment.env]
+BC_NAME = "$BC_NAME"
+WORK_ID = "$_mc_wid"
+[run.environment]
+id = "local"
+[environments.local]
+provider = "local"
+[run.pull_request]
+enabled = false
+EOF
+}}
+# run_finite <work_id>: fire ONE finite `fabro run` child that runs the UNCHANGED
+# workflow.fabro graph against the ONE shared server (FABRO_SERVER, exported).
+# NON-FATAL: any failure is logged + swallowed, the completed counter is bumped,
+# and the in-flight lock is ALWAYS released so the supervisor keeps serving.
+run_finite() {{
+  _rf_wid="$1"
+  _rf_sw="$(printf '%s' "$_rf_wid" | tr -c 'A-Za-z0-9._-' '_')"
+  _rf_child={def_dir}/child-"$_rf_sw".toml
+  materialize_child "$_rf_wid" "$_rf_child" || {{ echo "materialize $_rf_wid failed (non-fatal)" >>{run_log} 2>&1; }}
+  fabro run "child-$_rf_sw.toml" --auto-approve >>{run_log} 2>&1
+  _rf_rc=$?
+  echo "$(( $(cat {q_completed} 2>/dev/null || echo 0) + 1 ))" > {q_completed} 2>/dev/null || true
+  rm -f "$_rf_child" 2>/dev/null || true
+  rm -rf {q_inflight}/"$_rf_sw" 2>/dev/null || true
+  sample_telemetry
+  if [ "$_rf_rc" -ne 0 ]; then
+    echo "child $_rf_wid exited $_rf_rc (non-fatal; watcher continues)" >>{run_log} 2>&1
+  fi
+  return "$_rf_rc"
+}}
+# dispatch <work_id>: atomic-mkdir in-flight dedup — spawn exactly once per live
+# work_id; SKIP if a child is already running for it.  The detached worker
+# isolates a child failure from the always-resident watch reader (non-fatal).
+dispatch() {{
+  _d_wid="$1"; [ -z "$_d_wid" ] && return 0
+  _d_sw="$(printf '%s' "$_d_wid" | tr -c 'A-Za-z0-9._-' '_')"
+  if mkdir {q_inflight}/"$_d_sw" 2>/dev/null; then
+    run_finite "$_d_wid" &
+  else
+    echo "skip $_d_wid: child already in flight (dedup)" >>{run_log} 2>&1
+  fi
+}}
+# drain: authoritative pending set = `shop-msg pending inbox --bc <name>`
+# (idempotent — a work_id whose child already responded work_done is absent).
+drain() {{
+  _dr_out="$(shop-msg pending inbox --bc "$BC_NAME" 2>>{run_log})" || return 0
+  [ -z "$_dr_out" ] && return 0
+  printf '%s\\n' "$_dr_out" | while IFS= read -r _dr_line; do
+    _dr_wid="$(printf '%s' "$_dr_line" | awk '{{ print $1 }}')"
+    [ -n "$_dr_wid" ] && dispatch "$_dr_wid"
+  done
+}}
+# Startup drain (scenario 9d737): fire a finite child for each pre-existing
+# pending work id so nothing that arrived between sessions is missed.
+drain
+# Supervise: the ONLY always-resident process is `shop-msg watch --bc <name>`
+# (LISTEN/NOTIFY wake + bc_presence heartbeat — scenario e94a01 / lead-8hpz).
+# Each real message is a WAKE; dispatch is dedup-guarded.  On stream end, sweep
+# the gap via drain, then restart watch.  AGENT-FREE: no model-backed agent
+# anywhere in this dispatch path — steady-state supervision spends ZERO tokens.
+while true; do
+  shop-msg watch --bc "$BC_NAME" 2>>{run_log} | while IFS=' ' read -r _w_wid _w_mtype; do
+    [ "$_w_wid" = "READY" ] && continue
+    [ -z "$_w_wid" ] && continue
+    dispatch "$_w_wid"
+  done
+  drain
+  sleep 2
+done
+"""
+    return bootstrap + watcher
 
 
 def _fabro_exec_env() -> dict[str, str]:

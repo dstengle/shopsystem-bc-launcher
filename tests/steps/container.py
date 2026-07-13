@@ -7331,40 +7331,6 @@ def cadr_inspect_fabro(ctx):
     ctx["cadr_inspected"] = True
 
 
-@then(parsers.parse(
-    'AFTER the readiness barrier passes the launcher starts an ephemeral '
-    'in-container fabro server running "{provider}" in the foreground with no '
-    'web UI bound to a local 127.0.0.1 socket, issuing the argv '
-    '"{server_argv}", so the loop runs headless inside the one bc-base '
-    "container and nothing is orchestrated outside it"))
-def cadr_fabro_server_started(provider, server_argv, ctx):
-    # (1) The launcher's server-start argv is exactly the pinned argv.
-    argv = _cadr_server_start_argv()
-    assert " ".join(argv) == server_argv, (
-        f"launcher server-start argv must be {server_argv!r}; got {argv!r}"
-    )
-    assert argv[:3] == ["fabro", "server", "start"]
-    assert "--foreground" in argv, "server must run in the FOREGROUND (teeth)"
-    assert "--no-web" in argv, "server must run with NO web UI (teeth)"
-    # (2) The launcher actually ISSUED that server-start on the fabro path,
-    #     AFTER the readiness barrier (the launch reached exit 0 through it).
-    call = _cadr_fabro_engage_call(ctx)
-    assert call is not None, (
-        "the fabro-path launcher did not emit a `fabro server start` exec; "
-        f"exec_calls: {[c.command[:3] for c in _cadr_exec_calls(ctx)]!r}"
-    )
-    assert server_argv in call.command[2], (
-        f"launcher engage script must issue {server_argv!r}; got "
-        f"{call.command[2]!r}"
-    )
-    # 127.0.0.1 / provider=local are the server's own defaults on this path
-    # (foreground, no web); the pinned argv carries no bind/provider override,
-    # so the ephemeral server binds its local 127.0.0.1 socket as provider
-    # local. Teeth: an argv that added a non-local bind or provider would
-    # diverge from the pinned argv above.
-    assert provider == "provider=local"
-
-
 @then(
     "the container, credential-proxy, postgres DSN and shop-msg mailbox "
     "surfaces are unchanged from the tmux path, only the engage tier "
@@ -7545,59 +7511,6 @@ def odd9_container_running_poured(container_name, def_dir, h_def, h76, ctx,
     ctx["container_name"] = container_name
 
 
-@given(parsers.parse(
-    'the container "{container_name}" has cloned the repo and shop-templates '
-    'has POURED "{def_dir}" including "dispatcher.fabro" and the UNCHANGED '
-    'ADR-051 "workflow.fabro" child def'))
-def odd9_container_cloned_poured(container_name, def_dir, ctx, fake_driver):
-    assert fake_driver.is_running(container_name), (
-        f"Expected {container_name!r} to be running after the fabro-path launch."
-    )
-    ctx["container_name"] = container_name
-
-
-@when(
-    "the launcher's recorded fabro engage steps — the server config it "
-    "provisions, the \"fabro server start\" argv, and the working directory of "
-    "the \"fabro run\" engage — are inspected structurally, without a live "
-    "docker daemon, a running fabro server, or a reachable agent-vault")
-def odd9_inspect_engage_steps(ctx):
-    ctx["odd9_inspected"] = True
-
-
-@then(parsers.parse(
-    'the launcher invokes "{run_argv}" against that server as the ONE '
-    'persistent engage step, carrying only the constant BC_NAME into the run '
-    'via the def\'s "{env_table}" and supplying NO "-I WORK_ID", so the '
-    'reactive dispatcher def poured into "{def_dir}" owns the container\'s '
-    'lifecycle and discovers work ids at runtime rather than running one-shot '
-    "on a launch-time work id (ADR-058 D1 correcting ADR-050 D3)"))
-def odd9_run_dispatcher(run_argv, env_table, def_dir, ctx):
-    # lead-b3f0 / scenario A (@scenario_hash:24d94274b9cbc2b0): the engage argv
-    # is reconciled from the bare `dispatcher.fabro` graph def to the
-    # `dispatcher.toml` ENTRYPOINT (provider=local, in-process).
-    assert run_argv == "fabro run dispatcher.toml -I BC_NAME=shopsystem-messaging"
-    call = _cadr_fabro_engage_call(ctx)
-    assert call is not None, (
-        "the fabro-path launcher did not emit a fabro engage exec; "
-        f"exec_calls: {[c.command[:3] for c in _cadr_exec_calls(ctx)]!r}"
-    )
-    script = call.command[2]
-    # The ONE persistent dispatcher engage: `fabro run dispatcher.toml
-    # -I BC_NAME=<bc>` — no -I WORK_ID, no one-shot workflow.fabro run.
-    assert run_argv in script, (
-        f"launcher engage script must issue {run_argv!r}; got {script!r}"
-    )
-    assert "WORK_ID" not in script, (
-        "the persistent dispatcher engage must carry NO -I WORK_ID (ADR-058 "
-        f"D1); the engage script still references WORK_ID:\n{script}"
-    )
-    assert "fabro run workflow.fabro" not in script, (
-        "the engage must NOT run the child def one-shot (fabro run "
-        f"workflow.fabro); that is the retired ONE-SHOT engage:\n{script}"
-    )
-
-
 @then(parsers.parse(
     'no "--work-id" is required at the fabro launch interface and any '
     '"--work-id" passed on the fabro path is an ignored no-op, exactly like '
@@ -7614,19 +7527,19 @@ def odd9_work_id_no_op(ctx, fake_driver, controller, tmp_path):
     )
     assert getattr(aliased, "work_id", None) == "ignored-xyz"
     # (3) Passing --work-id on the fabro path is an IGNORED no-op: re-driving the
-    #     launcher WITH a work id yields a byte-identical dispatcher engage that
-    #     carries NEITHER the value NOR any -I WORK_ID.
+    #     launcher WITH a work id yields a byte-identical watcher engage that does
+    #     NOT carry the launch-time value as an engage work id.  (lead-1vbw: the
+    #     watcher discovers per-child work_ids at RUNTIME via `shop-msg watch` /
+    #     the pending-inbox drain, delivering each child its OWN WORK_ID via the
+    #     materialized child's [run.environment.env] overlay — so a WORK_ID
+    #     template appears in the engage, but NEVER the ignored launch-time value.)
     _odd9_drive_fabro_launch(_ODD9_BC, ctx, fake_driver, controller, tmp_path,
                              work_id="ignored-xyz")
     call = _cadr_fabro_engage_call(ctx)
     script = call.command[2]
     assert "ignored-xyz" not in script, (
         "a --work-id passed on the fabro path must be an IGNORED no-op; the "
-        f"value leaked into the engage:\n{script}"
-    )
-    assert "WORK_ID" not in script, (
-        "a --work-id passed on the fabro path must NOT add -I WORK_ID to the "
-        f"persistent dispatcher engage:\n{script}"
+        f"launch-time value leaked into the watcher engage:\n{script}"
     )
 
 
@@ -7729,60 +7642,6 @@ def odd9_both_settings_distinct(server_settings, project_settings,
     assert call is not None and "fabro install" in call.command[2], (
         "the engage must provision the server ~/.fabro/settings.toml via "
         "`fabro install`"
-    )
-
-
-@then(parsers.parse(
-    'the launcher issues the persistent "{run_argv}" engage with its working '
-    'directory set to the project dir "{proj_dir}", NOT "{workspace}", so '
-    'fabro resolves the poured "dispatcher.toml" (and the "dispatcher.fabro" / '
-    '"workflow.fabro" it applies) rather than failing "workflow not found: '
-    '/workspace/dispatcher.toml"'))
-def odd9_run_cwd(run_argv, proj_dir, workspace, ctx):
-    call = _cadr_fabro_engage_call(ctx)
-    assert call is not None
-    script = call.command[2]
-    # lead-b3f0 / scenario A: argv reconciled to the `dispatcher.toml` entrypoint.
-    assert run_argv == "fabro run dispatcher.toml -I BC_NAME=shopsystem-messaging"
-    assert run_argv in script, (
-        f"the engage must issue {run_argv!r}; script:\n{script}"
-    )
-    # cwd = the project dir: `cd /workspace/.fabro` precedes `fabro run`.
-    cd_pos = script.find(f"cd {proj_dir}")
-    if cd_pos == -1:
-        cd_pos = script.find(f"cd '{proj_dir}'")
-    run_pos = script.find("fabro run dispatcher.toml")
-    assert cd_pos != -1 and cd_pos < run_pos, (
-        f"the engage must `cd {proj_dir}` BEFORE `fabro run` so the poured def "
-        f"resolves; script:\n{script}"
-    )
-    # It must NOT resolve the WORKDIR-root path the clone-path bug produced.
-    assert f"{workspace}/dispatcher.toml" not in script, (
-        f"the engage must NOT resolve {workspace}/dispatcher.toml; script:\n{script}"
-    )
-    assert f"{workspace}/workflow.fabro" not in script, (
-        f"the engage must NOT resolve {workspace}/workflow.fabro; script:\n{script}"
-    )
-
-
-@then(parsers.parse(
-    'as the observable result a fresh clone-path "{flag}" launch REACHES the '
-    "fabro engage successfully — the in-container fabro server comes up and "
-    'the "fabro run" engage resolves the poured def — instead of crashing at '
-    "server auth bootstrap or def resolution as the un-provisioned clone path "
-    "currently does (ADR-058 bundled fix, lead-l4iw)"))
-def odd9_reaches_engage(flag, ctx):
-    # Observable result: the launch drove to exit 0 AND both engage legs (server
-    # start + dispatcher run) are present in the recorded engage.
-    assert ctx["cadr_result"].exit_code == 0, (
-        "the fresh clone-path fabro launch must REACH the engage (exit 0)"
-    )
-    assert _cadr_fabro_server_calls(ctx), "fabro server start must be present"
-    assert _cadr_fabro_run_calls(ctx), "fabro run must be present"
-    call = _cadr_fabro_engage_call(ctx)
-    assert "fabro run dispatcher.toml" in call.command[2], (
-        "the engage must resolve the poured dispatcher.toml entrypoint (which "
-        "applies the dispatcher.fabro graph def)"
     )
 
 
@@ -8415,108 +8274,6 @@ def gapi_negative_control(ctx, tmp_path):
 def b3f0_launch_fabro(bc_name, ctx, fake_driver, controller, tmp_path):
     _odd9_drive_fabro_launch(bc_name, ctx, fake_driver, controller, tmp_path,
                              work_id=None)
-
-
-@given(parsers.parse(
-    'the container "{container_name}" is running with the self-contained fabro '
-    'def set POURED by shop-templates into "{def_dir}", including both the '
-    '"dispatcher.toml" entrypoint and the "dispatcher.fabro" graph def it '
-    'applies, and the bc-base container has NO docker daemon reachable at '
-    '"{sock}"'))
-def b3f0_container_running_toml_entrypoint(container_name, def_dir, sock, ctx,
-                                           fake_driver):
-    assert fake_driver.is_running(container_name), (
-        f"Expected {container_name!r} to be running after the fabro-path launch."
-    )
-    ctx["container_name"] = container_name
-    ctx["b3f0_sock"] = sock
-
-
-@when(parsers.parse(
-    'the engage the launcher issues and the poured "dispatcher.toml" '
-    "entrypoint are inspected structurally, without a live docker daemon, a "
-    "running fabro server, or a reachable agent-vault"))
-def b3f0_inspect_engage_and_toml(ctx):
-    ctx["b3f0_dispatcher_toml"] = _b3f0_dispatcher_toml_text()
-
-
-@then(parsers.parse(
-    'AFTER the readiness barrier passes the engage the launcher issues invokes '
-    '"{run_argv}" — the ".toml" entrypoint, NOT the bare "dispatcher.fabro" '
-    'graph def — so the run enters through the ".toml" rather than the ".fabro" '
-    "directly"))
-def b3f0_engage_runs_toml(run_argv, ctx):
-    assert run_argv == "fabro run dispatcher.toml"
-    call = _cadr_fabro_engage_call(ctx)
-    assert call is not None, (
-        "the fabro-path launcher did not emit a fabro engage exec; "
-        f"exec_calls: {[c.command[:3] for c in _cadr_exec_calls(ctx)]!r}"
-    )
-    script = call.command[2]
-    # The engage enters through the .toml entrypoint (provider=local in-process),
-    # not the bare .fabro graph def (which defaults to the docker sandbox).
-    assert "fabro run dispatcher.toml" in script, (
-        f"the engage must invoke `fabro run dispatcher.toml`; script:\n{script}"
-    )
-    # It must NOT run the bare `fabro run dispatcher.fabro` graph def directly
-    # (the exact pre-fix offline failure).
-    assert not re.search(r"fabro run dispatcher\.fabro(?!\.)", script), (
-        "the engage must NOT run the bare `fabro run dispatcher.fabro` graph "
-        f"def directly (it would fall to the docker sandbox); script:\n{script}"
-    )
-
-
-@then(parsers.parse(
-    'the poured "dispatcher.toml" applies "{provider_line}" so the fabro '
-    'sandbox comes up IN-PROCESS in the bc-base container ("{ready}") and every '
-    "native node of the dispatcher graph executes in-process with no docker "
-    'sandbox and no connection attempt to "{sock}"'))
-def b3f0_toml_provider_local(provider_line, ready, sock, ctx):
-    toml = ctx.get("b3f0_dispatcher_toml") or _b3f0_dispatcher_toml_text()
-    # The .toml entrypoint carries an [environments.local] provider = "local"
-    # block — that is what brings the sandbox up IN-PROCESS (no docker sock).
-    assert "[environments.local]" in toml, (
-        "the dispatcher.toml must declare an [environments.local] environment; "
-        f"toml:\n{toml}"
-    )
-    assert re.search(r'provider\s*=\s*"local"', toml), (
-        f"the dispatcher.toml must apply {provider_line!r} (provider = \"local\") "
-        f"so the sandbox comes up in-process; toml:\n{toml}"
-    )
-    # The .toml BINDS the dispatcher.fabro graph def (it "applies" it).
-    assert re.search(r'graph\s*=\s*"dispatcher\.fabro"', toml), (
-        "the dispatcher.toml must apply the dispatcher.fabro graph def "
-        f"([workflow] graph = \"dispatcher.fabro\"); toml:\n{toml}"
-    )
-
-
-@then(parsers.parse(
-    'as the negative control, had the engage instead run the bare "fabro run '
-    'dispatcher.fabro" (the ".fabro" graph def DIRECTLY), the run would BYPASS '
-    'the "{env_block}" provider, DEFAULT to the docker-sandbox executor, and — '
-    "because the bc-base container has no docker daemon — fail in 0s connecting "
-    'to "{sock}" and EXIT before the dispatcher ever watches the inbox, which '
-    'is the exact pre-fix offline failure this ".toml"-entrypoint engage exists '
-    "to avoid"))
-def b3f0_negative_control_bare_fabro(env_block, sock, ctx):
-    # STRUCTURAL negative control: the engage the launcher ACTUALLY issued enters
-    # through the .toml (which applies [environments.local] provider=local), so
-    # it does NOT take the bare-.fabro docker-sandbox path.
-    call = _cadr_fabro_engage_call(ctx)
-    assert call is not None
-    script = call.command[2]
-    assert not re.search(r"fabro run dispatcher\.fabro(?!\.)", script), (
-        "the engage must NOT run the bare `fabro run dispatcher.fabro`; that "
-        f"bare graph-def run is the docker-sandbox negative control; script:\n{script}"
-    )
-    # And the .toml the engage DOES enter through is what supplies the
-    # [environments.local] provider=local that averts the docker-sock failure.
-    toml = ctx.get("b3f0_dispatcher_toml") or _b3f0_dispatcher_toml_text()
-    assert env_block == "[environments.local]"
-    assert env_block in toml and re.search(r'provider\s*=\s*"local"', toml), (
-        f"the .toml entrypoint must carry {env_block!r} provider=local so the "
-        f"sandbox is in-process and never connects to {sock!r}; toml:\n{toml}"
-    )
 
 
 @given(parsers.parse(
