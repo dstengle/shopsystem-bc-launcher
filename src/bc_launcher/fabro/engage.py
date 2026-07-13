@@ -243,7 +243,15 @@ run_finite() {{
   _rf_sw="$(printf '%s' "$_rf_wid" | tr -c 'A-Za-z0-9._-' '_')"
   _rf_child={def_dir}/child-"$_rf_sw".toml
   materialize_child "$_rf_wid" "$_rf_child" || {{ echo "materialize $_rf_wid failed (non-fatal)" >>{run_log} 2>&1; }}
-  fabro run "child-$_rf_sw.toml" --auto-approve >>{run_log} 2>&1
+  # DIRECT the finite child at the ONE already-running shared server via
+  # --server "$FABRO_SERVER" (lead-oqaw / scenario 9f785e78ed55da4b).  Exporting
+  # FABRO_SERVER into the ambient shell is NOT enough: without an explicit server
+  # target on the `fabro run` command the child AUTOSTARTS its own server and
+  # fabro refuses `Server already running (pid <n>)` — the child exits 1 with no
+  # work_done and the dispatch stays stuck pending.  Passing --server attaches
+  # this child to the shared server, so the resident fabro-server count stays
+  # EXACTLY 1 no matter how many finite children are in flight.
+  fabro run --server "$FABRO_SERVER" "child-$_rf_sw.toml" --auto-approve >>{run_log} 2>&1
   _rf_rc=$?
   echo "$(( $(cat {q_completed} 2>/dev/null || echo 0) + 1 ))" > {q_completed} 2>/dev/null || true
   rm -f "$_rf_child" 2>/dev/null || true
