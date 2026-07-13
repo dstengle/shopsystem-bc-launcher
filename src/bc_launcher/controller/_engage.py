@@ -22,8 +22,8 @@ from bc_launcher.diagnostics import (
 from bc_launcher.fabro import (
     _fabro_exec_env,
     FABRO_DISPATCHER_FILE,
+    FABRO_WORKFLOW_FILE,
     _fabro_engage_script,
-    _fabro_run_argv,
     _fabro_server_start_argv,
 )
 from bc_launcher.manifest import (
@@ -150,8 +150,10 @@ class EngageMixin:
         )
         if engage_result.returncode != 0:
             reason = (
-                f"fabro engage failure: `fabro server start` / `fabro run "
-                f"{FABRO_DISPATCHER_FILE}` exited {engage_result.returncode}: "
+                f"fabro engage failure: the external watcher supervisor "
+                f"(`fabro server start` + `shop-msg watch` driving finite "
+                f"`fabro run {FABRO_WORKFLOW_FILE}` children) exited "
+                f"{engage_result.returncode}: "
                 f"{(engage_result.stderr or engage_result.stdout).strip()}"
             )
             err_lines.append("warning: " + reason + "\n")
@@ -161,13 +163,16 @@ class EngageMixin:
                 stderr="".join(err_lines),
             )
         out_lines.append(
-            "Fabro orchestrator engage (lead-cadr / ADR-058): started the "
-            "ephemeral in-container fabro server "
-            f"({' '.join(_fabro_server_start_argv())}) and ran the PERSISTENT "
-            "reactive dispatcher def as the engage ("
-            f"{' '.join(_fabro_run_argv(bc_name))}); no tmux 'agent' send-keys "
-            "session and no 'claude' engage started on this path — the engage "
-            "tier is REPLACED by the fabro run-graph entry (ADR-050 D3)\n"
+            "Fabro orchestrator engage (lead-1vbw / ADR-058 AMENDMENT-3): "
+            "started EXACTLY ONE long-lived per-container fabro server "
+            f"({' '.join(_fabro_server_start_argv())}) and engaged the EXTERNAL "
+            "agent-free message-driven watcher supervisor (always-resident "
+            "`shop-msg watch` = bc_presence heartbeat; each inbound message "
+            f"fires ONE finite `fabro run {FABRO_WORKFLOW_FILE}` child against "
+            "the one shared server; startup drain + in-flight dedup + telemetry "
+            "surface); no tmux 'agent' send-keys session and no 'claude' engage "
+            "started on this path — the engage tier is REPLACED by the fabro "
+            "watcher run-graph entry (ADR-050 D3)\n"
         )
         return CommandResult(
             exit_code=0, stdout="".join(out_lines), stderr="".join(err_lines)

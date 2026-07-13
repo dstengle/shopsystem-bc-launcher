@@ -99,10 +99,14 @@ def _engage_script(tmp_path: Path) -> str:
 # ---------------------------------------------------------------------------
 
 def test_engage_always_resident_is_shop_msg_watch(tmp_path):
-    """The ONLY always-resident process is `shop-msg watch --bc <name>`."""
+    """The ONLY always-resident process is `shop-msg watch --bc <name>`, bound to
+    this BC (BC_NAME set to the launch's bc_name)."""
     script = _engage_script(tmp_path)
-    assert f"shop-msg watch --bc {BC_NAME}" in script, (
-        f"the watcher engage must run `shop-msg watch --bc {BC_NAME}` as its "
+    assert f"BC_NAME='{BC_NAME}'" in script or f"BC_NAME={BC_NAME}" in script, (
+        f"the watcher must bind BC_NAME to {BC_NAME}; script:\n{script}"
+    )
+    assert 'shop-msg watch --bc "$BC_NAME"' in script, (
+        "the watcher engage must run `shop-msg watch --bc \"$BC_NAME\"` as its "
         f"always-resident process; script:\n{script}"
     )
 
@@ -188,7 +192,7 @@ def test_engage_heartbeat_is_shop_msg_watch(tmp_path):
     `shop-msg watch` process (it is the sole heartbeat source), and NO infinite
     `fabro run dispatcher.toml` remains (which maintained no heartbeat)."""
     script = _engage_script(tmp_path)
-    assert f"shop-msg watch --bc {BC_NAME}" in script
+    assert 'shop-msg watch --bc "$BC_NAME"' in script
     assert "fabro run dispatcher.toml" not in script
 
 
@@ -233,9 +237,9 @@ def test_engage_startup_drains_pending_inbox(tmp_path):
     """On startup the watcher DRAINS the pre-existing pending inbox, the
     authoritative pending set being `shop-msg pending inbox --bc <name>`."""
     script = _engage_script(tmp_path)
-    assert f"shop-msg pending inbox --bc {BC_NAME}" in script, (
-        "startup drain must query `shop-msg pending inbox --bc "
-        f"{BC_NAME}`; script:\n{script}"
+    assert 'shop-msg pending inbox --bc "$BC_NAME"' in script, (
+        "startup drain must query `shop-msg pending inbox --bc \"$BC_NAME\"`; "
+        f"script:\n{script}"
     )
 
 

@@ -275,28 +275,42 @@ def test_r7_engage_exec_is_detached_so_launch_returns(tmp_path):
     )
 
 
-def test_r7_engage_still_issues_server_and_run_argv_inside_detached_session(tmp_path):
+def test_r7_engage_still_issues_server_and_watcher_inside_detached_session(tmp_path):
     """Detaching changes HOW the engage is issued, not WHETHER: the
-    `fabro server start --foreground --no-web` and the PERSISTENT dispatcher run
-    `fabro run dispatcher.toml -I BC_NAME=...` argv stay present INSIDE the
-    detached session (lead-b3f0 / ADR-058 AMENDED corrected the engage entry
-    from the bare `dispatcher.fabro` graph def to the `dispatcher.toml`
-    entrypoint that applies provider=local, @scenario_hash:24d94274b9cbc2b0;
-    the persistent-dispatcher pin is @scenario_hash:30fd5f2079f1c433).
+    `fabro server start --foreground --no-web` (the ONE per-container server) and
+    the external agent-free watcher supervisor stay present INSIDE the detached
+    session (lead-1vbw / ADR-058 AMENDMENT-3 replaced the retired persistent
+    `fabro run dispatcher.toml` engage with `shop-msg watch`-driven finite
+    `fabro run workflow.fabro` children).
 
-    TEETH: drop the server-start or run argv -> RED.
+    TEETH: drop the server-start or the watcher supervisor -> RED.
     """
     script = _fabro_engage_exec(tmp_path).command[2]
     assert "fabro server start --foreground --no-web" in script, (
         f"the engage pins the server-start argv; script:\n{script}"
     )
-    assert f"fabro run dispatcher.toml -I BC_NAME={BC_NAME}" in script, (
-        "the engage must carry the persistent `fabro run dispatcher.toml -I "
-        f"BC_NAME` argv (ADR-058 AMENDED, scenario A); script:\n{script}"
+    # The external watcher supervisor: `shop-msg watch` is the always-resident
+    # process and each wake fires a FINITE `fabro run` child of the UNCHANGED
+    # workflow.fabro graph — NOT the retired infinite `fabro run dispatcher.toml`.
+    assert 'shop-msg watch --bc "$BC_NAME"' in script, (
+        "the engage must run the always-resident `shop-msg watch` supervisor "
+        f"(lead-1vbw); script:\n{script}"
     )
-    assert "WORK_ID" not in script, (
-        "the persistent dispatcher engage must carry NO -I WORK_ID (ADR-058 "
-        f"D1); script:\n{script}"
+    assert 'graph = "workflow.fabro"' in script, (
+        "each finite child must run the UNCHANGED ADR-051 workflow.fabro graph; "
+        f"script:\n{script}"
+    )
+    assert "fabro run dispatcher.toml" not in script, (
+        "the retired infinite `fabro run dispatcher.toml` engage must be gone; "
+        f"script:\n{script}"
+    )
+    # The per-child WORK_ID now rides the materialized child's
+    # `[run.environment.env]` overlay (the f38ab guarantee), delivered per finite
+    # child rather than at launch time (ADR-058 D6: the launch interface still
+    # requires no work id).
+    assert "[run.environment.env]" in script and "WORK_ID" in script, (
+        "the per-child WORK_ID must ride the `[run.environment.env]` overlay; "
+        f"script:\n{script}"
     )
 
 

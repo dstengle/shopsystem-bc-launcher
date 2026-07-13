@@ -49,34 +49,3 @@ Feature: a launched bc-base BC carries a self-contained VALID fabro loop def (le
     And the "dispatch" node is the only agent node — a non-LLM ACP script-agent ("backend=acp") — that acts on the pending work ids from "poll"
     And the "wait" node is a NATIVE "script=" node with no LLM that sleeps a short interval before the back-edge returns to "poll"
     And the def contains NO long-running "shop-msg watch" node and its only agent node is the non-LLM ACP dispatch script-agent (no Haiku "launch" node and no other model-backed LLM node) anywhere in the loop, so the steady-state loop consumes NO model tokens and tokens are spent only on the child's actual work
-
-  @scenario_hash:7709a671bdfaddb7 @bc:shopsystem-bc-launcher
-  Scenario: the poured dispatcher's dispatch node is an ACP-backed agent node carrying backend="acp" and an acp.command or acp.config attr, wired to receive the poll context and return dispatch decisions, not a native command node
-    Given the shopsystem-bc-launcher BC is installed
-    And the container "bc-shopsystem-messaging" is running with the self-contained fabro def set POURED by shop-templates into "/workspace/.fabro/", including the "dispatcher.fabro" graph def the "dispatcher.toml" entrypoint applies
-    When the poured "dispatcher.fabro" def's "dispatch" node is inspected structurally, without a live docker daemon, a running fabro server, or a reachable agent-vault
-    Then the "dispatch" node is an ACP-backed AGENT node carrying "backend=acp" together with an "acp.command" attr (a shell such as "python3 <dispatch_acp_agent.py>") OR an "acp.config" attr (a JSON stdio config), so fabro drives it through the agent-client-protocol backend
-    And the "dispatch" node is NOT a native "script="/parallelogram command node, so the pre-fix context-blind command dispatch is absent
-    And the "dispatch" node is wired to RECEIVE the incoming context yielded by the "poll" node — the pending inbox work ids plus the in-flight run state — as its input
-    And the "dispatch" node is wired to RETURN structured dispatch DECISIONS as its output, which the loop consumes to spawn children, so the dispatch step both reads context and emits decisions rather than blindly re-acting on raw work ids each cycle
-
-  @scenario_hash:713d01c4f4dfd107 @bc:shopsystem-bc-launcher
-  Scenario: for a work id whose prior child is still in flight the ACP dispatch node's decision is to SKIP re-dispatch and for a work id with no live child its decision is to SPAWN, with a negative control that the pre-fix native command node re-dispatched every cycle
-    Given the shopsystem-bc-launcher BC is installed
-    And the container "bc-shopsystem-messaging" is running with the self-contained fabro def set POURED by shop-templates into "/workspace/.fabro/", including the "dispatcher.fabro" graph def whose "dispatch" node is the ACP-backed agent node
-    And the incoming context carries a pending work id "W" AND the in-flight run state records that a prior child for "W" is still running and has not yet emitted work_done
-    When the ACP-backed "dispatch" node's decision contract is inspected structurally against that context, without a live docker daemon, a running fabro server, or a reachable agent-vault
-    Then the decision returned for the still-in-flight work id "W" is to SKIP re-dispatch, so NO second child is spawned for "W" while its prior child is live, and the two children cannot collide on the shared per-"W" git worktree
-    And when the in-flight run state records NO live child for a pending work id "V", the decision returned for "V" is to SPAWN a child, so a genuinely unstarted work id is still dispatched exactly once
-    And as the negative control, the pre-fix native command "dispatch" node carried NO in-flight skip and re-dispatched every still-pending work id each ~6s cycle — the exact duplicate-spawn the ACP node's in-flight tracking exists to eliminate
-
-  @scenario_hash:f38ab66672151669 @bc:shopsystem-bc-launcher
-  Scenario: for each work id the ACP dispatch node decides to spawn, the spawned child receives its concrete WORK_ID via a per-child "[run.environment.env] WORK_ID" overlay carried from the ACP agent's context, preserving the lead-b3f0 delivery guarantee
-    Given the shopsystem-bc-launcher BC is installed
-    And the container "bc-shopsystem-messaging" is running with the self-contained fabro def set POURED by shop-templates into "/workspace/.fabro/", including the "dispatcher.fabro" graph def whose "dispatch" node is the ACP-backed agent node and the UNCHANGED ADR-051 child def
-    And the ACP dispatch node's decision for a pending work id "W" with no live child is to SPAWN a child
-    When the ACP-backed "dispatch" node's decision contract and the per-child config it materializes for "W" are inspected structurally, without a live docker daemon, a running fabro server, or a reachable agent-vault
-    Then the per-child config the ACP node materializes for "W" carries the CONCRETE work id in a "[run.environment.env]" overlay as "WORK_ID=W", so the child receives its own work id through the child config env overlay
-    And the ACP node spawns that child DETACHED, so decided children run in PARALLEL isolated per WORK_ID and the dispatch step does not block on them before the loop's "wait -> poll" back-edge
-    And the spawned child runs the UNCHANGED ADR-051 child def, and the concrete "WORK_ID=W" from the "[run.environment.env]" overlay REACHES that child's native "script=" node env so the child acts on its own work id, preserving the lead-b3f0 delivery guarantee under the ACP dispatch
-
