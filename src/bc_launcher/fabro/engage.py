@@ -284,8 +284,16 @@ drain() {{
     [ -n "$_dr_wid" ] && dispatch "$_dr_wid"
   done
 }}
-# Startup drain (scenario 9d737): fire a finite child for each pre-existing
-# pending work id so nothing that arrived between sessions is missed.
+# Startup drain (scenario 9d737 + 32009f85a099be62 / lead-oqaw.1): fire ONE
+# finite child for each PRE-EXISTING pending work id so nothing that arrived
+# before the watcher started is missed.  This runs AFTER the shared-server
+# readiness wait, and each startup-drain child reaches the SAME shared-server
+# finite worker as the message path (drain -> dispatch -> run_finite, which
+# targets the ONE shared server via --server "$FABRO_SERVER").  So N>=2
+# pre-existing pending work_ids all attach to the ONE shared server — the
+# resident fabro-server count stays EXACTLY 1, no child fails "Server already
+# running (pid <n>)", and each is processed to a Reviewer-gated work_done
+# rather than left stuck pending.
 drain
 # Supervise: the ONLY always-resident process is `shop-msg watch --bc <name>`
 # (LISTEN/NOTIFY wake + bc_presence heartbeat — scenario e94a01 / lead-8hpz).
