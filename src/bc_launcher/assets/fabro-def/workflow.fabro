@@ -207,9 +207,43 @@ digraph BcShopLoop {
     // edge set unchanged -> `fabro validate` + the ky63 structural invariants
     // stay green). Teeth: revert this to `respond work_done --status blocked`
     // (consume-on-fail-closed) -> the F2 test REDs.
+    // lead-01jw.3 (behavior 1, scenario 629be1e0224f3a03): the block report is
+    // DIAGNOSTIC, not content-free. It READS the per-work run-context capture
+    // (/tmp/fabro_run_ctx_${WORK_ID} -- the arm node's /tmp/fabro_pending_${WORK_ID}
+    // precedent, making the old note's hand-wavy "see run context" REAL) and
+    // composes the nudge --note from three INTERPOLATED fields: the failing NODE
+    // (WHERE the run stopped), a REASON CLASS validated against the closed set
+    // {deliverable-gate, infra-path, llm-path, unknown} (a stray captured value
+    // falls back to `unknown`), and the captured error CONTEXT / run tail (WHY it
+    // stopped). ADR-051 preserved verbatim: still a NON-consuming `shop-msg nudge`
+    // (dispatch stays pending == retriable), never a de-pending `respond work_done
+    // --status blocked`, never a work_done(complete); emit_r stays the sole
+    // complete emitter. Teeth: revert to the content-free generic --note (empty
+    // node/reason/context) -> the behavior-1 tests RED.
+    // lead-01jw.3 (behavior 2, scenario 738f35759127fe7f): the reason class is
+    // now DERIVED (not read from a REASON= field) by the `classify_reason` shell
+    // function from the failing NODE + captured run tail, and for an infra-path
+    // failure the failing subsystem is named with a marker token from the closed
+    // set {deliverable, oauth-shim, agent-vault, proxy, rate-limit-429, llm-path,
+    // unknown} -- mirroring the tmux-runtime launch-diagnostic cause-marker idiom
+    // (diagnostics.py CAUSE_MARKER_*). Both the derived reason-class and the
+    // marker are re-validated against their closed sets (stray -> unknown), and
+    // the classification is composed ALONGSIDE (never replacing) the raw
+    // failing-node + context diagnosis.
+    // lead-01jw.3 (behavior 4, scenario b5bd016991cc2774): the LAST-RESORT
+    // FLOOR. Even when the capture is degenerate -- unclassifiable, missing, or
+    // truncated to whitespace-only NODE/CONTEXT -- the report stays diagnosable:
+    // the failing-node and context fall back via a WHITESPACE-AWARE guard (a
+    // `case *[![:space:]]*` test, not a naive `[ -n ]` which a blank/whitespace
+    // value would PASS) to `unknown` / a run-tail placeholder, the reason class
+    // is `unknown` (never empty), and the report stays the non-consuming BLOCKED
+    // nudge -- never a silent complete, never a content-free empty-node/reason/
+    // body block. Teeth: revert the guard to `[ -n "$FN" ]`/`[ -n "$CTX" ]` -> a
+    // whitespace-only capture emits `failing-node=`/`context=` blank and the
+    // behavior-4 floor test REDs.
     emit_blk  [shape=parallelogram, deterministic=true, retry=2,
-               label="report BLOCKED via non-consuming nudge (dispatch stays pending == retriable; consume deferred to terminal complete)",
-               script="shop-msg nudge --bc \"$BC_NAME\" --reason stuck-on-you --work-id \"$WORK_ID\" --note 'a deliverable-side gate or step failed (see run context); reporting blocked WITHOUT consuming the dispatch so a re-run is retriable without lead re-dispatch; the consuming terminal work_done is deferred to a genuine terminal complete (emit_r). ADR-051: no false complete, block reported not silent.'"]
+               label="report BLOCKED via non-consuming nudge, enriched with failing-node + DERIVED reason-class + infra-subsystem marker + captured context (dispatch stays pending == retriable; consume deferred to terminal complete)",
+               script="CTXF=\"/tmp/fabro_run_ctx_${WORK_ID}\"; FN=$(sed -n 's/^NODE=//p' \"$CTXF\" 2>/dev/null | head -1); CTX=$(sed -n 's/^CONTEXT=//p' \"$CTXF\" 2>/dev/null | tail -n 20 | tr '\n' ' '); classify_reason() { case \"$1 $2\" in *oauth-shim*|*anthropic-oauth*) echo \"infra-path oauth-shim\" ;; *agent-vault*) echo \"infra-path agent-vault\" ;; *429*|*rate-limit*) echo \"infra-path rate-limit-429\" ;; *proxy*) echo \"infra-path proxy\" ;; *deliverable*|*Reviewer*gate*) echo \"deliverable-gate deliverable\" ;; *LLM*|*unusable*|*non-advancing*) echo \"llm-path llm-path\" ;; *) echo \"unknown unknown\" ;; esac; }; RCDM=$(classify_reason \"$FN\" \"$CTX\"); RC=${RCDM%% *}; DM=${RCDM##* }; case \"$RC\" in deliverable-gate|infra-path|llm-path|unknown) ;; *) RC=unknown ;; esac; case \"$DM\" in deliverable|oauth-shim|agent-vault|proxy|rate-limit-429|llm-path|unknown) ;; *) DM=unknown ;; esac; case \"$FN\" in *[![:space:]]*) ;; *) FN=unknown ;; esac; case \"$CTX\" in *[![:space:]]*) ;; *) CTX='(no captured run tail available)' ;; esac; shop-msg nudge --bc \"$BC_NAME\" --reason stuck-on-you --work-id \"$WORK_ID\" --note \"fabro finite-run BLOCKED (ADR-051: non-consuming report; dispatch stays pending == retriable; consuming terminal work_done deferred to emit_r; never a silent complete). failing-node=$FN reason-class=$RC detail-marker=$DM context=$CTX\""]
 
     // =======================================================================
     // EDGES -- PROVEN-SAFE fail-closed pattern:
