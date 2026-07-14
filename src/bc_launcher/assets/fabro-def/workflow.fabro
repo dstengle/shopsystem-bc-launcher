@@ -229,11 +229,21 @@ digraph BcShopLoop {
     // (diagnostics.py CAUSE_MARKER_*). Both the derived reason-class and the
     // marker are re-validated against their closed sets (stray -> unknown), and
     // the classification is composed ALONGSIDE (never replacing) the raw
-    // failing-node + context diagnosis. (The unknown+run-tail floor = behavior 4;
-    // it appends to the SAME emit_blk / run-context capture contract.)
+    // failing-node + context diagnosis.
+    // lead-01jw.3 (behavior 4, scenario b5bd016991cc2774): the LAST-RESORT
+    // FLOOR. Even when the capture is degenerate -- unclassifiable, missing, or
+    // truncated to whitespace-only NODE/CONTEXT -- the report stays diagnosable:
+    // the failing-node and context fall back via a WHITESPACE-AWARE guard (a
+    // `case *[![:space:]]*` test, not a naive `[ -n ]` which a blank/whitespace
+    // value would PASS) to `unknown` / a run-tail placeholder, the reason class
+    // is `unknown` (never empty), and the report stays the non-consuming BLOCKED
+    // nudge -- never a silent complete, never a content-free empty-node/reason/
+    // body block. Teeth: revert the guard to `[ -n "$FN" ]`/`[ -n "$CTX" ]` -> a
+    // whitespace-only capture emits `failing-node=`/`context=` blank and the
+    // behavior-4 floor test REDs.
     emit_blk  [shape=parallelogram, deterministic=true, retry=2,
                label="report BLOCKED via non-consuming nudge, enriched with failing-node + DERIVED reason-class + infra-subsystem marker + captured context (dispatch stays pending == retriable; consume deferred to terminal complete)",
-               script="CTXF=\"/tmp/fabro_run_ctx_${WORK_ID}\"; FN=$(sed -n 's/^NODE=//p' \"$CTXF\" 2>/dev/null | head -1); CTX=$(sed -n 's/^CONTEXT=//p' \"$CTXF\" 2>/dev/null | tail -n 20 | tr '\n' ' '); classify_reason() { case \"$1 $2\" in *oauth-shim*|*anthropic-oauth*) echo \"infra-path oauth-shim\" ;; *agent-vault*) echo \"infra-path agent-vault\" ;; *429*|*rate-limit*) echo \"infra-path rate-limit-429\" ;; *proxy*) echo \"infra-path proxy\" ;; *deliverable*|*Reviewer*gate*) echo \"deliverable-gate deliverable\" ;; *LLM*|*unusable*|*non-advancing*) echo \"llm-path llm-path\" ;; *) echo \"unknown unknown\" ;; esac; }; RCDM=$(classify_reason \"$FN\" \"$CTX\"); RC=${RCDM%% *}; DM=${RCDM##* }; case \"$RC\" in deliverable-gate|infra-path|llm-path|unknown) ;; *) RC=unknown ;; esac; case \"$DM\" in deliverable|oauth-shim|agent-vault|proxy|rate-limit-429|llm-path|unknown) ;; *) DM=unknown ;; esac; [ -n \"$FN\" ] || FN=unknown; [ -n \"$CTX\" ] || CTX='(no captured run tail available)'; shop-msg nudge --bc \"$BC_NAME\" --reason stuck-on-you --work-id \"$WORK_ID\" --note \"fabro finite-run BLOCKED (ADR-051: non-consuming report; dispatch stays pending == retriable; consuming terminal work_done deferred to emit_r; never a silent complete). failing-node=$FN reason-class=$RC detail-marker=$DM context=$CTX\""]
+               script="CTXF=\"/tmp/fabro_run_ctx_${WORK_ID}\"; FN=$(sed -n 's/^NODE=//p' \"$CTXF\" 2>/dev/null | head -1); CTX=$(sed -n 's/^CONTEXT=//p' \"$CTXF\" 2>/dev/null | tail -n 20 | tr '\n' ' '); classify_reason() { case \"$1 $2\" in *oauth-shim*|*anthropic-oauth*) echo \"infra-path oauth-shim\" ;; *agent-vault*) echo \"infra-path agent-vault\" ;; *429*|*rate-limit*) echo \"infra-path rate-limit-429\" ;; *proxy*) echo \"infra-path proxy\" ;; *deliverable*|*Reviewer*gate*) echo \"deliverable-gate deliverable\" ;; *LLM*|*unusable*|*non-advancing*) echo \"llm-path llm-path\" ;; *) echo \"unknown unknown\" ;; esac; }; RCDM=$(classify_reason \"$FN\" \"$CTX\"); RC=${RCDM%% *}; DM=${RCDM##* }; case \"$RC\" in deliverable-gate|infra-path|llm-path|unknown) ;; *) RC=unknown ;; esac; case \"$DM\" in deliverable|oauth-shim|agent-vault|proxy|rate-limit-429|llm-path|unknown) ;; *) DM=unknown ;; esac; case \"$FN\" in *[![:space:]]*) ;; *) FN=unknown ;; esac; case \"$CTX\" in *[![:space:]]*) ;; *) CTX='(no captured run tail available)' ;; esac; shop-msg nudge --bc \"$BC_NAME\" --reason stuck-on-you --work-id \"$WORK_ID\" --note \"fabro finite-run BLOCKED (ADR-051: non-consuming report; dispatch stays pending == retriable; consuming terminal work_done deferred to emit_r; never a silent complete). failing-node=$FN reason-class=$RC detail-marker=$DM context=$CTX\""]
 
     // =======================================================================
     // EDGES -- PROVEN-SAFE fail-closed pattern:
