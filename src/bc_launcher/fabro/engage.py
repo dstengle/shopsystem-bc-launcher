@@ -7,6 +7,10 @@ from __future__ import annotations
 
 from bc_launcher.constants import AGENT_VAULT_CONTAINER_CA_PATH, SSL_CERT_FILE_ENV
 from bc_launcher.fabro.constants import *  # noqa: F401,F403  (sibling constants)
+from bc_launcher.fabro.llm_provider import (
+    BCLAUNCHER_LLM_PROVIDER_ENV,
+    resolve_llm_provider,
+)
 
 # The REAL bc-status ONLINE staleness window (seconds) — imported from the SAME
 # module `shop-msg bc-status` classifies presence by (lead-8hpz behavior 2 /
@@ -70,7 +74,7 @@ def _fabro_run_argv(bc_name: str) -> list[str]:
 
 
 
-def _fabro_engage_script(bc_name: str) -> str:
+def _fabro_engage_script(bc_name: str, provider: str | None = None) -> str:
     """Build the ``/bin/sh -c`` script that drives the fabro ENGAGE step — the
     EXTERNAL agent-free message-driven watcher supervisor (lead-1vbw / ADR-058
     AMENDMENT-3, superseding the retired infinite ``fabro run dispatcher.toml``
@@ -142,6 +146,16 @@ def _fabro_engage_script(bc_name: str) -> str:
     def_dir = shlex.quote(FABRO_DEF_CONTAINER_DIR)
     base_url = shlex.quote(FABRO_ANTHROPIC_BASE_URL)
     dummy_key = shlex.quote(FABRO_SERVER_DUMMY_ANTHROPIC_KEY)
+    # The ACTIVE LLM provider for this launch (lead-ifye3.2 behavior 1).  A plain
+    # launch with no operator-supplied override resolves to the Anthropic DEFAULT;
+    # a later `--llm-provider` / BCLAUNCHER_LLM_PROVIDER override (behaviors 2-5)
+    # threads a different value in through `provider`.  The resolved provider is
+    # exported into the engage so the finite `fabro run` children inherit the
+    # active provider (behaviors 2-5 branch the provider block / credential / model
+    # mapping on it); on the default it stays "anthropic" and NO OpenRouter
+    # agent-vault credential is requested.
+    active_provider = resolve_llm_provider(provider)
+    provider_export = shlex.quote(active_provider)
     gh_token = shlex.quote(FABRO_SERVER_INSTALL_GH_TOKEN)
     server_settings = shlex.quote(FABRO_SERVER_SETTINGS_CONTAINER_PATH)
     server_log = shlex.quote(f"{FABRO_DEF_CONTAINER_DIR}/fabro-server.log")
@@ -214,6 +228,10 @@ def _fabro_engage_script(bc_name: str) -> str:
         f'export {SSL_CERT_FILE_ENV}={shlex.quote(AGENT_VAULT_CONTAINER_CA_PATH)} && '
         f"export ANTHROPIC_API_KEY={dummy_key} && "
         f"export ANTHROPIC_BASE_URL={base_url} && "
+        # Thread the resolved ACTIVE LLM provider into the engage env so the
+        # finite `fabro run` children inherit it (default "anthropic"; behaviors
+        # 2-5 select openrouter here) — lead-ifye3.2 behavior 1.
+        f"export {BCLAUNCHER_LLM_PROVIDER_ENV}={provider_export} && "
         f"GH_TOKEN={gh_token} {install_argv} && "
         # (lead-01jw.2 P0 — iteration-3 durable fix for "Server already running")
         # `fabro install` DAEMONIZES a server on fabro's DEFAULT TCP endpoint
