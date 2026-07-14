@@ -18,9 +18,16 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
-# The only LLM provider the launcher wires today; also the resolution DEFAULT.
+# The Anthropic-subscription provider (the resolution DEFAULT).
 LLM_PROVIDER_ANTHROPIC = "anthropic"
 LLM_PROVIDER_DEFAULT = LLM_PROVIDER_ANTHROPIC
+
+# The OpenRouter provider — the first launch-time override target (behaviors
+# 2-3).  On this provider the launcher wires a NO-SHIM agent-vault-brokered
+# credential (OPENROUTER_API_KEY=__PLACEHOLDER__ node-side, the broker's MITM
+# proxy substitutes the real key on the wire — mirroring the GITHUB_TOKEN
+# no-shim pattern), NOT the Anthropic anthropic-oauth-shim header-reshaping path.
+LLM_PROVIDER_OPENROUTER = "openrouter"
 
 # The launch-time environment override the operator can set to pick the active
 # provider (mirrors the ``--llm-provider`` flag).  Behavior 2 threads the flag

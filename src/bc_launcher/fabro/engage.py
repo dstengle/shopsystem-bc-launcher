@@ -5,10 +5,12 @@ package split). Re-exported via bc_launcher.fabro (the package __init__).
 """
 from __future__ import annotations
 
+from bc_launcher.agent_vault import AGENT_VAULT_PLACEHOLDER_TOKEN
 from bc_launcher.constants import AGENT_VAULT_CONTAINER_CA_PATH, SSL_CERT_FILE_ENV
 from bc_launcher.fabro.constants import *  # noqa: F401,F403  (sibling constants)
 from bc_launcher.fabro.llm_provider import (
     BCLAUNCHER_LLM_PROVIDER_ENV,
+    LLM_PROVIDER_OPENROUTER,
     resolve_llm_provider,
 )
 
@@ -206,15 +208,45 @@ def _fabro_engage_script(bc_name: str, provider: str | None = None) -> str:
     q_bc = shlex.quote(bc_name)
     workflow = FABRO_WORKFLOW_FILE
 
-    # (Defect C) the [llm.providers.anthropic] block appended to the SERVER-level
-    # ~/.fabro/settings.toml so the provider is registered AT THE SERVER
-    # (adapter + shim base_url, NO api_key — lead-sp2m; the DUMMY key rides the
-    # ANTHROPIC_API_KEY server-env export, never the settings TOML — ADR-049 D1).
-    provider_block = (
-        "\\n[llm.providers.anthropic]\\n"
-        f'adapter = "{FABRO_ANTHROPIC_ADAPTER}"\\n'
-        f'base_url = "{FABRO_ANTHROPIC_BASE_URL}"\\n'
-    )
+    # Provider-specific credential exports + registered provider block, branched
+    # on the resolved ACTIVE LLM provider (lead-ifye3.2).  BOTH register their
+    # provider AT THE SERVER by appending [llm.providers.<name>] to the
+    # server-level ~/.fabro/settings.toml with NO api_key in the TOML — the
+    # credential rides the SERVER-ENV export, never the settings TOML (ADR-049
+    # D1; the real credential rides agent-vault on the wire).
+    if active_provider == LLM_PROVIDER_OPENROUTER:
+        # OPENROUTER no-shim agent-vault-brokered credential (behavior 3),
+        # mirroring the GITHUB_TOKEN no-shim pattern (NOT the anthropic-oauth-
+        # shim header-reshaping pattern): OPENROUTER_API_KEY is the literal
+        # __PLACEHOLDER__ node-side (the finite `fabro run` children inherit it),
+        # the openrouter provider points DIRECTLY at OpenRouter's OpenAI-
+        # compatible API (Authorization: Bearer auth, NO local shim), and the
+        # agent-vault broker's MITM proxy substitutes the REAL key onto the
+        # outbound Bearer header on the wire via the container HTTPS_PROXY.
+        or_placeholder = shlex.quote(AGENT_VAULT_PLACEHOLDER_TOKEN)
+        credential_exports = (
+            f"export {OPENROUTER_API_KEY_ENV}={or_placeholder} && "
+        )
+        provider_block = (
+            "\\n[llm.providers.openrouter]\\n"
+            f'adapter = "{FABRO_OPENROUTER_ADAPTER}"\\n'
+            f'base_url = "{FABRO_OPENROUTER_BASE_URL}"\\n'
+        )
+    else:
+        # (Defect C) ANTHROPIC default path — the [llm.providers.anthropic] block
+        # appended to the SERVER-level ~/.fabro/settings.toml so the provider is
+        # registered AT THE SERVER (adapter + shim base_url, NO api_key —
+        # lead-sp2m; the DUMMY key rides the ANTHROPIC_API_KEY server-env export,
+        # never the settings TOML — ADR-049 D1).
+        credential_exports = (
+            f"export ANTHROPIC_API_KEY={dummy_key} && "
+            f"export ANTHROPIC_BASE_URL={base_url} && "
+        )
+        provider_block = (
+            "\\n[llm.providers.anthropic]\\n"
+            f'adapter = "{FABRO_ANTHROPIC_ADAPTER}"\\n'
+            f'base_url = "{FABRO_ANTHROPIC_BASE_URL}"\\n'
+        )
     provider_register = (
         f"printf '%b' {shlex.quote(provider_block)} >> {server_settings}"
     )
@@ -226,11 +258,12 @@ def _fabro_engage_script(bc_name: str, provider: str | None = None) -> str:
     bootstrap = (
         f"cd {def_dir} && "
         f'export {SSL_CERT_FILE_ENV}={shlex.quote(AGENT_VAULT_CONTAINER_CA_PATH)} && '
-        f"export ANTHROPIC_API_KEY={dummy_key} && "
-        f"export ANTHROPIC_BASE_URL={base_url} && "
+        # Provider-specific credential exports (anthropic dummy + shim base_url;
+        # or the openrouter __PLACEHOLDER__ Bearer key — lead-ifye3.2).
+        f"{credential_exports}"
         # Thread the resolved ACTIVE LLM provider into the engage env so the
-        # finite `fabro run` children inherit it (default "anthropic"; behaviors
-        # 2-5 select openrouter here) — lead-ifye3.2 behavior 1.
+        # finite `fabro run` children inherit it (default "anthropic"; the
+        # openrouter override selects it here) — lead-ifye3.2 behavior 1.
         f"export {BCLAUNCHER_LLM_PROVIDER_ENV}={provider_export} && "
         f"GH_TOKEN={gh_token} {install_argv} && "
         # (lead-01jw.2 P0 — iteration-3 durable fix for "Server already running")
