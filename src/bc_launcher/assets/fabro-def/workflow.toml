@@ -1,11 +1,19 @@
 # workflow.toml -- run/environment config for workflow.fabro (bc-shop loop).
 # Slice 2 Leg 1 (epic lead-6k1r). Branch fabro-spike. SPIKE / THROWAWAY.
 #
-# NOTE ON RETRY: node-level retry is NOT configured here. In fabro v0.254.0 retry
-# is DOT-graph-native (empirically pinned): a node carries `retry=N`, an optional
-# `retry_target`, and the graph declares `fallback_retry_target`. Those live in
-# workflow.fabro (prime=3, health=2, integ=2, emit_*=2; graph
-# fallback_retry_target="halt"). The 01b draft's `[run.retry.nodes]` table was a
+# NOTE ON RETRY: node-level retry is NOT configured here; it is DOT-graph-native
+# in workflow.fabro. lead-6ev8 CORRECTION (proven against the REAL fabro v0.254.0
+# binary): the EFFECTIVE node retry-budget attribute is `max_retries=N`, which the
+# runtime honors as max_attempts=N+1. A bare `retry=N` is NOT a recognized fabro
+# node attribute -- it is silently ignored, leaving the node at max_attempts=1
+# (fail-fast). Probe (real `fabro run`): a node with `retry=4` emits stage.started
+# max_attempts=1, while `max_retries=4` emits max_attempts=5. The earlier "retry=N
+# is DOT-graph-native (empirically pinned)" note was WRONG about the attribute
+# NAME -- retry=N was never honored, which is exactly why the lead-6ev8 dogfood run
+# fail-fast on the first transient 429 despite classify carrying retry=4. The
+# LLM/ACP nodes therefore carry `max_retries=N` (the effective budget); the inert
+# `retry=N` stays because lead-i0wi F1 pins it. The graph also declares
+# `fallback_retry_target="halt"`. The 01b draft's `[run.retry.nodes]` table was a
 # guess and is NOT a v0.254.0 config key -- superseded by the graph attributes.
 
 _version = 1
