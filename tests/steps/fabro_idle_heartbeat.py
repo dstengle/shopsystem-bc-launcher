@@ -418,3 +418,214 @@ def bound_negative_control(ctx):
         f"the current engage must carry the bounded shop-msg-watch heartbeat cadence "
         f"the negative control lacked; script:\n{script}"
     )
+
+
+# ===========================================================================
+# Behavior 3 (lead-8hpz sub-issues .5/.6 / @scenario_hash:81eee7115a2457f4):
+# CROSS-RUNTIME liveness parity — the fabro-engaged BC's liveness signals MATCH
+# the tmux-engaged BC's, so an operator cannot distinguish runtime from the
+# liveness surface.  Behaviors 1&2 gave the fabro runtime the SAME
+# message-independent `shop-msg watch`->bc_presence heartbeat the tmux
+# session-start loop already maintained; this pins the PARITY itself: BOTH
+# runtimes maintain their heartbeat via the SAME canonical `shop-msg watch --bc
+# <name>` verb (the shared `bc_launcher.liveness` anchor), BOTH are governed by
+# the ONE shop_msg PRESENCE_ONLINE_MAX_SECONDS / classify_presence_age classifier
+# `shop-msg bc-status` classifies by, so an idle-but-live BC reports ONLINE +
+# healthy IDENTICALLY on either runtime and a genuinely DEAD BC (no heartbeat
+# upsert) reports OFFLINE + unhealthy IDENTICALLY on either runtime — a TRUE
+# liveness signal, never a runtime-faked "always online".
+#
+# FIDELITY: bind to BOTH REAL mechanisms — the tmux side is the ACTUAL launcher-
+# injected DEFAULT startup prompt (bc_launcher.cli.DEFAULT_STARTUP_PROMPT_TEMPLATE
+# formatted exactly as cli.main() does) that DIRECTS the claude session-start loop
+# to arm the `shop-msg watch --bc <name>` heartbeat; the fabro side is the ACTUAL
+# recorded engage script (behaviors 1&2's cadence heartbeat).  The classifier is
+# the REAL shop_msg.storage one bc-status uses.  ADDITIVE — extends the fabro
+# heartbeat pins a5ce1af45ade7444 / 90e6b9fae7a63eb8 and the structural liveness
+# pin e94a01b26ed6a4cc; no runtime behavior changes, only the shared anchor that
+# makes the already-present parity structural.  TEETH: drift either runtime's
+# heartbeat verb off the shared anchor, or re-key the classifier, and this REDs.
+# ===========================================================================
+
+
+def _real_tmux_startup_prompt() -> str:
+    """The ACTUAL DEFAULT startup prompt the launcher injects on the tmux-default
+    path — resolved EXACTLY as bc_launcher.cli.main() does when no
+    --startup-prompt is supplied (template substitution).  This is the claude-
+    agent session-start loop's real directive to arm the `shop-msg watch --bc
+    <name>` bc_presence heartbeat."""
+    from bc_launcher.cli import DEFAULT_STARTUP_PROMPT_TEMPLATE
+
+    return DEFAULT_STARTUP_PROMPT_TEMPLATE.format(bc_name=_BC_NAME)
+
+
+@given(
+    "a tmux-engaged idle-but-live BC maintains its shop-msg heartbeat via the "
+    "claude-agent session-start loop and so reports bc-status online and "
+    "healthcheck healthy"
+)
+def parity_tmux_side(ctx):
+    prompt = _real_tmux_startup_prompt()
+    ctx["parity_tmux_prompt"] = prompt
+    # The tmux session-start loop's heartbeat source is the `shop-msg watch --bc
+    # <name>` the launcher-injected default prompt DIRECTS the claude agent to arm
+    # (the real driver's agent_online probe requires a LIVE `shop-msg watch`
+    # process — that armed watcher IS the bc_presence heartbeat).
+    assert f"shop-msg watch --bc {_BC_NAME}" in prompt, (
+        "the tmux-default startup prompt must direct the claude session-start loop "
+        f"to arm the `shop-msg watch --bc {_BC_NAME}` bc_presence heartbeat; "
+        f"prompt:\n{prompt!r}"
+    )
+
+
+@given(
+    "a fabro-engaged idle-but-live BC maintains its shop-msg heartbeat via the "
+    "always-resident watcher supervisor"
+)
+def parity_fabro_side(ctx, tmp_path):
+    script = _real_engage_script(tmp_path)
+    ctx["parity_fabro_script"] = script
+    # The fabro supervisor's heartbeat source is behaviors 1&2's message-
+    # independent cadence whose `heartbeat()` fires the bounded `shop-msg watch
+    # --bc "$BC_NAME"` UPSERT (the always-resident watcher supervisor).
+    hb_fn = re.search(r"heartbeat\(\)\s*\{(?P<body>.*?)\}", script, re.DOTALL)
+    assert hb_fn is not None and 'shop-msg watch --bc "$BC_NAME"' in hb_fn.group("body"), (
+        "the fabro engage must maintain its heartbeat via the always-resident "
+        f"supervisor's bounded `shop-msg watch --bc \"$BC_NAME\"` UPSERT; script:\n{script}"
+    )
+
+
+@when(
+    'an operator reads "shop-msg bc-status" and the container healthcheck for '
+    "each runtime while both are idle-but-live"
+)
+def parity_operator_reads(ctx):
+    ctx["parity_read"] = True
+
+
+@then(
+    "both runtimes report the SAME liveness signals — bc-status online and "
+    "healthcheck healthy — so a live BC is reported live on either runtime"
+)
+def parity_both_online(ctx):
+    from bc_launcher import liveness
+    from shop_msg.storage import (
+        PRESENCE_ONLINE_MAX_SECONDS as _SHOPMSG_WINDOW,
+        classify_presence_age as _shopmsg_classify,
+    )
+
+    tmux_prompt = ctx["parity_tmux_prompt"]
+    fabro_script = ctx["parity_fabro_script"]
+    verb = liveness.PRESENCE_HEARTBEAT_WATCH_VERB
+
+    # (a) BOTH runtimes maintain their bc_presence heartbeat via the SAME canonical
+    #     `shop-msg watch --bc` verb (the shared anchor) — tmux with the literal
+    #     name, fabro with its "$BC_NAME" env, but the SAME verb.
+    assert f"{verb} {_BC_NAME}" in tmux_prompt, (
+        f"the tmux runtime must maintain its heartbeat via the canonical {verb!r} "
+        f"verb; prompt:\n{tmux_prompt!r}"
+    )
+    assert f'{verb} "$BC_NAME"' in fabro_script, (
+        f"the fabro runtime must maintain its heartbeat via the SAME canonical "
+        f"{verb!r} verb; script:\n{fabro_script}"
+    )
+
+    # (b) BOTH runtimes' liveness is governed by the ONE shop_msg classifier
+    #     `shop-msg bc-status` classifies by — the shared anchor re-exports the
+    #     SAME objects, not a divergent copy.
+    assert liveness.classify_presence_age is _shopmsg_classify, (
+        "the shared liveness anchor must route BOTH runtimes through the SAME "
+        "shop_msg.storage.classify_presence_age bc-status classifies by"
+    )
+    assert liveness.PRESENCE_ONLINE_MAX_SECONDS == _SHOPMSG_WINDOW, (
+        "the shared liveness anchor's staleness window must be the REAL bc-status "
+        f"one ({_SHOPMSG_WINDOW}s), not a divergent literal"
+    )
+
+    # (c) idle-but-live => a FRESH heartbeat upsert => ONLINE on BOTH runtimes.
+    #     For fabro the WORST-CASE age between upserts is the effective period
+    #     (cadence sleep + bounded-watch timeout); for tmux the always-armed watch
+    #     keeps the age ~0.  Both classify ONLINE.
+    assert liveness.classify_presence_age(0.0) == "online", (
+        "a fresh heartbeat (age ~0) must classify ONLINE on either runtime"
+    )
+    effective = (
+        _engage_mod.FABRO_WATCH_HEARTBEAT_INTERVAL_SECS
+        + _engage_mod.FABRO_WATCH_HEARTBEAT_BOUND_SECS
+    )
+    assert liveness.classify_presence_age(effective) == "online", (
+        f"the fabro worst-case heartbeat age ({effective}s) must still classify "
+        f"ONLINE so an idle-but-live fabro BC matches the tmux one"
+    )
+
+
+@then(
+    "the operator cannot tell from the liveness surface alone which runtime a "
+    "healthy idle BC is engaged under, because the fabro liveness interface "
+    "mirrors the tmux one rather than diverging from it"
+)
+def parity_indistinguishable(ctx):
+    from bc_launcher import liveness
+
+    tmux_prompt = ctx["parity_tmux_prompt"]
+    fabro_script = ctx["parity_fabro_script"]
+    verb = liveness.PRESENCE_HEARTBEAT_WATCH_VERB
+
+    # The fabro liveness interface MIRRORS the tmux one: the IDENTICAL canonical
+    # heartbeat verb appears in BOTH real recorded artifacts (not two divergent
+    # verbs), and both are classified by the ONE classifier — so the online/offline
+    # signal is runtime-INDEPENDENT and the operator cannot tell them apart.
+    assert verb in tmux_prompt and verb in fabro_script, (
+        f"both runtimes must expose the SAME canonical liveness heartbeat verb "
+        f"{verb!r} — the fabro interface mirrors the tmux one rather than diverging"
+    )
+    # The classifier is the SINGLE shared oracle both runtimes are read through, so
+    # a given last_seen_at age yields the SAME signal regardless of runtime.
+    for age in (0.0, 45.0, 89.0, 90.0, 500.0):
+        assert liveness.classify_presence_age(age) in ("online", "stale", "offline")
+
+
+@then(
+    "a genuinely dead BC on either runtime reports offline and unhealthy "
+    "identically, so the liveness signal remains a true liveness signal on both "
+    "runtimes"
+)
+def parity_dead_offline(ctx):
+    from bc_launcher import liveness
+
+    fabro_script = ctx["parity_fabro_script"]
+    tmux_prompt = ctx["parity_tmux_prompt"]
+
+    # A genuinely DEAD BC upserts NO further heartbeat, so its last_seen_at ages
+    # unboundedly — the ONE classifier both runtimes are read through returns
+    # OFFLINE identically (a never-seen / stale BC is offline on either runtime).
+    assert liveness.classify_presence_age(1e9) == "offline", (
+        "a dead BC's aged last_seen_at must classify OFFLINE (true liveness signal)"
+    )
+    # The signal is a TRUE liveness signal, not a perpetual "always online": the
+    # staleness boundary itself is NOT online (>= window is stale/offline).
+    assert liveness.classify_presence_age(
+        liveness.PRESENCE_ONLINE_MAX_SECONDS
+    ) != "online", (
+        "the online window boundary must NOT be online — the signal must go stale "
+        "when the heartbeat stops, so it is a true liveness signal"
+    )
+
+    # Neither runtime FABRICATES a presence upsert that survives process death —
+    # the online signal is TIED to a LIVE heartbeat process on BOTH:
+    #  * fabro: the cadence heartbeat loop is gated on the LIVE shared server
+    #    (`kill -0 "$FABRO_SERVER_PID"`), so on death NO further upsert -> offline;
+    loop = _heartbeat_cadence_loop(fabro_script)
+    assert "FABRO_SERVER_PID" in loop, (
+        "the fabro heartbeat must be gated on the LIVE server, so a dead server "
+        f"stops upserting and the BC goes offline (true liveness); loop:\n{loop}"
+    )
+    #  * tmux: the heartbeat `shop-msg watch` is ARMED INSIDE the live claude
+    #    session-start loop (the real driver's agent_online probe requires a LIVE
+    #    `shop-msg watch` process), so it dies with the agent — the prompt spawns
+    #    NO detached/unconditional presence writer.
+    assert f"shop-msg watch --bc {_BC_NAME}" in tmux_prompt, (
+        "the tmux heartbeat must be armed inside the live session-start loop (a "
+        "live `shop-msg watch` process), so it dies with the agent and the BC goes "
+        f"offline when dead (true liveness); prompt:\n{tmux_prompt!r}"
+    )

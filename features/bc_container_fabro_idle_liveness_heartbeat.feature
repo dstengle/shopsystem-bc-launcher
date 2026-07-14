@@ -49,3 +49,27 @@ Feature: the --orchestrator fabro engage supervisor maintains a MESSAGE-INDEPEND
     Then the supervisor UPSERTs the bc_presence (bc_name, last_seen_at) heartbeat on a cadence whose interval is BOUNDED strictly below the bc-status staleness window, independent of whether any message arrives
     And because the cadence interval is below the staleness window, the last_seen_at never ages past the staleness threshold while the supervisor is alive, so a live BC never flaps to offline between heartbeats
     And as the negative control, the superseded infinite "fabro run dispatcher.toml" engage maintained NO shop-msg heartbeat on any cadence, so its last_seen_at aged unboundedly and a live BC reported offline (lead-8hpz), which this bounded cadence fixes
+
+  # Behavior 3 (@scenario_hash:81eee7115a2457f4, ADDITIVE — the CROSS-RUNTIME
+  # parity capstone). Behaviors 1&2 gave the fabro runtime the SAME
+  # message-independent `shop-msg watch`->bc_presence heartbeat the tmux
+  # session-start loop already maintained, both governed by the ONE shop_msg
+  # PRESENCE_ONLINE_MAX_SECONDS classifier `shop-msg bc-status` classifies by.
+  # This pins that PARITY as a first-class property: an idle-but-live BC reports
+  # bc-status ONLINE + healthcheck healthy IDENTICALLY on either runtime (the
+  # fabro liveness interface MIRRORS the tmux one, sourcing the SAME canonical
+  # `shop-msg watch --bc <name>` heartbeat verb), and a genuinely DEAD BC (no
+  # heartbeat upsert) reports OFFLINE + unhealthy IDENTICALLY on either runtime
+  # via that same classifier — so the operator cannot distinguish runtime from
+  # the liveness surface, and the liveness signal stays a TRUE liveness signal
+  # (never a runtime-faked "always online") on both. TEETH: drift either
+  # runtime's heartbeat verb off the shared `bc_launcher.liveness` anchor, or
+  # re-key the classifier, and this scenario REDs.
+  @scenario_hash:81eee7115a2457f4 @bc:shopsystem-bc-launcher
+  Scenario: the fabro-engaged BC's liveness signals match the tmux-engaged BC's, so the operator cannot distinguish runtime from the liveness surface
+    Given a tmux-engaged idle-but-live BC maintains its shop-msg heartbeat via the claude-agent session-start loop and so reports bc-status online and healthcheck healthy
+    And a fabro-engaged idle-but-live BC maintains its shop-msg heartbeat via the always-resident watcher supervisor
+    When an operator reads "shop-msg bc-status" and the container healthcheck for each runtime while both are idle-but-live
+    Then both runtimes report the SAME liveness signals — bc-status online and healthcheck healthy — so a live BC is reported live on either runtime
+    And the operator cannot tell from the liveness surface alone which runtime a healthy idle BC is engaged under, because the fabro liveness interface mirrors the tmux one rather than diverging from it
+    And a genuinely dead BC on either runtime reports offline and unhealthy identically, so the liveness signal remains a true liveness signal on both runtimes
