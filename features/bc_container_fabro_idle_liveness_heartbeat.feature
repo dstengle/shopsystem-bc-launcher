@@ -30,3 +30,22 @@ Feature: the --orchestrator fabro engage supervisor maintains a MESSAGE-INDEPEND
     Then "shop-msg bc-status" classifies "shopsystem-messaging" as ONLINE because its last_seen_at heartbeat is within the staleness window, NOT offline with a stale heartbeat
     And the container healthcheck reports healthy, NOT unhealthy, for the idle-but-live BC
     And this closes the lead-8hpz regression where a functionally healthy fabro BC reported offline and unhealthy because the fabro engage maintained no shop-msg heartbeat after replacing the tmux session-start loop
+
+  # Behavior 2 (@scenario_hash:90e6b9fae7a63eb8, ADDITIVE — extends
+  # a5ce1af45ade7444). Behavior 1 pinned the message-independent cadence's RAW
+  # sleep interval below the window; this pins the EFFECTIVE heartbeat period (the
+  # cadence `sleep` interval PLUS the per-tick bounded `shop-msg watch` timeout —
+  # the worst-case age between successive UPSERTs) BOUNDED strictly below the REAL
+  # bc-status ONLINE staleness window (shop_msg PRESENCE_ONLINE_MAX_SECONDS = 90).
+  # TEETH: the launcher REFUSES to build the engage (raises) if the effective
+  # period reaches/exceeds the staleness window. NEGATIVE CONTROL: the superseded
+  # infinite `fabro run dispatcher.toml` engage maintained NO shop-msg heartbeat on
+  # ANY cadence (last_seen_at aged unboundedly -> a live BC reported offline, the
+  # lead-8hpz P0), which this bounded cadence replaces.
+  @scenario_hash:90e6b9fae7a63eb8 @bc:shopsystem-bc-launcher
+  Scenario: the fabro heartbeat cadence is bounded strictly inside the bc-status staleness window, so a live BC's last_seen_at never goes stale
+    Given the container "bc-shopsystem-messaging" is running the "--orchestrator fabro" watcher engage with its always-resident supervisor maintaining the shop-msg heartbeat
+    When the supervisor runs continuously for several multiples of the bc-status staleness window while the BC stays live
+    Then the supervisor UPSERTs the bc_presence (bc_name, last_seen_at) heartbeat on a cadence whose interval is BOUNDED strictly below the bc-status staleness window, independent of whether any message arrives
+    And because the cadence interval is below the staleness window, the last_seen_at never ages past the staleness threshold while the supervisor is alive, so a live BC never flaps to offline between heartbeats
+    And as the negative control, the superseded infinite "fabro run dispatcher.toml" engage maintained NO shop-msg heartbeat on any cadence, so its last_seen_at aged unboundedly and a live BC reported offline (lead-8hpz), which this bounded cadence fixes
