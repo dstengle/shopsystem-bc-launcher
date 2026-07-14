@@ -35,6 +35,75 @@ LLM_PROVIDER_OPENROUTER = "openrouter"
 BCLAUNCHER_LLM_PROVIDER_ENV = "BCLAUNCHER_LLM_PROVIDER"
 
 
+# ---------------------------------------------------------------------------
+# Fleet-wide provider-keyed model mapping table (lead-ifye3.2 behavior 4)
+# ---------------------------------------------------------------------------
+#
+# The poured ``workflow.fabro`` model_stylesheet no longer bakes literal model
+# IDs; each node-class tier is a fabro minijinja INPUT PLACEHOLDER
+# (``{{ inputs.MODEL_CODING }}`` / ``MODEL_REVIEW`` / ``MODEL_DEFAULT``) that a
+# launch-time ``-I MODEL_*=<id>`` fabro-run input resolves.  This table is the
+# fleet-wide source of those literals: one ROW per provider, each naming a
+# literal model ID for the ``coding`` / ``review`` / ``default`` node-class
+# tiers.  The engage resolves the ACTIVE provider's row into the three
+# ``-I MODEL_*`` inputs it puts on every finite ``fabro run`` — so the operator
+# selects the whole per-provider model set with the same ``--llm-provider``
+# override, no software release.
+#
+# The scenario (22f2a5bda5c29044) names exactly THREE tiers — coding, review,
+# default — so the graph's ``.classify`` node-class folds into the ``default``
+# tier (MODEL_DEFAULT): today the poured stylesheet routes ``.classify`` (and
+# the ``*`` catch-all) on ``claude-haiku-4-5`` — the lead-i0wi classify-on-haiku
+# routing — and the Anthropic row below preserves that exactly, so the default
+# (anthropic) path stays behavior-equivalent to today.
+MODEL_TIER_CODING = "coding"
+MODEL_TIER_REVIEW = "review"
+MODEL_TIER_DEFAULT = "default"
+
+# The three node-class INPUT PLACEHOLDER names the poured model_stylesheet
+# carries and the finite ``fabro run`` supplies as ``-I`` inputs.
+MODEL_INPUT_CODING = "MODEL_CODING"
+MODEL_INPUT_REVIEW = "MODEL_REVIEW"
+MODEL_INPUT_DEFAULT = "MODEL_DEFAULT"
+
+PROVIDER_MODEL_MAPPING: dict[str, dict[str, str]] = {
+    # Anthropic row — the DEFAULT path.  Preserves today's effective models:
+    # the pre-placeholder stylesheet ran every node-class (``*`` / ``.classify``
+    # / ``.coding`` / ``.review``) on ``claude-haiku-4-5``, so all three tiers
+    # resolve to ``claude-haiku-4-5`` and the anthropic launch is behavior-
+    # equivalent to before this behavior (incl. the lead-i0wi classify-on-haiku
+    # routing).
+    LLM_PROVIDER_ANTHROPIC: {
+        MODEL_TIER_CODING: "claude-haiku-4-5",
+        MODEL_TIER_REVIEW: "claude-haiku-4-5",
+        MODEL_TIER_DEFAULT: "claude-haiku-4-5",
+    },
+    # OpenRouter row — literal OpenRouter model IDs (the ``anthropic/…`` slugs of
+    # OpenRouter's OpenAI-compatible catalog) reached via the no-shim broker
+    # credential (behavior 3).  The coding/review judgment tiers get a stronger
+    # model than the default/classify tier.
+    LLM_PROVIDER_OPENROUTER: {
+        MODEL_TIER_CODING: "anthropic/claude-sonnet-4.5",
+        MODEL_TIER_REVIEW: "anthropic/claude-sonnet-4.5",
+        MODEL_TIER_DEFAULT: "anthropic/claude-haiku-4.5",
+    },
+}
+
+
+def resolve_model_mapping(provider: str | None = None) -> dict[str, str]:
+    """Resolve the provider-keyed model row (the ``coding`` / ``review`` /
+    ``default`` literal model IDs) for the ACTIVE ``provider``.
+
+    ``provider`` is the already-resolved active provider name (see
+    ``resolve_llm_provider``).  An unknown / ``None`` provider falls back to the
+    Anthropic row so the launch keeps today's behavior-preserving default model
+    set rather than failing to resolve the node-class placeholders.
+    """
+    return PROVIDER_MODEL_MAPPING.get(
+        provider or LLM_PROVIDER_DEFAULT, PROVIDER_MODEL_MAPPING[LLM_PROVIDER_ANTHROPIC]
+    )
+
+
 def resolve_llm_provider(
     override: str | None = None,
     env: Mapping[str, str] | None = None,

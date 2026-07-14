@@ -11,7 +11,14 @@ from bc_launcher.fabro.constants import *  # noqa: F401,F403  (sibling constants
 from bc_launcher.fabro.llm_provider import (
     BCLAUNCHER_LLM_PROVIDER_ENV,
     LLM_PROVIDER_OPENROUTER,
+    MODEL_INPUT_CODING,
+    MODEL_INPUT_DEFAULT,
+    MODEL_INPUT_REVIEW,
+    MODEL_TIER_CODING,
+    MODEL_TIER_DEFAULT,
+    MODEL_TIER_REVIEW,
     resolve_llm_provider,
+    resolve_model_mapping,
 )
 
 # The REAL bc-status ONLINE staleness window (seconds) — imported from the SAME
@@ -158,6 +165,21 @@ def _fabro_engage_script(bc_name: str, provider: str | None = None) -> str:
     # agent-vault credential is requested.
     active_provider = resolve_llm_provider(provider)
     provider_export = shlex.quote(active_provider)
+    # Provider-keyed model mapping (lead-ifye3.2 behavior 4): resolve the ACTIVE
+    # provider's row (coding/review/default literal model IDs) and render the
+    # three `-I MODEL_*` inputs the finite `fabro run` supplies to resolve the
+    # poured model_stylesheet's node-class input placeholders
+    # ({{ inputs.MODEL_CODING/REVIEW/DEFAULT }}).  On the openrouter override the
+    # OpenRouter-row literals are selected; with no override the Anthropic row
+    # (behavior-preserving, today's claude-haiku-4-5 everywhere).
+    model_row = resolve_model_mapping(active_provider)
+    model_inputs = " ".join(
+        (
+            f"-I {MODEL_INPUT_CODING}={shlex.quote(model_row[MODEL_TIER_CODING])}",
+            f"-I {MODEL_INPUT_REVIEW}={shlex.quote(model_row[MODEL_TIER_REVIEW])}",
+            f"-I {MODEL_INPUT_DEFAULT}={shlex.quote(model_row[MODEL_TIER_DEFAULT])}",
+        )
+    )
     gh_token = shlex.quote(FABRO_SERVER_INSTALL_GH_TOKEN)
     server_settings = shlex.quote(FABRO_SERVER_SETTINGS_CONTAINER_PATH)
     server_log = shlex.quote(f"{FABRO_DEF_CONTAINER_DIR}/fabro-server.log")
@@ -373,7 +395,7 @@ run_finite() {{
   _rf_sw="$(printf '%s' "$_rf_wid" | tr -c 'A-Za-z0-9._-' '_')"
   _rf_child={def_dir}/child-"$_rf_sw".toml
   materialize_child "$_rf_wid" "$_rf_child" || {{ echo "materialize $_rf_wid failed (non-fatal)" >>{run_log} 2>&1; }}
-  fabro run --server "$FABRO_SERVER" "child-$_rf_sw.toml" --auto-approve >>{run_log} 2>&1
+  fabro run --server "$FABRO_SERVER" "child-$_rf_sw.toml" {model_inputs} --auto-approve >>{run_log} 2>&1
   _rf_rc=$?
   echo "$(( $(cat {q_completed} 2>/dev/null || echo 0) + 1 ))" > {q_completed} 2>/dev/null || true
   rm -f "$_rf_child" 2>/dev/null || true

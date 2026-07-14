@@ -205,8 +205,15 @@ def test_engage_is_agent_free(tmp_path):
     path: the always-resident process is `shop-msg watch` and each dispatch fires
     a finite native `fabro run workflow.fabro` child."""
     script = _engage_script(tmp_path)
-    assert "claude" not in script, (
-        f"the watcher dispatch path must be agent-free (no claude); script:\n{script}"
+    # Agent-free means NO `claude` CLI / model-backed agent is EXECUTED in the
+    # dispatch path.  lead-ifye3.2 behavior 4 puts provider-keyed model IDs on
+    # the finite `fabro run` command line as `-I MODEL_*=<id>` inputs, and the
+    # Anthropic-row IDs are `claude-haiku-4-5` — DATA (a hyphenated model slug),
+    # not an agent invocation.  So the check matches a BARE `claude` agent token,
+    # not the hyphenated `claude-<model>` slug.
+    assert not re.search(r"(?<![\w./-])claude(?![\w-])", script), (
+        "the watcher dispatch path must be agent-free (no `claude` CLI agent "
+        f"executed); script:\n{script}"
     )
 
 

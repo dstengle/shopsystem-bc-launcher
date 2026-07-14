@@ -86,6 +86,45 @@ def _stylesheet(graph: str) -> str:
     return m.group(1)
 
 
+def _stylesheet_input_placeholder(sheet: str, cls: str) -> str | None:
+    """The node-class INPUT PLACEHOLDER name a stylesheet rule resolves its
+    `model:` from (lead-ifye3.2 behavior 4 converted the baked literals to
+    `{{ inputs.MODEL_* }}` placeholders resolved via `-I` at fabro-run time)."""
+    m = re.search(
+        rf"\.{re.escape(cls)}\s*\{{\s*model:\s*\{{\{{\s*inputs\.([A-Za-z0-9_]+)\s*\}}\}}",
+        sheet,
+    )
+    return m.group(1) if m else None
+
+
+def _resolved_default_model(input_name: str) -> str:
+    """The literal model ID the given MODEL_* input placeholder resolves to on
+    the DEFAULT (anthropic / no-override) path: the workflow.toml [run.inputs]
+    default (what `fabro validate` and a bare run render) — which must equal the
+    Anthropic mapping-table row so the default launch is behavior-preserving."""
+    import tomllib
+
+    from bc_launcher.fabro.llm_provider import (
+        LLM_PROVIDER_ANTHROPIC,
+        resolve_model_mapping,
+    )
+
+    toml_path = _fabro_def_asset_root() / "workflow.toml"
+    inputs = tomllib.loads(toml_path.read_text()).get("run", {}).get("inputs", {})
+    toml_default = inputs.get(input_name)
+    # The mapping-table tier the placeholder feeds (MODEL_CODING->coding etc.).
+    tier = {"MODEL_CODING": "coding", "MODEL_REVIEW": "review",
+            "MODEL_DEFAULT": "default"}[input_name]
+    row_model = resolve_model_mapping(LLM_PROVIDER_ANTHROPIC)[tier]
+    assert toml_default == row_model, (
+        f"the workflow.toml default for {input_name} ({toml_default!r}) must "
+        f"equal the Anthropic mapping row's {tier!r} model ({row_model!r}) so a "
+        "default/validate run is behavior-equivalent to the launcher's resolved "
+        "-I input"
+    )
+    return row_model
+
+
 # ---- F3: real launcher engage exec -----------------------------------------
 
 BC_NAME = "shopsystem-messaging"
@@ -181,13 +220,22 @@ def test_f1_classify_node_routes_to_haiku_not_sonnet():
         f"classify must carry the `.classify` class (haiku); got {cls!r}."
     )
     sheet = _stylesheet(graph)
-    m2 = re.search(r"\.classify\s*\{\s*model:\s*([A-Za-z0-9._-]+)", sheet)
-    assert m2 is not None, (
-        f"the model_stylesheet must define a `.classify` rule; sheet:\n{sheet}"
+    # lead-ifye3.2 behavior 4: the `.classify` rule's model is no longer a baked
+    # literal — it is the MODEL_DEFAULT node-class input placeholder (classify
+    # folds into the DEFAULT tier), resolved to a literal model ID via the
+    # provider-keyed mapping table.  The haiku-not-sonnet invariant is preserved:
+    # MODEL_DEFAULT resolves (default/anthropic path) to claude-haiku-4-5.
+    placeholder = _stylesheet_input_placeholder(sheet, "classify")
+    assert placeholder == "MODEL_DEFAULT", (
+        "the `.classify` stylesheet rule must resolve its model from the "
+        "MODEL_DEFAULT input placeholder (classify folds into the default node-"
+        f"class tier); sheet:\n{sheet}"
     )
-    assert m2.group(1) == "claude-haiku-4-5", (
-        "the `.classify` stylesheet rule must pin claude-haiku-4-5 so the light "
-        f"classify node runs on haiku; got model {m2.group(1)!r}."
+    resolved = _resolved_default_model(placeholder)
+    assert resolved == "claude-haiku-4-5", (
+        "the `.classify` node-class model must resolve to claude-haiku-4-5 on "
+        "the default path so the light classify node runs on haiku (sonnet-4-5 "
+        f"is persistently 429 on the fleet); resolved {resolved!r}."
     )
 
 
