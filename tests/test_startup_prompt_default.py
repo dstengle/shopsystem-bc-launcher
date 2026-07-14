@@ -43,9 +43,38 @@ def test_default_template_directs_draining_inbox():
     assert "shop-msg pending inbox --bc {bc_name}" in DEFAULT_STARTUP_PROMPT_TEMPLATE
 
 
-def test_default_template_ends_with_await_user_direction():
-    """Load-bearing property (c): the template ends with 'await user direction'."""
-    assert DEFAULT_STARTUP_PROMPT_TEMPLATE.rstrip(".").endswith("await user direction")
+def test_default_template_directs_autonomous_process_to_gated_work_done():
+    """Load-bearing property (c), RESTORED by lead-ew86 (ADR-050 D3 /
+    ADR-018 D1-D2): the template directs the agent to AUTONOMOUSLY PROCESS each
+    pending dispatch through the Implementer->Reviewer loop to a Reviewer-gated
+    work_done, WITHOUT waiting for a human 'go'.  The ADR-050 split had
+    regressed this to 'await user direction' (drain-then-park); this pins the
+    autonomous drain-AND-process default and the ABSENCE of the park directive.
+    """
+    assert "process each pending dispatch" in DEFAULT_STARTUP_PROMPT_TEMPLATE
+    assert "Implementer->Reviewer" in DEFAULT_STARTUP_PROMPT_TEMPLATE
+    assert "work_done" in DEFAULT_STARTUP_PROMPT_TEMPLATE
+    assert "await user direction" not in DEFAULT_STARTUP_PROMPT_TEMPLATE
+
+
+def test_default_template_bounds_autonomy_to_dispatched_work():
+    """Load-bearing property (d), added by lead-ew86
+    (@scenario_hash:f65d43b1d8704f28): the template BOUNDS the autonomous
+    drain-AND-process to DISPATCHED inbox work only — a work_done is emitted
+    solely for a work_id that was dispatched into the inbox, and NO unrequested
+    follow-on work is synthesized beyond what was dispatched.  This guardrail is
+    additive to property (c): the autonomy stays restored, but it cannot run off
+    into undispatched, self-synthesized work."""
+    assert "dispatched inbox work only" in DEFAULT_STARTUP_PROMPT_TEMPLATE
+    assert (
+        "solely for a work_id that was dispatched"
+        in DEFAULT_STARTUP_PROMPT_TEMPLATE
+    )
+    assert (
+        "synthesize no unrequested follow-on work"
+        in DEFAULT_STARTUP_PROMPT_TEMPLATE
+    )
+    assert "beyond what was dispatched" in DEFAULT_STARTUP_PROMPT_TEMPLATE
 
 
 def test_default_template_substitutes_bc_name():
@@ -112,7 +141,10 @@ def test_launch_help_shows_default_template():
     assert "Default template" in result.stdout
     assert "shop-msg watch" in result.stdout
     assert "shop-msg pending inbox" in result.stdout
-    assert "await user direction" in result.stdout
+    # lead-ew86: the restored autonomous drain-AND-process directive is
+    # surfaced in --help (the old 'await user direction' park directive is gone).
+    assert "Implementer->Reviewer" in result.stdout
+    assert "work_done" in result.stdout
 
 
 # ---------------------------------------------------------------------------
@@ -164,8 +196,19 @@ def test_launch_without_startup_prompt_injects_default_imperative(recording_cont
     # Sanity: substitution happened and load-bearing phrases are present.
     assert "shop-msg watch --bc shopsystem-messaging" in passed
     assert "shop-msg pending inbox --bc shopsystem-messaging" in passed
-    assert passed.rstrip(".").endswith("await user direction")
+    # lead-ew86: the restored autonomous drain-AND-process-to-gated-work_done
+    # directive replaces the regressed 'await user direction' park.
+    assert "process each pending dispatch" in passed
+    assert "Implementer->Reviewer" in passed
+    assert "work_done" in passed
+    assert "await user direction" not in passed
     assert "{bc_name}" not in passed
+    # lead-ew86 guardrail: the dispatched-work bound and the no-unrequested-
+    # follow-on directive reach the injected prompt too.
+    assert "dispatched inbox work only" in passed
+    assert "solely for a work_id that was dispatched" in passed
+    assert "synthesize no unrequested follow-on work" in passed
+    assert "beyond what was dispatched" in passed
 
 
 def test_launch_with_explicit_startup_prompt_is_total_override(recording_controller):
@@ -180,10 +223,17 @@ def test_launch_with_explicit_startup_prompt_is_total_override(recording_control
     assert exit_code == 0
     passed = recording_controller.calls[0]["startup_prompt"]
     assert passed == "foo"
-    # Affirmatively assert NO default-template content leaked in.
+    # Affirmatively assert NO default-template content leaked in (lead-ew86:
+    # the distinctive default content is now the autonomous drain-AND-process
+    # directive, not the retired 'await user direction' park).
     assert "shop-msg watch" not in passed
     assert "shop-msg pending inbox" not in passed
-    assert "await user direction" not in passed
+    assert "process each pending dispatch" not in passed
+    assert "work_done" not in passed
+    # lead-ew86: the distinctive guardrail content must not leak into an
+    # explicit override either.
+    assert "dispatched inbox work only" not in passed
+    assert "synthesize no unrequested follow-on work" not in passed
 
 
 def test_launch_with_explicit_empty_string_startup_prompt_is_total_override(
