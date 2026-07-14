@@ -41,3 +41,11 @@ Feature: bc-container tmux-DEFAULT engage restores autonomous drain-AND-process 
     When the tmux-default engage drains and processes its pending inbox work autonomously to work_done
     Then every "work_done" the engage emits corresponds to a work_id that was dispatched into the inbox, so the autonomy is bounded to dispatched work
     And the engage emits NO "work_done" for any work_id that was not dispatched into the inbox, synthesizing no unrequested follow-on work beyond what was dispatched
+
+  @scenario_hash:cdaaf8d986398b36 @bc:shopsystem-bc-launcher
+  Scenario: autonomous drain-and-process is the tmux DEFAULT while the operator-driven interactive session is a distinct, explicitly-selected non-default mode
+    Given the shopsystem-bc-launcher BC is installed
+    When the container "bc-shopsystem-messaging" is launched on the DEFAULT "--orchestrator tmux" engage with no explicit interactive-startup override supplied
+    Then the autonomous drain-and-process behavior is the DEFAULT for the tmux engage, beginning to process dispatched inbox work with no operator "go" required
+    And the await-direction / operator-driven interactive behavior is NOT the tmux default and is reached ONLY by an explicit interactive-startup override (for example an explicit startup-prompt that selects an operator-driven session)
+    And when that explicit interactive override IS supplied the engage runs the operator-driven interactive session instead of autonomously processing the inbox, confirming the two modes are distinct and separately selected
