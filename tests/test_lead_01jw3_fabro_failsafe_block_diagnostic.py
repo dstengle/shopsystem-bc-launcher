@@ -32,9 +32,12 @@ and NOT a shallow string-match: the three diagnostic fields must be INTERPOLATED
 """
 from __future__ import annotations
 
+import os
 import re
 import shutil
+import stat
 import subprocess
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -668,6 +671,239 @@ def test_behavior_3_scenario_block_recomputes_to_its_pin():
     )
     # behaviors 1 & 2 pins stay undisturbed.
     for h in (_BEHAVIOR_1_HASH, _BEHAVIOR_2_HASH):
+        got = subprocess.run(
+            ["scenarios", "hash"],
+            input=blocks[h],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        assert got == h, f"pin {h} disturbed: recomputed {got!r}"
+
+
+# ===========================================================================
+# Behavior 4 — the LAST-RESORT FAILSAFE FLOOR (b5bd016991cc2774).
+#
+# This pins the FLOOR of the emit_blk failsafe: the deepest last-resort path,
+# where the failure is UNCLASSIFIABLE and/or the per-work run-context capture is
+# degenerate (missing, or truncated to blanks).  Even there the block report
+# must stay diagnosable rather than content-free:
+#   (1) reason class is set to `unknown` (never left empty) WITH the failing
+#       node identifier and the captured run tail still attached;
+#   (2) the failsafe emits status BLOCKED — never a silent `complete` for a run
+#       with no deliverable (no `--status complete`, no `bc-emit`, fails closed
+#       to the non-consuming blocked report);
+#   (3) the report is NEVER the bare content-free block with an empty node /
+#       empty reason / empty body — closing the lead-01jw.3 regression at the
+#       floor.
+#
+# Fidelity: these do NOT regex-inspect the script body (behaviors 1-3 do that).
+# They EXECUTE the REAL shipped emit_blk `script=` end-to-end under `sh`, with a
+# stub `shop-msg` on PATH capturing the ACTUAL emitted invocation, and assert on
+# the concrete note the operator would receive at the floor.  A blank/whitespace
+# failing-node or context that slips past a naive `-n` guard is caught here — a
+# static regex could not see it.
+# ===========================================================================
+
+_BEHAVIOR_4_HASH = "b5bd016991cc2774"
+
+# the old lead-01jw.3 content-free generic summary this floor must never regress
+# to (the empty-node/empty-reason/empty-body block).
+_CONTENT_FREE_GENERIC = (
+    "a deliverable-side gate or step failed (see run context); "
+    "reporting blocked, never a silent complete"
+)
+
+
+def _emit_blk_script() -> str:
+    """The REAL shipped emit_blk ``script="..."`` body, unescaped so it runs as
+    the container would run it."""
+    body = _node_body(_workflow_text(), "emit_blk")
+    m = re.search(r'script="(.*)"\s*$', body.strip(), re.DOTALL)
+    assert m is not None, f"emit_blk node has no script= attribute; body:\n{body}"
+    return m.group(1).replace('\\"', '"')
+
+
+def _run_emit_blk(work_id: str, ctx_content: str | None) -> tuple[list[str], str]:
+    """EXECUTE the real emit_blk script for ``work_id`` against a run-context
+    capture of ``ctx_content`` (``None`` == the capture file is absent — the true
+    last-resort floor).  A stub ``shop-msg`` on PATH records the ACTUAL emitted
+    argv; returns ``(argv, note)`` where ``note`` is the ``--note`` value the
+    operator would receive.
+    """
+    script = _emit_blk_script()
+    ctxf = Path(f"/tmp/fabro_run_ctx_{work_id}")
+    with tempfile.TemporaryDirectory() as d:
+        cap = Path(d) / "capture"
+        stub = Path(d) / "shop-msg"
+        stub.write_text(f'#!/bin/sh\nprintf "%s\\0" "$@" > {cap}\n')
+        stub.chmod(stub.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+        try:
+            if ctx_content is None:
+                ctxf.unlink(missing_ok=True)
+            else:
+                ctxf.write_text(ctx_content)
+            env = dict(os.environ)
+            env["PATH"] = f"{d}:{env['PATH']}"
+            env["WORK_ID"] = work_id
+            env["BC_NAME"] = "bc-shopsystem-messaging"
+            subprocess.run(["sh", "-c", script], env=env, check=True)
+            raw = cap.read_bytes()
+        finally:
+            ctxf.unlink(missing_ok=True)
+    argv = [a.decode() for a in raw.split(b"\0")[:-1]]
+    assert "--note" in argv, f"emit_blk stub captured no --note; argv={argv!r}"
+    note = argv[argv.index("--note") + 1]
+    return argv, note
+
+
+def _note_fields(note: str) -> dict[str, str]:
+    """Parse the ``failing-node=.. reason-class=.. detail-marker=.. context=..``
+    tail of the emitted note into its field values (context runs to end)."""
+    fields: dict[str, str] = {}
+    for key, nxt in (
+        ("failing-node", "reason-class"),
+        ("reason-class", "detail-marker"),
+        ("detail-marker", "context"),
+    ):
+        m = re.search(rf"{key}=(.*?) {nxt}=", note)
+        assert m is not None, f"note missing {key}= field; note={note!r}"
+        fields[key] = m.group(1)
+    m = re.search(r"context=(.*)$", note)
+    assert m is not None, f"note missing context= field; note={note!r}"
+    fields["context"] = m.group(1)
+    return fields
+
+
+def test_behavior_4_floor_degenerate_capture_never_emits_a_blank_node_or_context():
+    """FLOOR guarantee (1)+(3): when the run-context capture is DEGENERATE —
+    truncated to whitespace-only NODE/CONTEXT (a real last-resort possibility: a
+    partial/interrupted capture) — the emitted block report must STILL carry a
+    non-blank failing-node and a non-blank context, never a content-free
+    ``failing-node=`` / ``context=`` blank.
+
+    RED (pre-fix): emit_blk guards the fields with ``[ -n "$FN" ]`` /
+    ``[ -n "$CTX" ]``, which a whitespace-only value PASSES, so the floor emits
+    ``failing-node=<spaces>`` and ``context=<spaces>`` — a content-free block.
+    """
+    _argv, note = _run_emit_blk(
+        "b4_degenerate", "NODE=   \nCONTEXT=   \nCONTEXT=   \n"
+    )
+    fields = _note_fields(note)
+    assert fields["failing-node"].strip() != "", (
+        "at the floor, a whitespace-only captured NODE must fall back to a "
+        "non-blank identifier (e.g. `unknown`), never a content-free "
+        f"`failing-node=<blank>`; note={note!r}"
+    )
+    assert fields["context"].strip() != "", (
+        "at the floor, a whitespace-only captured CONTEXT must fall back to a "
+        "non-blank run-tail placeholder, never a content-free "
+        f"`context=<blank>`; note={note!r}"
+    )
+    # and the reason class is still the closed-set `unknown`, not empty.
+    assert fields["reason-class"].strip() == "unknown", (
+        f"unclassifiable floor must set reason-class=unknown; note={note!r}"
+    )
+
+
+def test_behavior_4_floor_unclassifiable_emits_unknown_with_the_run_tail():
+    """FLOOR guarantee (1): for an UNCLASSIFIABLE failure that DID capture a run
+    tail, the emitted report sets reason class to ``unknown`` (not empty) AND
+    still attaches the failing node identifier and the captured run tail, so even
+    the unclassified case is diagnosable.
+    """
+    _argv, note = _run_emit_blk(
+        "b4_unclassifiable",
+        "NODE=implement_step\n"
+        "CONTEXT=some wholly unexpected boom\n"
+        "CONTEXT=zzz qqq nothing recognizable\n",
+    )
+    fields = _note_fields(note)
+    assert fields["reason-class"] == "unknown", (
+        f"an unclassifiable failure must class as unknown; note={note!r}"
+    )
+    assert fields["failing-node"] == "implement_step", (
+        f"the failing node identifier must still be attached; note={note!r}"
+    )
+    assert "unexpected boom" in fields["context"], (
+        "the captured run tail must still be attached alongside the unknown "
+        f"reason class; note={note!r}"
+    )
+
+
+def test_behavior_4_floor_missing_capture_is_still_diagnosable_not_content_free():
+    """FLOOR guarantee (1)+(3): the TRUE last-resort — no run-context capture
+    file at all — still yields a diagnosable report: reason class ``unknown``,
+    a non-blank failing-node, and a non-blank context placeholder, never the
+    bare content-free block with empty node/reason/body.
+    """
+    _argv, note = _run_emit_blk("b4_missing", None)
+    fields = _note_fields(note)
+    assert fields["reason-class"] == "unknown"
+    assert fields["failing-node"].strip() != ""
+    assert fields["context"].strip() != ""
+    # never the old content-free generic summary.
+    assert _CONTENT_FREE_GENERIC not in note, (
+        "the floor must never regress to the content-free generic summary; "
+        f"note={note!r}"
+    )
+
+
+def test_behavior_4_floor_emits_blocked_never_a_silent_complete():
+    """FLOOR guarantee (2): the emitted invocation is the NON-consuming blocked
+    report (``shop-msg nudge`` … ``--reason stuck-on-you``) — it NEVER emits a
+    ``--status complete`` or a ``bc-emit`` complete for a run that produced no
+    deliverable.  Asserted on the ACTUAL captured argv, not just the body.
+    """
+    argv, note = _run_emit_blk("b4_blocked", "NODE=x\nCONTEXT=boom\n")
+    assert argv[:1] == ["nudge"], (
+        f"the floor must report via `shop-msg nudge`; captured argv={argv!r}"
+    )
+    assert "--status" not in argv and "complete" not in argv, (
+        f"the floor must never emit a status/complete work_done; argv={argv!r}"
+    )
+    assert "bc-emit" not in argv, (
+        f"the floor must never route through bc-emit; argv={argv!r}"
+    )
+    assert "BLOCKED" in note, (
+        f"the floor report must announce it is BLOCKED; note={note!r}"
+    )
+    # body-level fail-closed invariant (ADR-051 / lead-i0wi F2) at the floor.
+    body = _node_body(_workflow_text(), "emit_blk")
+    assert "--status complete" not in body and "bc-emit" not in body, (
+        f"emit_blk must contain no complete path; body:\n{body}"
+    )
+
+
+@pytest.mark.skipif(
+    shutil.which("scenarios") is None,
+    reason="canonical `scenarios` CLI not on PATH",
+)
+def test_behavior_4_scenario_block_recomputes_to_its_pin():
+    """The block-only hash of scenario b5bd016991cc2774 recomputes to its tag,
+    and behaviors 1-3's pins are left undisturbed.
+
+    RED (pre-bind): the floor scenario is not yet appended to the feature file,
+    so it is not pinned/bound here and this REDs.  Teeth thereafter: any edit to
+    the pinned floor text not reflected in the tag diverges and REDs.
+    """
+    blocks = _scenario_blocks(_FEATURE.read_text(encoding="utf-8"))
+    assert _BEHAVIOR_4_HASH in blocks, (
+        f"No scenario tagged @scenario_hash:{_BEHAVIOR_4_HASH} in {_FEATURE.name}"
+    )
+    recomputed = subprocess.run(
+        ["scenarios", "hash"],
+        input=blocks[_BEHAVIOR_4_HASH],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    assert recomputed == _BEHAVIOR_4_HASH, (
+        f"scenario block recomputed to {recomputed!r} but the feature pins "
+        f"@scenario_hash:{_BEHAVIOR_4_HASH}; re-tag or revert the edit"
+    )
+    # behaviors 1-3 pins stay undisturbed.
+    for h in (_BEHAVIOR_1_HASH, _BEHAVIOR_2_HASH, _BEHAVIOR_3_HASH):
         got = subprocess.run(
             ["scenarios", "hash"],
             input=blocks[h],

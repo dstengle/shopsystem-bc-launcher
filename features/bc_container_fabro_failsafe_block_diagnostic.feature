@@ -57,3 +57,12 @@ Feature: the fabro finite-run failsafe block report is diagnostic, not content-f
     Then the fabro blocked work_done exposes the same three decision inputs the tmux clarify/block exposes — the failing point (node), the failure class (reason class), and the captured context — so it is as actionable as the tmux response
     And the operator can reconcile the work_id and route the failure (retry, escalate infra, escalate LLM path, or return the deliverable gate to the PO/Architect) using ONLY the fabro blocked work_done, with no need to attach into the container or read fabro run logs out of band
     And the reconcile-and-route decision the operator reaches is the SAME from the fabro blocked work_done as from the equivalent tmux clarify/block for the same failure, so the diagnostic interface is consistent across the tmux and fabro runtimes
+
+  @scenario_hash:b5bd016991cc2774 @bc:shopsystem-bc-launcher
+  Scenario: even the last-resort failsafe path emits reason class unknown WITH the captured run tail and never a content-free block and never a silent complete
+    Given the container "bc-shopsystem-messaging" is running the "--orchestrator fabro" watcher engage
+    And a finite "fabro run workflow.fabro" child fails at a node whose failure the failsafe cannot classify into deliverable-gate, infra-path, or llm-path
+    When the failsafe emits the terminal work_done for that run
+    Then the failsafe still emits status "blocked" — never a silent "complete" for a run that did not produce a deliverable
+    And the reason class is set to "unknown" rather than left empty, and the failing node identifier and the captured run tail are still attached, so even the unclassified case is diagnosable rather than content-free
+    And the failsafe NEVER emits the bare generic summary alone with empty node, empty reason, and empty body, closing the lead-01jw.3 content-free-block regression at the failsafe floor
