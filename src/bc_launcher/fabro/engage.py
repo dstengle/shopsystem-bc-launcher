@@ -8,6 +8,14 @@ from __future__ import annotations
 from bc_launcher.constants import AGENT_VAULT_CONTAINER_CA_PATH, SSL_CERT_FILE_ENV
 from bc_launcher.fabro.constants import *  # noqa: F401,F403  (sibling constants)
 
+# The REAL bc-status ONLINE staleness window (seconds) — imported from the SAME
+# module `shop-msg bc-status` classifies presence by (lead-8hpz behavior 2 /
+# scenario 90e6b9fae7a63eb8).  The message-independent heartbeat cadence built
+# below is bound STRICTLY below this so a live BC's last_seen_at can never age
+# stale between UPSERTs; binding to the real classifier constant (not a
+# duplicated literal) keeps the bound faithful if the classifier ever moves.
+from shop_msg.storage import PRESENCE_ONLINE_MAX_SECONDS
+
 
 
 
@@ -146,6 +154,25 @@ def _fabro_engage_script(bc_name: str) -> str:
     interval = FABRO_WATCH_TELEMETRY_INTERVAL_SECS
     heartbeat_interval = FABRO_WATCH_HEARTBEAT_INTERVAL_SECS
     heartbeat_bound = FABRO_WATCH_HEARTBEAT_BOUND_SECS
+
+    # BOUND GUARANTEE (lead-8hpz behavior 2 / scenario 90e6b9fae7a63eb8): the
+    # EFFECTIVE heartbeat period — the worst-case age between two successive
+    # bc_presence UPSERTs — is the cadence `sleep` interval PLUS the per-tick
+    # bounded `shop-msg watch` timeout.  It MUST be a positive value strictly below
+    # the REAL bc-status ONLINE staleness window, or an idle-but-live BC's
+    # last_seen_at could age past the threshold between heartbeats and the BC would
+    # flap OFFLINE (the lead-8hpz regression).  The launcher REFUSES to build a
+    # stale-cadence engage rather than silently ship one, so no future edit to the
+    # cadence constants can regress the liveness guarantee undetected.
+    _heartbeat_period = heartbeat_interval + heartbeat_bound
+    if not 0 < _heartbeat_period < PRESENCE_ONLINE_MAX_SECONDS:
+        raise ValueError(
+            "fabro heartbeat cadence effective period "
+            f"({heartbeat_interval}s sleep + {heartbeat_bound}s bounded-watch = "
+            f"{_heartbeat_period}s) must be a positive value STRICTLY below the "
+            f"bc-status ONLINE staleness window ({PRESENCE_ONLINE_MAX_SECONDS}s) so "
+            "an idle-but-live BC never flaps offline between heartbeats (lead-8hpz)"
+        )
     q_state = shlex.quote(state_dir)
     q_sock = shlex.quote(sock)
     q_store = shlex.quote(store)
