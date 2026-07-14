@@ -12,6 +12,7 @@ from pathlib import Path
 
 from bc_launcher.controller import BcContainerController, _resolve_shop_network
 from bc_launcher.driver import RealDockerDriver
+from bc_launcher.liveness import PRESENCE_HEARTBEAT_WATCH_VERB
 from bc_launcher.manifest import ManifestController, RealGitDriver, RealGitHubDriver
 
 
@@ -41,7 +42,11 @@ from bc_launcher.manifest import ManifestController, RealGitDriver, RealGitHubDr
 # override: the template default is not used and no substitution occurs.
 DEFAULT_STARTUP_PROMPT_TEMPLATE = (
     "Run your session-start sequence per /workspace/CLAUDE.md: "
-    "arm Monitor on shop-msg watch --bc {bc_name}, "
+    # The tmux session-start loop arms its bc_presence heartbeat with the ONE
+    # canonical cross-runtime verb (lead-8hpz behavior 3 / 81eee7115a2457f4), so
+    # the tmux and fabro liveness surfaces cannot silently diverge; `{{bc_name}}`
+    # stays a `.format()` placeholder after the f-string interpolates the verb.
+    f"arm Monitor on {PRESENCE_HEARTBEAT_WATCH_VERB} {{bc_name}}, "
     "then drain pending inbox via shop-msg pending inbox --bc {bc_name}, "
     "then autonomously process each pending dispatch through the normal "
     "Implementer->Reviewer loop to a Reviewer-gated work_done, without "

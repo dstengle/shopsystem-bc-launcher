@@ -16,6 +16,12 @@ from bc_launcher.fabro.constants import *  # noqa: F401,F403  (sibling constants
 # duplicated literal) keeps the bound faithful if the classifier ever moves.
 from shop_msg.storage import PRESENCE_ONLINE_MAX_SECONDS
 
+# The ONE canonical cross-runtime presence-heartbeat verb (lead-8hpz behavior 3 /
+# scenario 81eee7115a2457f4).  The fabro supervisor's message-independent cadence
+# heartbeat maintains bc_presence with the SAME verb the tmux session-start loop
+# arms, so the fabro liveness interface MIRRORS the tmux one rather than diverging.
+from bc_launcher.liveness import PRESENCE_HEARTBEAT_WATCH_VERB
+
 
 
 
@@ -154,6 +160,10 @@ def _fabro_engage_script(bc_name: str) -> str:
     interval = FABRO_WATCH_TELEMETRY_INTERVAL_SECS
     heartbeat_interval = FABRO_WATCH_HEARTBEAT_INTERVAL_SECS
     heartbeat_bound = FABRO_WATCH_HEARTBEAT_BOUND_SECS
+    # The ONE canonical cross-runtime presence-heartbeat verb (behavior 3 /
+    # 81eee7115a2457f4) — the fabro supervisor maintains bc_presence with the SAME
+    # verb the tmux session-start loop arms, so the two liveness surfaces mirror.
+    hb_verb = PRESENCE_HEARTBEAT_WATCH_VERB
 
     # BOUND GUARANTEE (lead-8hpz behavior 2 / scenario 90e6b9fae7a63eb8): the
     # EFFECTIVE heartbeat period — the worst-case age between two successive
@@ -277,7 +287,7 @@ sample_telemetry
 # is gated ONLY on the shared server's liveness, so an idle-but-live BC keeps
 # UPSERTing and stays ONLINE + healthy.
 heartbeat() {{
-  timeout {heartbeat_bound} shop-msg watch --bc "$BC_NAME" >/dev/null 2>>{run_log} || true
+  timeout {heartbeat_bound} {hb_verb} "$BC_NAME" >/dev/null 2>>{run_log} || true
 }}
 ( heartbeat; while kill -0 "$FABRO_SERVER_PID" 2>/dev/null; do sleep {heartbeat_interval}; heartbeat; done ) &
 # Materialize the finite child config — BYTE-IDENTICAL to the reference's
@@ -354,7 +364,7 @@ drain
 # the gap via drain, then restart watch.  AGENT-FREE: no model-backed agent
 # anywhere in this dispatch path — steady-state supervision spends ZERO tokens.
 while true; do
-  shop-msg watch --bc "$BC_NAME" 2>>{run_log} | while IFS=' ' read -r _w_wid _w_mtype; do
+  {hb_verb} "$BC_NAME" 2>>{run_log} | while IFS=' ' read -r _w_wid _w_mtype; do
     [ "$_w_wid" = "READY" ] && continue
     [ -z "$_w_wid" ] && continue
     dispatch "$_w_wid"
