@@ -207,9 +207,24 @@ digraph BcShopLoop {
     // edge set unchanged -> `fabro validate` + the ky63 structural invariants
     // stay green). Teeth: revert this to `respond work_done --status blocked`
     // (consume-on-fail-closed) -> the F2 test REDs.
+    // lead-01jw.3 (behavior 1, scenario 629be1e0224f3a03): the block report is
+    // DIAGNOSTIC, not content-free. It READS the per-work run-context capture
+    // (/tmp/fabro_run_ctx_${WORK_ID} -- the arm node's /tmp/fabro_pending_${WORK_ID}
+    // precedent, making the old note's hand-wavy "see run context" REAL) and
+    // composes the nudge --note from three INTERPOLATED fields: the failing NODE
+    // (WHERE the run stopped), a REASON CLASS validated against the closed set
+    // {deliverable-gate, infra-path, llm-path, unknown} (a stray captured value
+    // falls back to `unknown`), and the captured error CONTEXT / run tail (WHY it
+    // stopped). ADR-051 preserved verbatim: still a NON-consuming `shop-msg nudge`
+    // (dispatch stays pending == retriable), never a de-pending `respond work_done
+    // --status blocked`, never a work_done(complete); emit_r stays the sole
+    // complete emitter. Teeth: revert to the content-free generic --note (empty
+    // node/reason/context) -> the behavior-1 tests RED. (Reason-class DERIVATION /
+    // infra markers = behavior 2; the unknown+run-tail floor = behavior 4; both
+    // append to the SAME emit_blk / run-context capture contract.)
     emit_blk  [shape=parallelogram, deterministic=true, retry=2,
-               label="report BLOCKED via non-consuming nudge (dispatch stays pending == retriable; consume deferred to terminal complete)",
-               script="shop-msg nudge --bc \"$BC_NAME\" --reason stuck-on-you --work-id \"$WORK_ID\" --note 'a deliverable-side gate or step failed (see run context); reporting blocked WITHOUT consuming the dispatch so a re-run is retriable without lead re-dispatch; the consuming terminal work_done is deferred to a genuine terminal complete (emit_r). ADR-051: no false complete, block reported not silent.'"]
+               label="report BLOCKED via non-consuming nudge, enriched with failing-node + reason-class + captured context (dispatch stays pending == retriable; consume deferred to terminal complete)",
+               script="CTXF=\"/tmp/fabro_run_ctx_${WORK_ID}\"; FN=$(sed -n 's/^NODE=//p' \"$CTXF\" 2>/dev/null | head -1); RC=$(sed -n 's/^REASON=//p' \"$CTXF\" 2>/dev/null | head -1); CTX=$(sed -n 's/^CONTEXT=//p' \"$CTXF\" 2>/dev/null | tail -n 20 | tr '\n' ' '); case \"$RC\" in deliverable-gate|infra-path|llm-path|unknown) ;; *) RC=unknown ;; esac; [ -n \"$FN\" ] || FN=unknown; [ -n \"$CTX\" ] || CTX='(no captured run tail available)'; shop-msg nudge --bc \"$BC_NAME\" --reason stuck-on-you --work-id \"$WORK_ID\" --note \"fabro finite-run BLOCKED (ADR-051: non-consuming report; dispatch stays pending == retriable; consuming terminal work_done deferred to emit_r; never a silent complete). failing-node=$FN reason-class=$RC context=$CTX\""]
 
     // =======================================================================
     // EDGES -- PROVEN-SAFE fail-closed pattern:
