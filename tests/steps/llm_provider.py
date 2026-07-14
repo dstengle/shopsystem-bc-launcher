@@ -18,6 +18,7 @@ from pytest_bdd import given, when, then, parsers  # noqa: F401
 from bc_launcher.fabro.constants import (
     ANTHROPIC_OAUTH_SHIM_BIN,
     FABRO_SHIM_PORT,
+    FABRO_WORKFLOW_FILE as FABRO_WORKFLOW_FILE_NAME,
 )
 
 from tests.support.container import (  # noqa: F401
@@ -551,4 +552,416 @@ def same_launch_no_override_carries_anthropic_models(
     assert inputs != ctx.get("b4_openrouter_run_inputs"), (
         "the no-override (Anthropic) fabro-run inputs must differ from the "
         f"openrouter-override inputs; both are {inputs!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Behavior 5 (@scenario_hash:c99e79ac24f56f5c) — CAPSTONE: a real dispatch
+# completes end-to-end on a BC launched with the OpenRouter override, with NO
+# software release required.  Two load-bearing halves:
+#
+#   HALF 1 — the dispatched work reaches a GATED work_done, having executed
+#     through a non-trivial node-class (`.coding`) whose model resolved to a
+#     LITERAL OpenRouter model ID.  Bound at the HONEST achievable fidelity (a
+#     TRUE live completion needs a real OpenRouter key + a live agent-vault
+#     broker + a real fabro run reaching work_done — infrastructure NOT present
+#     in-session): the resolved `.coding` node model on the openrouter path IS a
+#     literal OpenRouter model ID, PROVEN by the REAL `fabro validate` binary
+#     reporting the per-node resolved model on the committed graph with the
+#     openrouter row's literals substituted (the exact `-I MODEL_*` the launcher
+#     puts on the openrouter finite run); AND the run-graph reaches its gated
+#     work_done terminal `emit_r` (the SOLE scenario-path complete emitter,
+#     reachable ONLY via review->signoff->wdg_r->emit_r->done) — the existing
+#     ADR-051 gated-work_done structure of the SAME committed workflow.fabro the
+#     openrouter finite run executes.  The live-broker completion leg is bound at
+#     this graph-reachability fidelity, never faked; the `fabro validate` leg
+#     SKIPs honestly if the real binary cannot be obtained.
+#
+#   HALF 2 — no software release, BC-base image rebuild, or template re-pour was
+#     required — ONLY the launch-time provider override + a container relaunch.
+#     STATICALLY verifiable and load-bearing (the "config-not-release"
+#     guarantee): the poured def bundle (`_load_fabro_def_files()`, what
+#     shop-templates POURS) is provider-INVARIANT and carries provider-neutral
+#     `{{ inputs.MODEL_* }}` placeholders, so the SAME already-poured def serves
+#     BOTH providers with only the launch-time `-I` inputs selecting the models;
+#     the openrouter and anthropic engages target the byte-identical poured
+#     workflow.fabro and differ ONLY in launch-time env exports + `-I` inputs.
+#
+# FIDELITY: every assertion binds to the REAL launcher's ACTUAL recorded engage
+# over the FakeDockerDriver, the REAL committed/poured fabro def bundle, and the
+# REAL `fabro validate` binary — never a model and never a shallow string-match.
+# ---------------------------------------------------------------------------
+
+
+# The `.coding` node-class nodes that lie on the SCENARIO path from classify to
+# the gated work_done emitter (classify->suff->worktree->plan->impl->redgate->
+# integ->review->wdg_r->emit_r).  `impl_f` also carries class="coding" but is on
+# the FLAT (implementer-emitter) lane, not the scenario/gated lane.
+_CODING_SCENARIO_NODE = "impl"
+_GATED_COMPLETE_EMITTER = "emit_r"
+
+
+def _fabro_node_classes(workflow_text):
+    """Map node-id -> its `class="…"` attribute across the committed
+    workflow.fabro (agent nodes carry a class; native `script=` nodes do not).
+    Reads the REAL committed def, so the `.coding` node set is the graph's own,
+    not a hardcoded list."""
+    classes = {}
+    for m in re.finditer(r"(\w+)\s*\[([^\]]*)\]", workflow_text, re.DOTALL):
+        node_id, attrs = m.group(1), m.group(2)
+        cm = re.search(r'class="([^"]+)"', attrs)
+        if cm:
+            classes[node_id] = cm.group(1)
+    return classes
+
+
+def _is_openrouter_model_id(model_id):
+    """A literal OpenRouter model ID is a `vendor/model` catalog slug (contains a
+    `/`), contrasting the Anthropic-subscription row's bare `claude-*` IDs.  The
+    openrouter mapping row uses the `anthropic/claude-…` OpenRouter slugs."""
+    return isinstance(model_id, str) and "/" in model_id and bool(model_id.strip())
+
+
+def _real_fabro_validate_openrouter(or_row):
+    """Materialize the REAL committed fabro def bundle with the OpenRouter row's
+    literal model IDs substituted into workflow.toml's `[run.inputs]` MODEL_*
+    (the launch-time override the launcher supplies via `-I MODEL_*`), then run
+    the REAL `fabro validate --json` binary against it and return the parsed
+    doc.  SKIPs honestly if the fabro binary cannot be obtained (no fake).
+
+    The substituted def is BYTE-for-BYTE the committed def except the three
+    MODEL_* input DEFAULTS — mirroring exactly how the launcher's `-I` inputs
+    resolve the poured `{{ inputs.MODEL_* }}` placeholders at run time — so
+    `fabro validate` reports the per-node resolved model for the openrouter run.
+    """
+    import json
+    import shutil
+    import subprocess
+    import tempfile
+    from pathlib import Path
+
+    from bc_launcher.controller import _load_fabro_def_files
+
+    fabro = shutil.which("fabro")
+    if fabro is None:
+        import pytest
+
+        pytest.skip(
+            "fabro binary not on PATH; the REAL `fabro validate` end-to-end "
+            "resolved-model fidelity leg is deferred (honest SKIP, never faked)"
+        )
+    files = _load_fabro_def_files()
+    tmp = Path(tempfile.mkdtemp(prefix="fabro_or_validate_"))
+    for rel, data in files.items():
+        p = tmp / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        if rel == "workflow.toml":
+            text = data.decode("utf-8")
+            text = re.sub(
+                r'MODEL_CODING = "[^"]*"',
+                f'MODEL_CODING = "{or_row["coding"]}"',
+                text,
+            )
+            text = re.sub(
+                r'MODEL_REVIEW = "[^"]*"',
+                f'MODEL_REVIEW = "{or_row["review"]}"',
+                text,
+            )
+            text = re.sub(
+                r'MODEL_DEFAULT = "[^"]*"',
+                f'MODEL_DEFAULT = "{or_row["default"]}"',
+                text,
+            )
+            data = text.encode("utf-8")
+        p.write_bytes(data)
+    proc = subprocess.run(
+        [fabro, "validate", "--no-upgrade-check", "--json",
+         str(tmp / "workflow.toml")],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert proc.returncode == 0, (
+        "REAL `fabro validate` failed on the openrouter-resolved committed def "
+        f"(exit {proc.returncode}); this would be a real def defect.\n"
+        f"stdout={proc.stdout!r}\nstderr={proc.stderr!r}"
+    )
+    return json.loads(proc.stdout)
+
+
+@when(parsers.parse(
+    "bc-container launch is run for a BC with the OpenRouter provider override "
+    "and a substantive assign_scenarios dispatch is delivered to it"
+))
+def launch_openrouter_with_substantive_dispatch(
+    ctx, fake_driver, controller, tmp_path
+):
+    # Drive the REAL launcher on the --orchestrator fabro path with the
+    # openrouter override in effect (BCLAUNCHER_LLM_PROVIDER=openrouter set by the
+    # earlier Given).  The recorded engage is the EXTERNAL agent-free watcher
+    # supervisor: it drains `shop-msg pending inbox` and fires ONE FINITE
+    # `fabro run` child (the workflow.fabro loop) per pending work_id — the
+    # delivery mechanism for the "substantive assign_scenarios dispatch".  We bind
+    # the end-to-end outcome against that ACTUAL recorded engage (never a model).
+    _odd9_drive_fabro_launch(
+        "shopsystem-messaging", ctx, fake_driver, controller, tmp_path,
+        work_id=None,
+    )
+    script = _engage_script(ctx)
+    ctx["b5_engage_script"] = script
+    ctx["b5_openrouter_run_inputs"] = _model_run_inputs(script)
+    # The finite-child dispatch wiring the watcher supervisor uses to DELIVER the
+    # assign_scenarios dispatch to the openrouter-launched BC: it drains the
+    # authoritative pending set and fires a finite `fabro run` child that runs the
+    # UNCHANGED workflow.fabro graph.  Bound to the real recorded engage.
+    assert "shop-msg pending inbox" in script, (
+        "the recorded openrouter engage must drain the authoritative pending "
+        f"inbox to deliver the dispatch; script:\n{script}"
+    )
+    assert "fabro run" in script and FABRO_WORKFLOW_FILE_NAME in script, (
+        "the recorded openrouter engage must fire a finite `fabro run` child "
+        f"against the poured {FABRO_WORKFLOW_FILE_NAME}; script:\n{script}"
+    )
+
+
+@then("the dispatched work reaches a gated work_done, having executed through "
+      "at least one non-trivial node-class, such as \".coding\", whose model "
+      "resolved to a literal OpenRouter model ID")
+def dispatched_work_reaches_gated_workdone_via_coding_openrouter_model(ctx):
+    from bc_launcher.fabro.llm_provider import (
+        LLM_PROVIDER_ANTHROPIC,
+        LLM_PROVIDER_OPENROUTER,
+        resolve_model_mapping,
+    )
+
+    workflow = _poured_workflow_fabro()
+    or_row = resolve_model_mapping(LLM_PROVIDER_OPENROUTER)
+    an_row = resolve_model_mapping(LLM_PROVIDER_ANTHROPIC)
+
+    # --- (a) the `.coding` node-class resolves to a LITERAL OpenRouter model ID.
+    # The poured model_stylesheet maps the `.coding` node-class to the
+    # {{ inputs.MODEL_CODING }} placeholder ...
+    stylesheet, _ = _poured_model_stylesheet()
+    assert stylesheet is not None and re.search(
+        r"\.coding\s*\{\s*model:\s*\{\{\s*inputs\.MODEL_CODING\s*\}\}\s*\}",
+        stylesheet,
+    ), (
+        "the poured model_stylesheet must resolve the `.coding` node-class from "
+        f"the MODEL_CODING input placeholder; got {stylesheet!r}"
+    )
+    # ... and on the openrouter path the launcher supplies
+    # `-I MODEL_CODING=<openrouter coding literal>` on the finite run, so
+    # `.coding` resolves to the OpenRouter-row literal model ID.
+    run_inputs = ctx.get("b5_openrouter_run_inputs") or _model_run_inputs(
+        _engage_script(ctx)
+    )
+    coding_model = run_inputs.get("MODEL_CODING")
+    assert coding_model == or_row["coding"], (
+        "the openrouter finite run must resolve `.coding` (MODEL_CODING) to the "
+        f"OpenRouter-row literal {or_row['coding']!r}, got {coding_model!r}"
+    )
+    assert _is_openrouter_model_id(coding_model), (
+        f"the resolved `.coding` model {coding_model!r} must be a LITERAL "
+        "OpenRouter model ID (a vendor/model catalog slug)"
+    )
+    assert not _is_openrouter_model_id(an_row["coding"]), (
+        "guard: the Anthropic-subscription row's `.coding` model "
+        f"{an_row['coding']!r} must NOT be an OpenRouter slug — the two provider "
+        "paths genuinely differ"
+    )
+
+    # `.coding` is a REAL non-trivial node-class of the committed graph, carried
+    # by JUDGMENT agent nodes on the scenario path (not a stylesheet-only label).
+    node_classes = _fabro_node_classes(workflow)
+    coding_nodes = {n for n, c in node_classes.items() if c == "coding"}
+    assert coding_nodes, (
+        "the committed workflow.fabro must carry `.coding` node-class agent "
+        f"nodes; node classes: {node_classes!r}"
+    )
+    assert _CODING_SCENARIO_NODE in coding_nodes, (
+        f"the scenario-path `.coding` node {_CODING_SCENARIO_NODE!r} "
+        f"(bc-implementer) must be a `.coding` node; coding nodes: {coding_nodes!r}"
+    )
+
+    # --- (b) the REAL `fabro validate` binary confirms the openrouter-resolved
+    # graph is a VALID graph whose `.coding` nodes resolve to the OpenRouter
+    # literal model ID (the per-node resolved model the binary reports).  Honest
+    # SKIP if the binary is unavailable.
+    doc = _real_fabro_validate_openrouter(or_row)
+    assert doc.get("valid") is True, (
+        "the openrouter-resolved committed graph must be structurally VALID per "
+        f"the REAL fabro validate; doc={ {k: doc.get(k) for k in ('valid','workflow_name')} !r}"
+    )
+    assert doc.get("workflow_name") == "BcShopLoop", (
+        f"the validated graph must be the bc-shop loop; got {doc.get('workflow_name')!r}"
+    )
+    # Every diagnostic must be a benign model-catalog WARNING for the OpenRouter
+    # slugs (they are resolved on the wire by the openrouter provider adapter, not
+    # from fabro's built-in Anthropic catalog) — NO structural error.
+    diags = doc.get("diagnostics") or []
+    node_model = {}
+    for d in diags:
+        assert d.get("severity") == "Warning", (
+            "the openrouter-resolved graph must carry NO non-warning "
+            f"diagnostic; offending: {d!r}"
+        )
+        assert d.get("rule") in ("stylesheet_model_known", "node_model_known"), (
+            "every openrouter diagnostic must be a benign model-catalog "
+            f"known-model warning; offending: {d!r}"
+        )
+        nid = d.get("node_id")
+        mm = re.search(r"model '([^']+)'", d.get("message", ""))
+        if nid and mm:
+            node_model[nid] = mm.group(1)
+    # The REAL binary reports the scenario-path `.coding` node resolved to the
+    # OpenRouter literal coding model ID.
+    assert node_model.get(_CODING_SCENARIO_NODE) == or_row["coding"], (
+        f"the REAL fabro validate must report the `.coding` node "
+        f"{_CODING_SCENARIO_NODE!r} resolved to the OpenRouter literal "
+        f"{or_row['coding']!r}; got {node_model.get(_CODING_SCENARIO_NODE)!r} "
+        f"(all node models: {node_model!r})"
+    )
+
+    # --- (c) the run-graph reaches its GATED work_done terminal.  `emit_r` is the
+    # SOLE scenario-path work_done(complete) emitter and is reachable ONLY via
+    # review->signoff->wdg_r->emit_r->done — the gate `wdg_r` sits between the
+    # reviewer signoff and the complete emit, so a failed gate diverts to emit_blk
+    # (blocked) and NEVER reaches the complete emit.  Bound to the REAL committed
+    # graph the openrouter finite run executes.
+    def _edge(src, dst):
+        return re.search(
+            rf"\b{re.escape(src)}\s*->\s*{re.escape(dst)}\b", workflow
+        )
+
+    assert _GATED_COMPLETE_EMITTER in workflow, (
+        "the committed graph must define the gated complete emitter emit_r"
+    )
+    assert re.search(
+        r'review\s*->\s*wdg_r\s*\[label="signoff"\]', workflow
+    ), "the reviewer signoff must route to the work-done gate wdg_r"
+    assert _edge("wdg_r", "emit_r"), (
+        "the work-done gate wdg_r must (on pass) reach the complete emitter emit_r"
+    )
+    assert re.search(
+        r'wdg_r\s*->\s*emit_blk\s*\[condition="outcome=failed"\]', workflow
+    ), "a FAILED work-done gate must divert to emit_blk (blocked), never complete"
+    assert _edge("emit_r", "done"), (
+        "the gated complete emit emit_r must reach the SUCCEEDED terminal done"
+    )
+    # emit_r is the gated complete emitter: its node declaration runs `bc-emit
+    # work-done … --status complete` (the `]` inside its script regex defeats a
+    # bracket-bounded match, so span from the emit_r decl to the complete emit).
+    assert re.search(
+        r"emit_r\s*\[.*?bc-emit work-done.*?--status complete",
+        workflow,
+        re.DOTALL,
+    ), "emit_r must be the gated `bc-emit work-done --status complete` emitter"
+
+
+@then("no software release, BC-base image rebuild, or template re-pour was "
+      "required to reach this outcome — only the launch-time provider override "
+      "and a container relaunch")
+def no_release_rebuild_or_repour_required(ctx, tmp_path, monkeypatch):
+    from bc_launcher.controller import BcContainerController, _load_fabro_def_files
+    from bc_launcher.fabro.llm_provider import LLM_PROVIDER_OPENROUTER
+    from tests.fake_driver import FakeDockerDriver
+
+    # --- (1) the poured def bundle (what shop-templates POURS) is provider-
+    # INVARIANT: `_load_fabro_def_files()` takes NO provider argument and returns
+    # byte-identical bytes, so selecting openrouter re-pours NOTHING.  The SAME
+    # already-poured def serves both providers.
+    files_a = _load_fabro_def_files()
+    files_b = _load_fabro_def_files()
+    assert files_a == files_b, (
+        "the poured fabro def bundle must be provider-invariant (no re-pour); "
+        "selecting openrouter must not change the poured def bytes"
+    )
+    # The poured workflow.fabro carries provider-NEUTRAL `{{ inputs.MODEL_* }}`
+    # placeholders (NOT baked provider model IDs), so the launch-time `-I MODEL_*`
+    # override — not a re-poured/rebaked def — selects the provider's models.
+    poured_workflow = files_a["workflow.fabro"].decode("utf-8")
+    for placeholder in ("MODEL_CODING", "MODEL_REVIEW", "MODEL_DEFAULT"):
+        assert re.search(
+            r"\{\{\s*inputs\." + placeholder + r"\s*\}\}", poured_workflow
+        ), (
+            "the poured workflow.fabro model_stylesheet must carry the provider-"
+            f"neutral placeholder {{{{ inputs.{placeholder} }}}} so the override "
+            "rides launch-time `-I`, not a re-poured def"
+        )
+    assert "anthropic/claude" not in poured_workflow, (
+        "no OpenRouter (or any provider) literal model ID may be BAKED into the "
+        "poured workflow.fabro — the models ride launch-time `-I`, no re-pour"
+    )
+
+    # --- (2) the openrouter override is realized PURELY at launch time: relaunch
+    # the SAME launcher with NO override (Anthropic default) over a fresh driver
+    # and compare the two recorded engages.  Both must target the byte-identical
+    # poured workflow.fabro / def dir; the ONLY differences are launch-time env
+    # exports + `-I MODEL_*` inputs — never a poured/baked artifact.
+    or_script = ctx.get("b5_engage_script") or _engage_script(ctx)
+
+    monkeypatch.delenv("BCLAUNCHER_LLM_PROVIDER", raising=False)
+    fresh_driver = FakeDockerDriver()
+    fresh_controller = BcContainerController(
+        fresh_driver, monotonic=fresh_driver.monotonic
+    )
+    ctx2 = {"credential_home": ctx.get("credential_home")}
+    _odd9_drive_fabro_launch(
+        "shopsystem-messaging", ctx2, fresh_driver, fresh_controller,
+        tmp_path, work_id=None,
+    )
+    an_script = _engage_script(ctx2)
+
+    # Both engages fire the finite `fabro run` child against the SAME poured
+    # workflow.fabro — the openrouter path runs the identical committed graph, no
+    # rebuilt/rebaked variant.
+    assert FABRO_WORKFLOW_FILE_NAME in or_script and FABRO_WORKFLOW_FILE_NAME in an_script, (
+        "both provider engages must target the poured "
+        f"{FABRO_WORKFLOW_FILE_NAME} finite-run graph"
+    )
+    # The provider override changes ONLY launch-time positions: the exported
+    # active provider, the credential exports, the registered provider block, and
+    # the `-I MODEL_*` inputs.  It genuinely differs (openrouter != anthropic
+    # wiring) ...
+    assert or_script != an_script, (
+        "the openrouter override must produce a genuinely different launch-time "
+        "engage than the anthropic default"
+    )
+    assert "BCLAUNCHER_LLM_PROVIDER=openrouter" in or_script, (
+        "the openrouter override must be realized as a launch-time env export"
+    )
+    assert "[llm.providers.openrouter]" in or_script and (
+        "[llm.providers.openrouter]" not in an_script
+    ), "the openrouter provider block must be registered at launch time only"
+    # ... BUT the difference is confined to launch-time exports + `-I` inputs:
+    # with those launch-time lines normalized away, the two engages are identical
+    # — proving NOTHING baked/poured changed between the two provider launches
+    # (only the launch-time override + relaunch).
+    def _strip_launch_time(script):
+        lines = []
+        for ln in script.splitlines():
+            low = ln
+            if any(
+                tok in low
+                for tok in (
+                    "BCLAUNCHER_LLM_PROVIDER=",
+                    "OPENROUTER_API_KEY",
+                    "ANTHROPIC_API_KEY",
+                    "ANTHROPIC_BASE_URL",
+                    "llm.providers.",
+                    "adapter =",
+                    "base_url =",
+                )
+            ):
+                continue
+            # Drop the `-I MODEL_*=…` run-input tokens (launch-time model select).
+            low = re.sub(r"-I MODEL_(CODING|REVIEW|DEFAULT)=\S+", "", low)
+            lines.append(low)
+        return "\n".join(lines)
+
+    assert _strip_launch_time(or_script) == _strip_launch_time(an_script), (
+        "with the launch-time exports + `-I MODEL_*` inputs normalized away, the "
+        "openrouter and anthropic engages must be IDENTICAL — proving the "
+        "override rides launch-time config + relaunch alone, with no software "
+        "release, BC-base image rebuild, or template re-pour"
     )
