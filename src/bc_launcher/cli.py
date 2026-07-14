@@ -23,12 +23,19 @@ from bc_launcher.manifest import ManifestController, RealGitDriver, RealGitHubDr
 # imperative; a synthetic first user prompt is the only mechanism that
 # directs the BC agent to act before a human types.
 #
-# Load-bearing properties (per lead-9sq):
+# Load-bearing properties (per lead-9sq; property (c) RESTORED by lead-ew86 /
+# ADR-050 D3 / ADR-018 D1-D2):
 #   (a) directs the agent to arm Monitor on `shop-msg watch --bc <bc_name>`
 #   (b) directs the agent to drain pending inbox via
 #       `shop-msg pending inbox --bc <bc_name>`
-#   (c) ends with "await user direction" so the agent does not synthesize
-#       follow-on work.
+#   (c) directs the agent to AUTONOMOUSLY PROCESS each pending dispatch through
+#       the normal Implementer->Reviewer loop to a Reviewer-gated work_done,
+#       without waiting for a human "go".  The ADR-050 --orchestrator split had
+#       regressed this to "await user direction", which made a tmux-default BC
+#       with pending dispatched inbox work merely LIST those dispatches and
+#       then PARK — a headless BC that never gets a human "go" would leave the
+#       dispatches stuck pending.  The autonomous drain-AND-process directive
+#       is the restored tmux-default engage behavior.
 #
 # An explicit --startup-prompt 'foo' on the command line is a TOTAL
 # override: the template default is not used and no substitution occurs.
@@ -36,7 +43,9 @@ DEFAULT_STARTUP_PROMPT_TEMPLATE = (
     "Run your session-start sequence per /workspace/CLAUDE.md: "
     "arm Monitor on shop-msg watch --bc {bc_name}, "
     "then drain pending inbox via shop-msg pending inbox --bc {bc_name}, "
-    "then await user direction."
+    "then autonomously process each pending dispatch through the normal "
+    "Implementer->Reviewer loop to a Reviewer-gated work_done, without "
+    "waiting for a human go."
 )
 
 
