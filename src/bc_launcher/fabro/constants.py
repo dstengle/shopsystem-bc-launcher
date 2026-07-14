@@ -355,3 +355,28 @@ FABRO_WATCH_TELEMETRY_FILE = f"{FABRO_WATCH_STATE_DIR}/telemetry.json"
 # The telemetry sampling cadence (seconds) — how often the supervisor refreshes
 # the server RSS + run-count sample into the telemetry file.
 FABRO_WATCH_TELEMETRY_INTERVAL_SECS = 15
+
+# The MESSAGE-INDEPENDENT bc_presence heartbeat cadence (seconds) — lead-8hpz /
+# scenario a5ce1af45ade7444 / ADR-050 D3 (ADDITIVE, extends structural pin
+# e94a01b26ed6a4cc).  The supervisor's ONLY always-resident process is
+# `shop-msg watch --bc <name>`, a LISTEN/NOTIFY event source that wakes ONLY on a
+# real message and NEVER per poll tick — so it advances NO bc_presence heartbeat
+# while the BC is idle-but-live (zero resident finite runs, no message in
+# flight).  Without a message-independent cadence upsert an idle BC's
+# last_seen_at ages past the bc-status staleness window (operator-confirmed
+# ~2525s) and the BC reports OFFLINE + the container healthcheck reports
+# UNHEALTHY though it is functionally healthy.  The supervisor therefore UPSERTs
+# the heartbeat on THIS cadence, mirroring the telemetry sampler and bounded
+# strictly below the bc-status ONLINE staleness window (shop_msg
+# PRESENCE_ONLINE_MAX_SECONDS = 90), so an idle-but-live BC stays ONLINE.  The
+# superseded "emit a heartbeat each 5s poll" fix-direction is SUPERSEDED: this is
+# a bounded cadence upsert INDEPENDENT of message arrival, NOT a poll tick.
+FABRO_WATCH_HEARTBEAT_INTERVAL_SECS = 30
+
+# The bound (seconds) on each heartbeat's `shop-msg watch`: a bounded watch fires
+# its FIRST action — a bc_presence UPSERT keyed on the SAME canonical presence
+# name bc-status queries — then is killed, so the cadence loop can repeat.  Kept
+# small so the effective heartbeat period
+# (FABRO_WATCH_HEARTBEAT_INTERVAL_SECS + this) stays well below the staleness
+# window.
+FABRO_WATCH_HEARTBEAT_BOUND_SECS = 5

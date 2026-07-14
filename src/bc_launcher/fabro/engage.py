@@ -8,6 +8,20 @@ from __future__ import annotations
 from bc_launcher.constants import AGENT_VAULT_CONTAINER_CA_PATH, SSL_CERT_FILE_ENV
 from bc_launcher.fabro.constants import *  # noqa: F401,F403  (sibling constants)
 
+# The REAL bc-status ONLINE staleness window (seconds) — imported from the SAME
+# module `shop-msg bc-status` classifies presence by (lead-8hpz behavior 2 /
+# scenario 90e6b9fae7a63eb8).  The message-independent heartbeat cadence built
+# below is bound STRICTLY below this so a live BC's last_seen_at can never age
+# stale between UPSERTs; binding to the real classifier constant (not a
+# duplicated literal) keeps the bound faithful if the classifier ever moves.
+from shop_msg.storage import PRESENCE_ONLINE_MAX_SECONDS
+
+# The ONE canonical cross-runtime presence-heartbeat verb (lead-8hpz behavior 3 /
+# scenario 81eee7115a2457f4).  The fabro supervisor's message-independent cadence
+# heartbeat maintains bc_presence with the SAME verb the tmux session-start loop
+# arms, so the fabro liveness interface MIRRORS the tmux one rather than diverging.
+from bc_launcher.liveness import PRESENCE_HEARTBEAT_WATCH_VERB
+
 
 
 
@@ -144,6 +158,31 @@ def _fabro_engage_script(bc_name: str) -> str:
     completed = FABRO_WATCH_COMPLETED_FILE
     telemetry = FABRO_WATCH_TELEMETRY_FILE
     interval = FABRO_WATCH_TELEMETRY_INTERVAL_SECS
+    heartbeat_interval = FABRO_WATCH_HEARTBEAT_INTERVAL_SECS
+    heartbeat_bound = FABRO_WATCH_HEARTBEAT_BOUND_SECS
+    # The ONE canonical cross-runtime presence-heartbeat verb (behavior 3 /
+    # 81eee7115a2457f4) — the fabro supervisor maintains bc_presence with the SAME
+    # verb the tmux session-start loop arms, so the two liveness surfaces mirror.
+    hb_verb = PRESENCE_HEARTBEAT_WATCH_VERB
+
+    # BOUND GUARANTEE (lead-8hpz behavior 2 / scenario 90e6b9fae7a63eb8): the
+    # EFFECTIVE heartbeat period — the worst-case age between two successive
+    # bc_presence UPSERTs — is the cadence `sleep` interval PLUS the per-tick
+    # bounded `shop-msg watch` timeout.  It MUST be a positive value strictly below
+    # the REAL bc-status ONLINE staleness window, or an idle-but-live BC's
+    # last_seen_at could age past the threshold between heartbeats and the BC would
+    # flap OFFLINE (the lead-8hpz regression).  The launcher REFUSES to build a
+    # stale-cadence engage rather than silently ship one, so no future edit to the
+    # cadence constants can regress the liveness guarantee undetected.
+    _heartbeat_period = heartbeat_interval + heartbeat_bound
+    if not 0 < _heartbeat_period < PRESENCE_ONLINE_MAX_SECONDS:
+        raise ValueError(
+            "fabro heartbeat cadence effective period "
+            f"({heartbeat_interval}s sleep + {heartbeat_bound}s bounded-watch = "
+            f"{_heartbeat_period}s) must be a positive value STRICTLY below the "
+            f"bc-status ONLINE staleness window ({PRESENCE_ONLINE_MAX_SECONDS}s) so "
+            "an idle-but-live BC never flaps offline between heartbeats (lead-8hpz)"
+        )
     q_state = shlex.quote(state_dir)
     q_sock = shlex.quote(sock)
     q_store = shlex.quote(store)
@@ -230,6 +269,27 @@ sample_telemetry() {{
 }}
 sample_telemetry
 ( while kill -0 "$FABRO_SERVER_PID" 2>/dev/null; do sample_telemetry; sleep {interval}; done ) &
+# Presence heartbeat (lead-8hpz / scenario a5ce1af45ade7444 / ADR-050 D3;
+# ADDITIVE, extends structural liveness pin e94a01b26ed6a4cc).  The always-
+# resident `shop-msg watch --bc "$BC_NAME"` reader BELOW wakes ONLY on a real
+# NOTIFY (never per poll tick), so it advances NO bc_presence heartbeat while the
+# BC is idle-but-live (zero resident finite runs, no message in flight) — exactly
+# the lead-8hpz regression: last_seen_at ages past the bc-status staleness window
+# (operator-confirmed ~2525s) and the BC reports OFFLINE + the container
+# healthcheck reports UNHEALTHY though it is functionally healthy.  FIX: a
+# MESSAGE-INDEPENDENT cadence UPSERT — NOT per-poll-tick, NOT only-when-work-in-
+# flight (the superseded "heartbeat each 5s poll" direction is SUPERSEDED) —
+# mirroring the telemetry sampler cadence and bounded strictly below the staleness
+# window.  Each `heartbeat` runs a BOUNDED `shop-msg watch` whose FIRST action is
+# a bc_presence UPSERT keyed on the SAME canonical presence name bc-status queries
+# (so the heartbeat cannot mis-key — lead-bppa), then exits; stdout is discarded
+# so it never dispatches (the foreground reader + drain own dispatch).  The loop
+# is gated ONLY on the shared server's liveness, so an idle-but-live BC keeps
+# UPSERTing and stays ONLINE + healthy.
+heartbeat() {{
+  timeout {heartbeat_bound} {hb_verb} "$BC_NAME" >/dev/null 2>>{run_log} || true
+}}
+( heartbeat; while kill -0 "$FABRO_SERVER_PID" 2>/dev/null; do sleep {heartbeat_interval}; heartbeat; done ) &
 # Materialize the finite child config — BYTE-IDENTICAL to the reference's
 # materialize_child: UNCHANGED ADR-051 workflow.fabro graph, provider=local,
 # WORK_ID/BC_NAME delivered to the native script= nodes via [run.environment.env]
@@ -304,7 +364,7 @@ drain
 # the gap via drain, then restart watch.  AGENT-FREE: no model-backed agent
 # anywhere in this dispatch path — steady-state supervision spends ZERO tokens.
 while true; do
-  shop-msg watch --bc "$BC_NAME" 2>>{run_log} | while IFS=' ' read -r _w_wid _w_mtype; do
+  {hb_verb} "$BC_NAME" 2>>{run_log} | while IFS=' ' read -r _w_wid _w_mtype; do
     [ "$_w_wid" = "READY" ] && continue
     [ -z "$_w_wid" ] && continue
     dispatch "$_w_wid"
