@@ -27,3 +27,11 @@ Feature: a launch-time --llm-provider / BCLAUNCHER_LLM_PROVIDER override selects
     When bc-container launch is run for BC name "shopsystem-messaging"
     Then the container's fabro run is launched with the active LLM provider set to "anthropic"
     And no OpenRouter agent-vault credential is requested for this launch
+
+  @scenario_hash:b3054f5439369fa8 @bc:shopsystem-bc-launcher
+  Scenario: an explicit launch-time provider override selects OpenRouter, winning over the Anthropic default
+    Given the shopsystem-bc-launcher BC is installed
+    And the operator supplies a launch-time LLM provider override of "openrouter" via "--llm-provider openrouter" (or "BCLAUNCHER_LLM_PROVIDER=openrouter")
+    When bc-container launch is run for BC name "shopsystem-messaging" with the operator-supplied provider override
+    Then the container's fabro run is launched with the active LLM provider set to "openrouter"
+    And the Anthropic anthropic-oauth-shim path is not engaged for this launch
