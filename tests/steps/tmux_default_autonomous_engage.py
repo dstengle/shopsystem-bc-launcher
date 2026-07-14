@@ -308,3 +308,219 @@ def ew86b_no_unrequested_follow_on(ctx):
         "the no-unrequested-follow-on directive must be scoped to 'beyond what "
         f"was dispatched', bounding the autonomy to dispatched work: {prompt!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Behavior 3 (lead-ew86, @scenario_hash:cdaaf8d986398b36): autonomous
+# drain-and-process is the tmux DEFAULT, while the operator-driven /
+# await-direction interactive session is a DISTINCT, explicitly-selected
+# NON-default mode reached ONLY via an explicit --startup-prompt override.
+#
+# This scenario pins the DISTINCTION between the two modes. It binds BOTH
+# observables to the launcher's ACTUAL recorded tmux `agent` send-keys, driving
+# the REAL launcher (controller.launch over the FakeDockerDriver) TWICE and
+# resolving each prompt EXACTLY as bc_launcher.cli.main() does:
+#   (1) NO --startup-prompt  -> the DEFAULT template (autonomous drain-and-
+#       process directive) is resolved and injected verbatim; no operator "go"
+#       is required.
+#   (2) an explicit --startup-prompt selecting an operator-driven /
+#       await-direction session -> that operator prompt is a TOTAL override
+#       (no substitution) injected VERBATIM, and the autonomous default
+#       directive is ABSENT — the two modes are distinct and separately
+#       selected.
+# The override launch runs on its own fresh FakeDockerDriver so its recorded
+# send-keys are isolated from the default launch's.
+#
+# The autonomous default half is already delivered (behaviors 1 & 2 / the
+# DEFAULT template) and the override half is already delivered by the existing
+# TOTAL-override mechanism in cli.main(); this scenario PINS that already-present
+# capability. The autonomous-default marker asserted here is the load-bearing
+# `process each pending dispatch` directive.
+# ---------------------------------------------------------------------------
+
+_EW86C_OPERATOR_PROMPT = (
+    "Operator-driven interactive session for {bc}: arm Monitor on "
+    "shop-msg watch --bc {bc}, then AWAIT operator direction — do NOT process "
+    "the inbox autonomously; hold until the operator explicitly types go."
+)
+
+# The load-bearing autonomous-default directive marker (from the DEFAULT
+# startup-prompt template). Its presence marks the autonomous drain-and-process
+# mode; its absence marks a non-autonomous (operator-driven) mode.
+_EW86C_AUTONOMOUS_MARKER = "process each pending dispatch"
+
+
+def _ew86c_agent_send_keys_tokens(driver):
+    """Every token across the launcher's ACTUAL recorded tmux `agent` send-keys
+    for ``driver``. Binds assertions to the launcher's real recorded output."""
+    tokens = []
+    for call in _cadr_tmux_agent_send_keys({"cadr_driver": driver}):
+        tokens.extend(call.command)
+    return tokens
+
+
+@when(parsers.parse(
+    'the container "{container_name}" is launched on the DEFAULT '
+    '"--orchestrator tmux" engage with no explicit interactive-startup '
+    "override supplied"))
+def ew86c_when_launch_default_and_prepare_override(
+    container_name, ctx, fake_driver, controller, tmp_path
+):
+    """Drive the REAL launcher TWICE to establish the two-mode comparison this
+    scenario pins:
+
+    (a) the DEFAULT no-override tmux engage (reusing behavior 1's launch
+        machinery), resolving the DEFAULT startup prompt EXACTLY as
+        bc_launcher.cli.main() does when --startup-prompt is omitted; and
+    (b) the DISTINCT explicitly-selected NON-default mode: an explicit
+        --startup-prompt that selects an operator-driven / await-direction
+        interactive session, resolved EXACTLY as cli.main() does (explicit ->
+        TOTAL override, no substitution) and driven on a FRESH driver so its
+        recorded send-keys are isolated from (a)'s."""
+    from bc_launcher.cli import DEFAULT_STARTUP_PROMPT_TEMPLATE
+    from bc_launcher.controller import BcContainerController
+    from tests.fake_driver import FakeDockerDriver
+
+    # (a) DEFAULT no-override launch.
+    ew86_launch_tmux_default_no_override(
+        container_name, ctx, fake_driver, controller, tmp_path
+    )
+    bc_name = ctx["ew86_bc_name"]
+    ctx["ew86c_default_driver"] = fake_driver
+    ctx["ew86c_default_prompt"] = DEFAULT_STARTUP_PROMPT_TEMPLATE.format(
+        bc_name=bc_name
+    )
+
+    # (b) explicit-override launch selecting the operator-driven session.
+    operator_prompt = _EW86C_OPERATOR_PROMPT.format(bc=bc_name)
+    parser = _cadr_build_parser()
+    args = parser.parse_args(
+        ["launch", bc_name, "--startup-prompt", operator_prompt]
+    )
+    assert args.orchestrator == "tmux", (
+        "the override launch must remain on the DEFAULT tmux engage — only the "
+        "startup-prompt (interactive vs autonomous) differs between the modes"
+    )
+    explicit = getattr(args, "startup_prompt", None)
+    assert explicit is not None, (
+        "an explicit --startup-prompt must be present to select the "
+        "operator-driven NON-default mode"
+    )
+    # Resolve EXACTLY as cli.main(): explicit prompt is a TOTAL override; no
+    # template substitution occurs.
+    resolved_override = explicit
+
+    ovr_driver = FakeDockerDriver()
+    ovr_controller = BcContainerController(
+        ovr_driver, monotonic=ovr_driver.monotonic
+    )
+    manifest_path = _cadr_write_manifest(tmp_path, bc_name)
+    ovr_result = ovr_controller.launch(
+        bc_name=bc_name,
+        repo_url=f"https://github.com/shopsystem/{bc_name}.git",
+        manifest_path=manifest_path,
+        credential_home=ctx.get("credential_home"),
+        startup_prompt=resolved_override,
+        launch_path=_CADR_LAUNCH_PATH_TMUX,
+    )
+    assert ovr_result.exit_code == 0, (
+        f"override tmux launch failed: stdout={ovr_result.stdout!r} "
+        f"stderr={ovr_result.stderr!r}"
+    )
+    ctx["ew86c_override_driver"] = ovr_driver
+    ctx["ew86c_override_prompt"] = resolved_override
+
+
+@then(parsers.parse(
+    "the autonomous drain-and-process behavior is the DEFAULT for the tmux "
+    'engage, beginning to process dispatched inbox work with no operator "go" '
+    "required"))
+def ew86c_autonomous_is_default(ctx):
+    driver = ctx["ew86c_default_driver"]
+    prompt = ctx["ew86c_default_prompt"]
+    tokens = _ew86c_agent_send_keys_tokens(driver)
+    # Observable (1): the DEFAULT no-override tmux engage injects the autonomous
+    # default startup prompt VERBATIM into the launcher's ACTUAL recorded agent
+    # send-keys.
+    assert prompt in tokens, (
+        "the DEFAULT no-override tmux engage must inject the autonomous default "
+        f"startup prompt into the recorded agent send-keys; recorded: {tokens!r}"
+    )
+    # It DIRECTS processing dispatched inbox work (not merely listing) ...
+    assert _EW86C_AUTONOMOUS_MARKER in prompt, (
+        "the DEFAULT injected prompt must DIRECT processing each pending "
+        f"dispatch (the autonomous default): {prompt!r}"
+    )
+    assert "Reviewer-gated work_done" in prompt, (
+        "the DEFAULT injected prompt must direct processing TO a Reviewer-gated "
+        f"work_done: {prompt!r}"
+    )
+    # ... with NO operator "go" required (the regressed park directive absent).
+    assert "without waiting for a human go" in prompt, (
+        "the DEFAULT injected prompt must require no human 'go' between drain "
+        f"and work_done: {prompt!r}"
+    )
+    assert "await user direction" not in prompt, (
+        "the DEFAULT injected prompt must NOT park awaiting operator direction: "
+        f"{prompt!r}"
+    )
+
+
+@then(parsers.parse(
+    "the await-direction / operator-driven interactive behavior is NOT the "
+    "tmux default and is reached ONLY by an explicit interactive-startup "
+    "override (for example an explicit startup-prompt that selects an "
+    "operator-driven session)"))
+def ew86c_await_direction_not_default(ctx):
+    default_prompt = ctx["ew86c_default_prompt"]
+    override_prompt = ctx["ew86c_override_prompt"]
+    # await-direction is NOT the tmux default: the DEFAULT injected prompt
+    # carries the autonomous directive and does NOT await operator direction.
+    assert _EW86C_AUTONOMOUS_MARKER in default_prompt, (
+        "the tmux DEFAULT must be the autonomous mode, not await-direction: "
+        f"{default_prompt!r}"
+    )
+    assert "AWAIT operator direction" not in default_prompt, (
+        "the tmux DEFAULT must NOT be the await-direction / operator-driven "
+        f"mode: {default_prompt!r}"
+    )
+    # await-direction IS reached — ONLY — via the explicit interactive-startup
+    # override: the operator-driven session lives in the explicitly-supplied
+    # override prompt and nowhere in the default path.
+    assert "AWAIT operator direction" in override_prompt, (
+        "the operator-driven / await-direction session must be selected by the "
+        f"explicit interactive-startup override: {override_prompt!r}"
+    )
+    assert override_prompt != default_prompt, (
+        "the explicitly-selected operator-driven mode must be a DISTINCT prompt "
+        "from the autonomous default"
+    )
+
+
+@then(parsers.parse(
+    "when that explicit interactive override IS supplied the engage runs the "
+    "operator-driven interactive session instead of autonomously processing "
+    "the inbox, confirming the two modes are distinct and separately selected"))
+def ew86c_override_runs_operator_session(ctx):
+    driver = ctx["ew86c_override_driver"]
+    override_prompt = ctx["ew86c_override_prompt"]
+    tokens = _ew86c_agent_send_keys_tokens(driver)
+    # Observable (2): the explicit interactive override is injected VERBATIM
+    # into the override launch's ACTUAL recorded agent send-keys.
+    assert override_prompt in tokens, (
+        "the explicit interactive override must be injected VERBATIM into the "
+        f"recorded agent send-keys; recorded: {tokens!r}"
+    )
+    # ...and the autonomous drain-and-process default directive is ABSENT on the
+    # override launch — the engage runs the operator-driven session INSTEAD of
+    # autonomously processing the inbox (the two modes are distinct and
+    # separately selected).
+    assert all(_EW86C_AUTONOMOUS_MARKER not in tok for tok in tokens), (
+        "an explicit interactive override must NOT also inject the autonomous "
+        f"drain-and-process default directive; recorded: {tokens!r}"
+    )
+    # The override runs the operator-driven / await-direction session.
+    assert "AWAIT operator direction" in override_prompt, (
+        "the override engage must run the operator-driven / await-direction "
+        f"session: {override_prompt!r}"
+    )
