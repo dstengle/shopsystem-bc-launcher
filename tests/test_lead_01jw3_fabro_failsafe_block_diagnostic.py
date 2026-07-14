@@ -488,3 +488,191 @@ def test_behavior_2_scenario_block_recomputes_to_its_pin():
     assert b1 == _BEHAVIOR_1_HASH, (
         f"behavior 1 pin disturbed: recomputed {b1!r} != {_BEHAVIOR_1_HASH}"
     )
+
+
+# ===========================================================================
+# Behavior 3 — CROSS-RUNTIME PARITY (8af4e27a05ae9a32).
+#
+# The fabro finite-run blocked report is as ACTIONABLE as an equivalent
+# tmux-runtime launch diagnostic: both runtimes expose the SAME three operator
+# decision inputs — the failing point (WHERE), the failure class (WHAT class,
+# for routing), and the captured context (WHY) — so an operator reconciling a
+# work_id and deciding how to route the failure (retry / escalate infra /
+# escalate LLM path / return the deliverable gate to the PO/Architect) reaches
+# the SAME decision from either runtime's response, with no need to attach into
+# the container or read fabro run logs out of band.
+#
+# PIN-EXISTING-CAPABILITY: behaviors 1&2 already put {failing-node, reason-class,
+# detail-marker, context} on the fabro `emit_blk` note, and the tmux runtime
+# already exposes its launch diagnostic (cause-marker token + human-readable
+# reason) via `bc_launcher.diagnostics` / the `_write_launch_diagnostic`
+# content format.  These tests do NO hard-coded tautology: they bind BOTH
+# runtimes to their REAL mechanisms and assert the two expose the same three
+# decision inputs AND share the infra failure vocabulary (the crux: the token
+# an operator routes on — e.g. `agent-vault` — is the SAME token in both
+# runtimes, so the shipped tmux `CAUSE_MARKER_AGENT_VAULT` constant must equal
+# what the shipped fabro `classify_reason` derives for the same failure).
+# ===========================================================================
+
+_BEHAVIOR_3_HASH = "8af4e27a05ae9a32"
+
+
+def _engage_source() -> str:
+    """The REAL committed `_write_launch_diagnostic` call site — the tmux-runtime
+    launch-diagnostic content format (`cause:` + `reason:` fields)."""
+    return (
+        Path(__file__).resolve().parent.parent
+        / "src"
+        / "bc_launcher"
+        / "controller"
+        / "_engage.py"
+    ).read_text(encoding="utf-8")
+
+
+def test_behavior_3_fabro_block_exposes_the_three_decision_inputs():
+    """The fabro blocked report exposes all THREE operator decision inputs the
+    parity requires — the failing point (failing-node=WHERE), the failure class
+    (reason-class=WHAT class), and the captured context (context=WHY) — each an
+    INTERPOLATED field on the real emit_blk nudge note (behaviors 1&2), so the
+    fabro response is self-contained and actionable.
+    """
+    body = _node_body(_workflow_text(), "emit_blk")
+    decision_inputs = {
+        "failing point": r"failing-node=\$",
+        "failure class": r"reason-class=\$",
+        "captured context": r"context=\$",
+    }
+    missing = [name for name, pat in decision_inputs.items() if not re.search(pat, body)]
+    assert not missing, (
+        "the fabro blocked report must expose all three operator decision "
+        f"inputs on its note; missing {missing!r}; body:\n{body}"
+    )
+
+
+def test_behavior_3_tmux_launch_diagnostic_exposes_the_same_three_decision_inputs():
+    """The tmux-runtime launch diagnostic exposes the SAME three operator
+    decision inputs, bound to the REAL mechanism: the closed `CAUSE_MARKER_*`
+    vocabulary names the failing point / failure class (WHERE + WHAT class),
+    and the persisted-diagnostic content format carries a `cause:` field (that
+    marker) plus a `reason:` field (the captured context / WHY).
+
+    This is not a tautology: it reads the shipped diagnostics constants and the
+    shipped `_write_launch_diagnostic` content format; drop either field or the
+    marker vocabulary and this REDs.
+    """
+    from bc_launcher import diagnostics
+
+    markers = [
+        getattr(diagnostics, n) for n in dir(diagnostics)
+        if n.startswith("CAUSE_MARKER_")
+    ]
+    assert markers, (
+        "the tmux runtime must define a closed CAUSE_MARKER_* vocabulary naming "
+        "the failing point / failure class"
+    )
+    src = _engage_source()
+    # failing point / failure class field (the cause-marker token) ...
+    assert re.search(r'cause:\s*\{cause_marker\}', src), (
+        "the tmux launch diagnostic must carry a `cause:` field (the "
+        f"cause-marker token = failing point / failure class); source lacks it"
+    )
+    # ... and the captured-context field (the human-readable reason = WHY).
+    assert re.search(r'reason:\s*\{reason\}', src), (
+        "the tmux launch diagnostic must carry a `reason:` field (the captured "
+        f"context / WHY the session failed); source lacks it"
+    )
+
+
+def test_behavior_3_infra_vocabulary_is_shared_so_operator_routes_identically():
+    """CRUX of the parity: the token an operator ROUTES on for an infra failure
+    is the SAME token in both runtimes.  For an agent-vault infra failure the
+    shipped fabro `classify_reason` derives `(infra-path, agent-vault)`, and the
+    shipped tmux `CAUSE_MARKER_AGENT_VAULT` is exactly `agent-vault` — so the
+    operator reading either runtime's response sees the same `agent-vault`
+    token and reaches the SAME route ("escalate infra"), with no runtime-attach.
+
+    Real teeth, no hard-coded tautology: rename either runtime's token and the
+    equality REDs; it runs the REAL fabro derivation and reads the REAL tmux
+    constant.
+    """
+    from bc_launcher.diagnostics import CAUSE_MARKER_AGENT_VAULT
+
+    body = _node_body(_workflow_text(), "emit_blk")
+    rc, dm = _derive(body, "", "the agent-vault broker the container routes through was unreachable")
+    assert rc == "infra-path", (
+        f"the fabro runtime must class an agent-vault failure as infra-path; got {rc!r}"
+    )
+    assert dm == CAUSE_MARKER_AGENT_VAULT == "agent-vault", (
+        "the infra token the operator routes on must be IDENTICAL across "
+        f"runtimes: fabro derived detail-marker {dm!r} vs tmux "
+        f"CAUSE_MARKER_AGENT_VAULT {CAUSE_MARKER_AGENT_VAULT!r}"
+    )
+
+
+def test_behavior_3_fabro_reason_class_covers_the_four_scenario_routes():
+    """The operator can reconcile the work_id and route the failure using ONLY
+    the fabro blocked work_done: the closed reason-class set the fabro report
+    carries maps onto the four routes the scenario names — retry (unknown),
+    escalate infra (infra-path), escalate LLM path (llm-path), and return the
+    deliverable gate to the PO/Architect (deliverable-gate) — so every route is
+    reachable from the fabro response alone.
+    """
+    body = _node_body(_workflow_text(), "emit_blk")
+    # every reason class in the closed set is reachable via the shipped
+    # derivation over a representative fault (drawn from behavior 2's spec).
+    route_faults = {
+        "deliverable-gate": "a deliverable Reviewer gate rejected the produced work",
+        "infra-path": "the agent-vault broker was unreachable",
+        "llm-path": "the LLM produced an unusable or non-advancing response",
+        "unknown": "the run failed for a cause the failsafe could not classify",
+    }
+    for want_rc, fault in route_faults.items():
+        got_rc, _ = _derive(body, "", fault)
+        assert got_rc == want_rc, (
+            f"route {want_rc!r} not reachable from the fabro report: fault "
+            f"{fault!r} derived reason class {got_rc!r}"
+        )
+    assert set(route_faults) == set(REASON_CLASSES), (
+        "the four scenario routes must correspond exactly to the closed "
+        f"reason-class set {REASON_CLASSES!r}"
+    )
+
+
+@pytest.mark.skipif(
+    shutil.which("scenarios") is None,
+    reason="canonical `scenarios` CLI not on PATH",
+)
+def test_behavior_3_scenario_block_recomputes_to_its_pin():
+    """The block-only hash of scenario 8af4e27a05ae9a32 recomputes to its tag,
+    and behaviors 1 & 2's pins (629be1e0224f3a03 / 738f35759127fe7f) are left
+    undisturbed.
+
+    RED (pre-bind): the parity scenario is not yet appended to the feature file,
+    so it is not pinned/bound here and this REDs.  Teeth thereafter: any edit to
+    the pinned parity text not reflected in the tag diverges and REDs.
+    """
+    blocks = _scenario_blocks(_FEATURE.read_text(encoding="utf-8"))
+    assert _BEHAVIOR_3_HASH in blocks, (
+        f"No scenario tagged @scenario_hash:{_BEHAVIOR_3_HASH} in {_FEATURE.name}"
+    )
+    recomputed = subprocess.run(
+        ["scenarios", "hash"],
+        input=blocks[_BEHAVIOR_3_HASH],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    assert recomputed == _BEHAVIOR_3_HASH, (
+        f"scenario block recomputed to {recomputed!r} but the feature pins "
+        f"@scenario_hash:{_BEHAVIOR_3_HASH}; re-tag or revert the edit"
+    )
+    # behaviors 1 & 2 pins stay undisturbed.
+    for h in (_BEHAVIOR_1_HASH, _BEHAVIOR_2_HASH):
+        got = subprocess.run(
+            ["scenarios", "hash"],
+            input=blocks[h],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        assert got == h, f"pin {h} disturbed: recomputed {got!r}"
