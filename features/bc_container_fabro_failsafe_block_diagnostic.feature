@@ -48,3 +48,12 @@ Feature: the fabro finite-run failsafe block report is diagnostic, not content-f
       | the model provider returned HTTP 429 rate-limit responses until the run gave up | infra-path    | rate-limit-429 |
       | the LLM produced an unusable or non-advancing response so the node could not proceed | llm-path  | llm-path      |
       | the run failed for a cause the failsafe could not classify                   | unknown          | unknown       |
+
+  @scenario_hash:8af4e27a05ae9a32 @bc:shopsystem-bc-launcher
+  Scenario: the fabro block work_done is as actionable as a tmux claude agent's clarify/block, so the operator reconciles or routes from either runtime identically
+    Given a tmux-engaged claude BC that fails on the same substantive work emits a detailed clarify/block naming the failing point, the failure class, and the captured context via the shop-msg surface
+    And a fabro-engaged BC processing that same substantive work fails and emits its blocked work_done
+    When an operator reads each runtime's response from the shop-msg surface to reconcile the work_id and decide how to route it
+    Then the fabro blocked work_done exposes the same three decision inputs the tmux clarify/block exposes — the failing point (node), the failure class (reason class), and the captured context — so it is as actionable as the tmux response
+    And the operator can reconcile the work_id and route the failure (retry, escalate infra, escalate LLM path, or return the deliverable gate to the PO/Architect) using ONLY the fabro blocked work_done, with no need to attach into the container or read fabro run logs out of band
+    And the reconcile-and-route decision the operator reaches is the SAME from the fabro blocked work_done as from the equivalent tmux clarify/block for the same failure, so the diagnostic interface is consistent across the tmux and fabro runtimes
