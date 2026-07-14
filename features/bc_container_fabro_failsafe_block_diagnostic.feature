@@ -29,3 +29,22 @@ Feature: the fabro finite-run failsafe block report is diagnostic, not content-f
     And the blocked work_done carries a REASON CLASS naming which class of failure occurred, drawn from the closed set {deliverable-gate, infra-path, llm-path, unknown}
     And the blocked work_done carries the captured error CONTEXT of the failing node — the run's failing output or tail — so the operator sees WHY it stopped
     And the blocked work_done is NOT the generic content-free failsafe summary "a deliverable-side gate or step failed (see run context); reporting blocked, never a silent complete" with an empty failing-node, empty reason, and empty body, which is the lead-01jw.3 regression this replaces
+
+  @scenario_hash:738f35759127fe7f @bc:shopsystem-bc-launcher
+  Scenario Outline: the blocked work_done classifies the failure into the correct reason class and, for an infra-path failure, names the failing infra subsystem, mirroring the tmux-runtime launch-diagnostic cause-marker idiom
+    Given the container "bc-shopsystem-messaging" is running the "--orchestrator fabro" watcher engage with its single long-lived shared per-container fabro server
+    And an inbound message fires one finite "fabro run workflow.fabro" child whose run fails because <fault>
+    When the finite child emits its terminal blocked work_done
+    Then the blocked work_done's reason class is exactly "<reason_class>"
+    And the blocked work_done additionally names the failing subsystem or gate with the marker token "<detail_marker>" so the operator is pointed at the right repair, exactly as the tmux-runtime launch diagnostic points with its cause-marker token
+    And the blocked work_done still carries the failing node identifier and the captured error context alongside that reason class, so the classification never replaces the raw diagnosis
+
+    Examples:
+      | fault                                                                       | reason_class    | detail_marker |
+      | a deliverable Reviewer gate rejected the produced work                       | deliverable-gate | deliverable   |
+      | the anthropic-oauth-shim the fabro anthropic base_url routes through failed  | infra-path       | oauth-shim    |
+      | the agent-vault broker the container routes through was unreachable          | infra-path       | agent-vault   |
+      | the credential proxy the run routes model calls through refused the request  | infra-path       | proxy         |
+      | the model provider returned HTTP 429 rate-limit responses until the run gave up | infra-path    | rate-limit-429 |
+      | the LLM produced an unusable or non-advancing response so the node could not proceed | llm-path  | llm-path      |
+      | the run failed for a cause the failsafe could not classify                   | unknown          | unknown       |

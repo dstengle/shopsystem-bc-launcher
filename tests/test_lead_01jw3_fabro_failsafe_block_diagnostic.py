@@ -286,3 +286,205 @@ def test_behavior_1_scenario_block_recomputes_to_its_pin():
         f"scenario block recomputed to {recomputed!r} but the feature pins "
         f"@scenario_hash:{_BEHAVIOR_1_HASH}; re-tag or revert the edit"
     )
+
+
+# ===========================================================================
+# Behavior 2 — the block report DERIVES the reason class and, for infra-path,
+#              names the failing infra subsystem with a marker token, mirroring
+#              the tmux-runtime launch-diagnostic cause-marker idiom
+#              (738f35759127fe7f).
+#
+# Fidelity: these do NOT hard-code the fault->class lookup in the test.  They
+# EXTRACT the shipped `classify_reason` derivation shell function VERBATIM from
+# the REAL committed workflow.fabro `emit_blk` node and RUN it against each
+# `<fault>` cell drawn from the pinned Scenario Outline's own Examples table,
+# asserting it derives that row's `<reason_class>` and `<detail_marker>`.  The
+# SPEC (the feature Examples) supplies the expected mapping; the SHIPPED code
+# supplies the derivation; the test checks shipped-derivation == spec.  A test
+# that merely echoed the table would not exercise the mechanism — this runs it.
+# ===========================================================================
+
+MARKER_TOKENS = (
+    "deliverable",
+    "oauth-shim",
+    "agent-vault",
+    "proxy",
+    "rate-limit-429",
+    "llm-path",
+    "unknown",
+)
+
+_BEHAVIOR_2_HASH = "738f35759127fe7f"
+
+
+def _classify_reason_fn(body: str) -> str:
+    """Extract the shipped ``classify_reason() { ... esac; }`` derivation shell
+    function VERBATIM from the emit_blk node body, unescaping the outer
+    ``script="..."`` quote-escaping so it can be run as-is."""
+    m = re.search(r"classify_reason\(\)\s*\{.*?esac\s*;\s*\}", body, re.DOTALL)
+    assert m is not None, (
+        "emit_blk must define a `classify_reason()` derivation function that "
+        "classifies the failure into a reason class + infra-subsystem marker; "
+        f"none found. body:\n{body}"
+    )
+    return m.group(0).replace('\\"', '"')
+
+
+def _derive(body: str, node: str, context: str) -> tuple[str, str]:
+    """Run the shipped ``classify_reason`` over (failing-node, captured-context)
+    and return the derived ``(reason_class, detail_marker)``."""
+    fn = _classify_reason_fn(body)
+    script = fn + '\nclassify_reason "$1" "$2"\n'
+    out = subprocess.run(
+        ["sh", "-c", script, "sh", node, context],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    rc, _, dm = out.partition(" ")
+    return rc, dm
+
+
+def _examples_rows(scenario_hash: str) -> list[dict[str, str]]:
+    """Parse the ``Examples:`` table of the Scenario Outline pinned by
+    ``scenario_hash`` into a list of {column: value} dicts."""
+    block = _scenario_blocks(_FEATURE.read_text(encoding="utf-8"))[scenario_hash]
+    lines = block.splitlines()
+    table: list[list[str]] = []
+    in_examples = False
+    for line in lines:
+        s = line.strip()
+        if s.startswith("Examples:"):
+            in_examples = True
+            continue
+        if in_examples and s.startswith("|"):
+            cells = [c.strip() for c in s.strip("|").split("|")]
+            table.append(cells)
+    assert table, f"no Examples table for scenario {scenario_hash}"
+    header, *data = table
+    return [dict(zip(header, row)) for row in data]
+
+
+def test_behavior_2_derives_reason_class_and_marker_for_every_examples_row():
+    """The Scenario Outline bound to the REAL emit_blk mechanism: for EVERY
+    ``<fault>`` row of the pinned Examples table, the shipped `classify_reason`
+    derivation classifies the failure into exactly that row's ``<reason_class>``
+    and names the failing subsystem/gate with that row's ``<detail_marker>`` —
+    the tmux-runtime launch-diagnostic cause-marker idiom.
+
+    RED (pre-fix): emit_blk has no derivation — `classify_reason` does not
+    exist, so extraction fails and the outline cannot be exercised.
+    """
+    body = _node_body(_workflow_text(), "emit_blk")
+    rows = _examples_rows(_BEHAVIOR_2_HASH)
+    assert len(rows) == 7, f"expected the 7 pinned Examples rows; got {rows!r}"
+    failures = []
+    for row in rows:
+        fault = row["fault"]
+        want_rc = row["reason_class"]
+        want_dm = row["detail_marker"]
+        got_rc, got_dm = _derive(body, "", fault)
+        if (got_rc, got_dm) != (want_rc, want_dm):
+            failures.append(
+                f"fault={fault!r} -> derived ({got_rc!r},{got_dm!r}) "
+                f"but Examples pins ({want_rc!r},{want_dm!r})"
+            )
+    assert not failures, (
+        "the shipped classify_reason derivation must map every Examples "
+        "<fault> to its ({reason_class}, {detail_marker}); mismatches:\n"
+        + "\n".join(failures)
+    )
+
+
+def test_behavior_2_reason_class_always_in_closed_set_and_marker_in_its_set():
+    """The derivation NEVER emits an out-of-set reason class or marker: every
+    Examples row's derived reason class is in the closed reason-class set and
+    its derived marker is in the closed marker set (the closed-vocabulary
+    guarantee the tmux cause-marker idiom also holds)."""
+    body = _node_body(_workflow_text(), "emit_blk")
+    for row in _examples_rows(_BEHAVIOR_2_HASH):
+        rc, dm = _derive(body, "", row["fault"])
+        assert rc in REASON_CLASSES, (
+            f"derived reason class {rc!r} for fault {row['fault']!r} is not in "
+            f"the closed set {REASON_CLASSES!r}"
+        )
+        assert dm in MARKER_TOKENS, (
+            f"derived marker {dm!r} for fault {row['fault']!r} is not in the "
+            f"closed marker set {MARKER_TOKENS!r}"
+        )
+
+
+def test_behavior_2_emit_blk_note_carries_interpolated_detail_marker():
+    """The block report additionally names the failing subsystem/gate: the
+    non-consuming nudge ``--note`` carries an INTERPOLATED ``detail-marker=$``
+    field (the derived marker token), alongside — never replacing — the raw
+    failing-node / reason-class / context diagnosis.
+
+    RED (pre-fix): the note carries no detail-marker field.
+    """
+    body = _node_body(_workflow_text(), "emit_blk")
+    assert re.search(r"detail-marker=\$", body), (
+        "the block report must carry an INTERPOLATED detail-marker field "
+        "(detail-marker=$...) naming the failing subsystem/gate, mirroring the "
+        f"tmux launch-diagnostic cause-marker token; body:\n{body}"
+    )
+    # the raw diagnosis is still carried alongside (never replaced).
+    for field in ("failing-node", "reason-class", "context"):
+        assert re.search(rf"{field}=\$", body), (
+            f"the classification must NOT replace the raw diagnosis: {field}=$ "
+            f"must still be interpolated into the note; body:\n{body}"
+        )
+
+
+def test_behavior_2_marker_validated_against_its_closed_set():
+    """The derived marker is VALIDATED against its closed set (a `case` guard
+    that falls back to `unknown`), so a stray derived value cannot leak into the
+    operator-facing marker — the same closed-vocabulary discipline the reason
+    class already gets."""
+    body = _node_body(_workflow_text(), "emit_blk")
+    # the FULL closed marker set must appear as one contiguous case-guard
+    # alternation (a partial/any-one match would give the test no teeth).
+    guard = r"\|".join(re.escape(t) for t in MARKER_TOKENS)
+    assert re.search(guard, body), (
+        "the marker must be validated against its FULL closed set as one case "
+        f"guard {MARKER_TOKENS!r} (stray -> unknown); body:\n{body}"
+    )
+
+
+@pytest.mark.skipif(
+    shutil.which("scenarios") is None,
+    reason="canonical `scenarios` CLI not on PATH",
+)
+def test_behavior_2_scenario_block_recomputes_to_its_pin():
+    """The block-only hash of scenario 738f35759127fe7f recomputes to its tag,
+    and behavior 1's pin (629be1e0224f3a03) is left undisturbed.
+
+    Teeth: any edit to the pinned outline text (steps or Examples) not reflected
+    in the tag makes the recompute diverge and REDs.
+    """
+    blocks = _scenario_blocks(_FEATURE.read_text(encoding="utf-8"))
+    assert _BEHAVIOR_2_HASH in blocks, (
+        f"No scenario tagged @scenario_hash:{_BEHAVIOR_2_HASH} in {_FEATURE.name}"
+    )
+    recomputed = subprocess.run(
+        ["scenarios", "hash"],
+        input=blocks[_BEHAVIOR_2_HASH],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    assert recomputed == _BEHAVIOR_2_HASH, (
+        f"scenario block recomputed to {recomputed!r} but the feature pins "
+        f"@scenario_hash:{_BEHAVIOR_2_HASH}; re-tag or revert the edit"
+    )
+    # behavior 1's pin stays undisturbed.
+    b1 = subprocess.run(
+        ["scenarios", "hash"],
+        input=blocks[_BEHAVIOR_1_HASH],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    assert b1 == _BEHAVIOR_1_HASH, (
+        f"behavior 1 pin disturbed: recomputed {b1!r} != {_BEHAVIOR_1_HASH}"
+    )
