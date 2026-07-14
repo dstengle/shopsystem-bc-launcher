@@ -386,10 +386,19 @@ def test_references_the_diagnostic_scenarios_by_value_does_not_repin_them():
     """
     my_feature = _FEATURE.read_text(encoding="utf-8")
     diag_feature = _DIAGNOSTIC_FEATURE.read_text(encoding="utf-8")
+    # a RE-PIN is the hash on its own @scenario_hash TAG LINE (line-start after
+    # indent); an inline mention inside a step is the BY-VALUE reference we WANT.
+    my_tag_hashes = {
+        m.group(1)
+        for line in my_feature.splitlines()
+        if line.lstrip().startswith("@scenario_hash:")
+        for m in [re.match(r"@scenario_hash:([0-9a-f]+)", line.lstrip())]
+        if m
+    }
     for h in _REFERENCED_DIAGNOSTIC_HASHES:
-        assert f"@scenario_hash:{h}" not in my_feature, (
-            f"diagnostic scenario {h} must NOT be re-pinned into {_FEATURE.name}; "
-            "it is referenced by value, not duplicated"
+        assert h not in my_tag_hashes, (
+            f"diagnostic scenario {h} must NOT be re-pinned as a tag in "
+            f"{_FEATURE.name}; it is referenced by value (inline), not duplicated"
         )
         assert h in diag_feature, (
             f"referenced diagnostic scenario {h} must still live in "
