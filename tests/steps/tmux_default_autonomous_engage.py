@@ -209,3 +209,102 @@ def ew86_all_dispatches_settle_to_work_done(ctx):
         "the injected default startup prompt must direct EVERY pending "
         f"dispatch through to a work_done: {prompt!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Behavior 2 (lead-ew86, @scenario_hash:f65d43b1d8704f28): the tmux-DEFAULT
+# autonomous engage is BOUNDED to DISPATCHED inbox work — it emits a work_done
+# solely for a dispatched work_id and synthesizes NO unrequested follow-on
+# work. Same launcher altitude as behavior 1: the guardrail is realized as a
+# directive encoded in the injected default startup prompt, recovered from the
+# launcher's ACTUAL recorded tmux `agent` send-keys (never from a model). The
+# assertions read the recovered prompt token, so a shallow no-op edit does not
+# pass: the dispatched-work bound and the no-unrequested-follow-on directive
+# must BOTH be present in the same injected prompt.
+# ---------------------------------------------------------------------------
+
+
+@given(parsers.parse(
+    'the container "{container_name}" is launched on the DEFAULT '
+    '"--orchestrator tmux" engage'))
+def ew86b_launch_tmux_default(
+    container_name, ctx, fake_driver, controller, tmp_path
+):
+    """Drive the REAL launcher on the tmux-DEFAULT path with NO --startup-prompt
+    (reusing behavior 1's launch machinery), so the DEFAULT startup prompt is
+    resolved exactly as bc_launcher.cli.main() resolves it and its ACTUAL
+    recorded tmux send-keys carry the injected default prompt this scenario
+    then reads the dispatched-work guardrail out of."""
+    ew86_launch_tmux_default_no_override(
+        container_name, ctx, fake_driver, controller, tmp_path
+    )
+
+
+@given(parsers.parse(
+    "the BC inbox lists exactly the dispatched work_ids present at engage "
+    "and no others"))
+def ew86b_inbox_lists_exactly_dispatched(ctx):
+    """Precondition premise: at engage the inbox holds exactly the DISPATCHED
+    work_ids and no others. At launcher altitude this is the scenario premise
+    the injected default prompt's dispatched-work bound is asserted against —
+    the runtime inbox contents are the agent-runtime's concern, out of this
+    Python codebase's reach."""
+    assert ctx.get("ew86_bc_name"), (
+        "the inbox premise must follow a completed tmux-default launch"
+    )
+    ctx["ew86b_inbox_only_dispatched"] = True
+
+
+@when(parsers.parse(
+    "the tmux-default engage drains and processes its pending inbox work "
+    "autonomously to work_done"))
+def ew86b_engage_drains_and_processes(ctx):
+    """Recover the injected default startup prompt from the launcher's ACTUAL
+    recorded tmux send-keys — the directive that drains and autonomously
+    processes the pending inbox work to work_done."""
+    ctx["ew86_injected_prompt"] = _ew86_injected_startup_prompt(ctx)
+
+
+@then(parsers.parse(
+    'every "work_done" the engage emits corresponds to a work_id that was '
+    "dispatched into the inbox, so the autonomy is bounded to dispatched work"))
+def ew86b_work_done_bounded_to_dispatched(ctx):
+    prompt = ctx["ew86_injected_prompt"]
+    # The guardrail: the injected prompt must BOUND the autonomy to DISPATCHED
+    # inbox work — a work_done is emitted SOLELY for a dispatched work_id. This
+    # is more than "process each pending dispatch" (behavior 1); it names the
+    # dispatched-work-only bound so a work_done cannot correspond to an
+    # undispatched work_id.
+    assert "dispatched inbox work only" in prompt, (
+        "the injected default startup prompt must BOUND the autonomy to the "
+        f"dispatched inbox work only: {prompt!r}"
+    )
+    assert "solely for a work_id that was dispatched" in prompt, (
+        "the injected default startup prompt must direct a work_done SOLELY "
+        f"for a dispatched work_id: {prompt!r}"
+    )
+    # The bound is realized on top of behavior 1's autonomous directive, not in
+    # place of it: the process-to-work_done directive is still present and the
+    # regressed park directive still absent.
+    assert "process each pending dispatch" in prompt
+    assert "work_done" in prompt
+    assert "await user direction" not in prompt
+
+
+@then(parsers.parse(
+    'the engage emits NO "work_done" for any work_id that was not dispatched '
+    "into the inbox, synthesizing no unrequested follow-on work beyond what "
+    "was dispatched"))
+def ew86b_no_unrequested_follow_on(ctx):
+    prompt = ctx["ew86_injected_prompt"]
+    # The complementary guardrail: the injected prompt must direct that NO
+    # unrequested follow-on work is synthesized beyond what was dispatched —
+    # so no work_done is emitted for an undispatched work_id.
+    assert "synthesize no unrequested follow-on work" in prompt, (
+        "the injected default startup prompt must direct that NO unrequested "
+        f"follow-on work is synthesized: {prompt!r}"
+    )
+    assert "beyond what was dispatched" in prompt, (
+        "the no-unrequested-follow-on directive must be scoped to 'beyond what "
+        f"was dispatched', bounding the autonomy to dispatched work: {prompt!r}"
+    )

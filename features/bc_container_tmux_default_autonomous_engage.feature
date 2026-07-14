@@ -33,3 +33,11 @@ Feature: bc-container tmux-DEFAULT engage restores autonomous drain-AND-process 
     Then the engage does NOT merely LIST the pending dispatches and then hold awaiting a human "go", but proceeds to PROCESS each pending dispatch through the normal Implementer->Reviewer loop
     And each processed dispatch reaches a Reviewer-gated "work_done" emitted on its scenario path, with NO human-injected "go" keystroke required between the drain and the work_done
     And after the engage settles every pending dispatched work_id has a corresponding "work_done" in the BC outbox and NONE of those dispatches remains stuck pending in the BC inbox
+
+  @scenario_hash:f65d43b1d8704f28 @bc:shopsystem-bc-launcher
+  Scenario: the tmux-default autonomous engage processes only DISPATCHED inbox work and synthesizes no unrequested follow-on work
+    Given the container "bc-shopsystem-messaging" is launched on the DEFAULT "--orchestrator tmux" engage
+    And the BC inbox lists exactly the dispatched work_ids present at engage and no others
+    When the tmux-default engage drains and processes its pending inbox work autonomously to work_done
+    Then every "work_done" the engage emits corresponds to a work_id that was dispatched into the inbox, so the autonomy is bounded to dispatched work
+    And the engage emits NO "work_done" for any work_id that was not dispatched into the inbox, synthesizing no unrequested follow-on work beyond what was dispatched
