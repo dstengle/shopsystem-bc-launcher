@@ -57,6 +57,26 @@ def test_default_template_directs_autonomous_process_to_gated_work_done():
     assert "await user direction" not in DEFAULT_STARTUP_PROMPT_TEMPLATE
 
 
+def test_default_template_bounds_autonomy_to_dispatched_work():
+    """Load-bearing property (d), added by lead-ew86
+    (@scenario_hash:f65d43b1d8704f28): the template BOUNDS the autonomous
+    drain-AND-process to DISPATCHED inbox work only — a work_done is emitted
+    solely for a work_id that was dispatched into the inbox, and NO unrequested
+    follow-on work is synthesized beyond what was dispatched.  This guardrail is
+    additive to property (c): the autonomy stays restored, but it cannot run off
+    into undispatched, self-synthesized work."""
+    assert "dispatched inbox work only" in DEFAULT_STARTUP_PROMPT_TEMPLATE
+    assert (
+        "solely for a work_id that was dispatched"
+        in DEFAULT_STARTUP_PROMPT_TEMPLATE
+    )
+    assert (
+        "synthesize no unrequested follow-on work"
+        in DEFAULT_STARTUP_PROMPT_TEMPLATE
+    )
+    assert "beyond what was dispatched" in DEFAULT_STARTUP_PROMPT_TEMPLATE
+
+
 def test_default_template_substitutes_bc_name():
     """The template is a format-string with {bc_name} that gets substituted."""
     rendered = DEFAULT_STARTUP_PROMPT_TEMPLATE.format(bc_name="shopsystem-foo")
@@ -183,6 +203,12 @@ def test_launch_without_startup_prompt_injects_default_imperative(recording_cont
     assert "work_done" in passed
     assert "await user direction" not in passed
     assert "{bc_name}" not in passed
+    # lead-ew86 guardrail: the dispatched-work bound and the no-unrequested-
+    # follow-on directive reach the injected prompt too.
+    assert "dispatched inbox work only" in passed
+    assert "solely for a work_id that was dispatched" in passed
+    assert "synthesize no unrequested follow-on work" in passed
+    assert "beyond what was dispatched" in passed
 
 
 def test_launch_with_explicit_startup_prompt_is_total_override(recording_controller):
@@ -204,6 +230,10 @@ def test_launch_with_explicit_startup_prompt_is_total_override(recording_control
     assert "shop-msg pending inbox" not in passed
     assert "process each pending dispatch" not in passed
     assert "work_done" not in passed
+    # lead-ew86: the distinctive guardrail content must not leak into an
+    # explicit override either.
+    assert "dispatched inbox work only" not in passed
+    assert "synthesize no unrequested follow-on work" not in passed
 
 
 def test_launch_with_explicit_empty_string_startup_prompt_is_total_override(

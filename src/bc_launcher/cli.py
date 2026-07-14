@@ -45,7 +45,10 @@ DEFAULT_STARTUP_PROMPT_TEMPLATE = (
     "then drain pending inbox via shop-msg pending inbox --bc {bc_name}, "
     "then autonomously process each pending dispatch through the normal "
     "Implementer->Reviewer loop to a Reviewer-gated work_done, without "
-    "waiting for a human go."
+    "waiting for a human go. Bound this autonomy to the dispatched inbox "
+    "work only: emit a work_done solely for a work_id that was dispatched "
+    "into the inbox, and synthesize no unrequested follow-on work beyond "
+    "what was dispatched."
 )
 
 
