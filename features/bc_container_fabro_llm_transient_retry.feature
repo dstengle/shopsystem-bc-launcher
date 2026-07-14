@@ -42,3 +42,13 @@ Feature: the fabro LLM/ACP node retries-and-survives a transient 429 burst (lead
     And once the provider returns to capacity within the retry budget, the node SUCCEEDS on a subsequent attempt and the run CONTINUES past that node rather than stopping there
     And the run proceeds to its terminal work_done as a REAL gated outcome — status "complete" for a produced-and-gated deliverable, or a substantive clarify/block from the deliverable path — NOT the content-free failsafe block emitted after ~14s on the first 429 that lead-6ev8 observed
     And the negative control holds: a max_attempts=1 node with no retry budget would have failed-fast to the failsafe on the first 429, which is the lead-6ev8 regression this behavior closes
+
+  @scenario_hash:088460f2fd9490a4 @bc:shopsystem-bc-launcher
+  Scenario: the LLM/ACP node's retries use bounded exponential backoff — spaced, count-bounded, and total-wait-bounded — so the client does not amplify the 429 with an immediate retry-storm
+    Given the container "bc-shopsystem-messaging" is running the "--orchestrator fabro" watcher engage with its single long-lived shared per-container fabro server
+    And a finite "fabro run workflow.fabro" child reaches an LLM/ACP agent node whose model calls are met with repeated transient 429 rate-limit responses
+    When the node retries the transient error across successive attempts
+    Then the delay BETWEEN successive retry attempts INCREASES from one attempt to the next — exponential backoff — rather than retrying immediately at a fixed zero-or-tiny interval that would hammer the provider
+    And the growing backoff delay is CAPPED at a maximum per-attempt ceiling, so the interval increases but does not grow unboundedly
+    And the retry count is BOUNDED — the node attempts a finite number of times, not indefinitely — and the cumulative wait across all retries is BOUNDED by a total retry-budget ceiling, so the node cannot hang the run forever waiting on a persistently-unavailable provider
+    And because the retries are spaced by increasing backoff rather than fired immediately, the client does not itself amplify the rate-limit into a self-inflicted retry-storm against the shared account
