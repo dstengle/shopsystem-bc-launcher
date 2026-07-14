@@ -57,6 +57,7 @@ class EngageMixin:
         work_id: str | None,
         out_lines: list[str],
         err_lines: list[str],
+        provider: str | None = None,
     ) -> CommandResult:
         """Drive the FABRO orchestrator ENGAGE step (lead-cadr — S4, corrected
         by lead-odd9 / ADR-058).
@@ -143,7 +144,7 @@ class EngageMixin:
         # + run keep running headless in the container after this returns.
         engage_result = self._driver.exec_run(
             container,
-            ["/bin/sh", "-c", _fabro_engage_script(bc_name)],
+            ["/bin/sh", "-c", _fabro_engage_script(bc_name, provider=provider)],
             user=AGENT_CONTAINER_USER,
             env=_fabro_exec_env(),
             detach=True,

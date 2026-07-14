@@ -24,12 +24,14 @@ from bc_launcher.fabro import (
     FABRO_SHIM_HOST,
     FABRO_SHIM_PORT,
     FABRO_WORKFLOW_TOML_CONTAINER_PATH,
+    LLM_PROVIDER_ANTHROPIC,
     _fabro_exec_env,
     _fabro_settings_install_script,
     _fabro_shim_start_script,
     _fabro_workflow_toml_read_script,
     _fabro_workflow_toml_rewrite,
     _fabro_workflow_toml_writeback_script,
+    resolve_llm_provider,
 )
 
 
@@ -243,6 +245,7 @@ class LaunchPrepMixin:
         work_id: str | None,
         out_lines: list[str],
         err_lines: list[str],
+        active_provider: str | None = None,
     ) -> None:
         """Place the fabro-orchestrator wiring (workflow.toml identity rewrite
         + shim start + effective settings) onto the POURED def in the launched
@@ -308,55 +311,79 @@ class LaunchPrepMixin:
             toml_path=FABRO_DISPATCHER_TOML_CONTAINER_PATH,
         )
 
-        # (2) Start the baked so2h shim as a background listener, with
-        #     SSL_CERT_FILE pinned on the exec env (lead-ze4w BUG#3) so its
-        #     urllib trusts the agent-vault MITM CA without a login shell.
-        shim_result = self._driver.exec_run(
-            container,
-            ["/bin/sh", "-c", _fabro_shim_start_script()],
-            user=AGENT_CONTAINER_USER,
-            env=_fabro_exec_env(),
+        # (2)/(3) ANTHROPIC-OAUTH-SHIM PATH — engaged ONLY on the anthropic
+        #     active provider (lead-ifye3.2 behavior 2).  The shim start and the
+        #     anthropic-pointing effective settings ARE the anthropic-oauth-shim
+        #     wiring; branching them on the resolved active provider means an
+        #     explicit --llm-provider / BCLAUNCHER_LLM_PROVIDER override
+        #     (openrouter) WINS over the anthropic default and BYPASSES the shim
+        #     entirely — NO shim listener is started and NO anthropic-pointing
+        #     settings are written on the openrouter path.  (The openrouter
+        #     credential + provider-keyed settings are behaviors 3-4.)  The
+        #     active provider is resolved here (idempotent for an already-resolved
+        #     value) so this method is correct whether the caller passes the
+        #     resolved provider or leaves it to the anthropic default.
+        resolved_active_provider = resolve_llm_provider(
+            active_provider, env=os.environ
         )
-        if shim_result.returncode != 0:
-            err_lines.append(
-                "warning: anthropic-oauth-shim start failed (exit "
-                f"{shim_result.returncode}): "
-                f"{(shim_result.stderr or shim_result.stdout).strip()}"
-                f"; fabro's anthropic provider may lack a local "
-                f"endpoint on {FABRO_SHIM_HOST}:{FABRO_SHIM_PORT} but "
-                "the agent will still be started (lead-vwib)\n"
+        if resolved_active_provider == LLM_PROVIDER_ANTHROPIC:
+            # (2) Start the baked so2h shim as a background listener, with
+            #     SSL_CERT_FILE pinned on the exec env (lead-ze4w BUG#3) so its
+            #     urllib trusts the agent-vault MITM CA without a login shell.
+            shim_result = self._driver.exec_run(
+                container,
+                ["/bin/sh", "-c", _fabro_shim_start_script()],
+                user=AGENT_CONTAINER_USER,
+                env=_fabro_exec_env(),
             )
-        else:
-            out_lines.append(
-                "Started the baked anthropic-oauth-shim "
-                f"({ANTHROPIC_OAUTH_SHIM_BIN}) as a background "
-                f"listener on {FABRO_SHIM_HOST}:{FABRO_SHIM_PORT} "
-                "(lead-vwib, lead-so2h)\n"
-            )
+            if shim_result.returncode != 0:
+                err_lines.append(
+                    "warning: anthropic-oauth-shim start failed (exit "
+                    f"{shim_result.returncode}): "
+                    f"{(shim_result.stderr or shim_result.stdout).strip()}"
+                    f"; fabro's anthropic provider may lack a local "
+                    f"endpoint on {FABRO_SHIM_HOST}:{FABRO_SHIM_PORT} but "
+                    "the agent will still be started (lead-vwib)\n"
+                )
+            else:
+                out_lines.append(
+                    "Started the baked anthropic-oauth-shim "
+                    f"({ANTHROPIC_OAUTH_SHIM_BIN}) as a background "
+                    f"listener on {FABRO_SHIM_HOST}:{FABRO_SHIM_PORT} "
+                    "(lead-vwib, lead-so2h)\n"
+                )
 
-        # (3) Write fabro's effective workflow-level settings pointing the
-        #     anthropic provider at the shim; no credential written (ADR-049).
-        settings_result = self._driver.exec_run(
-            container,
-            ["/bin/sh", "-c", _fabro_settings_install_script()],
-            user=AGENT_CONTAINER_USER,
-        )
-        if settings_result.returncode != 0:
-            err_lines.append(
-                "warning: fabro effective-settings write failed (exit "
-                f"{settings_result.returncode}): "
-                f"{(settings_result.stderr or settings_result.stdout).strip()}"
-                f"; {FABRO_SETTINGS_CONTAINER_PATH} may be missing but "
-                "the agent will still be started (lead-vwib)\n"
+            # (3) Write fabro's effective workflow-level settings pointing the
+            #     anthropic provider at the shim; no credential written (ADR-049).
+            settings_result = self._driver.exec_run(
+                container,
+                ["/bin/sh", "-c", _fabro_settings_install_script()],
+                user=AGENT_CONTAINER_USER,
             )
+            if settings_result.returncode != 0:
+                err_lines.append(
+                    "warning: fabro effective-settings write failed (exit "
+                    f"{settings_result.returncode}): "
+                    f"{(settings_result.stderr or settings_result.stdout).strip()}"
+                    f"; {FABRO_SETTINGS_CONTAINER_PATH} may be missing but "
+                    "the agent will still be started (lead-vwib)\n"
+                )
+            else:
+                out_lines.append(
+                    "Wrote fabro effective settings to "
+                    f"{FABRO_SETTINGS_CONTAINER_PATH} "
+                    f"([llm.providers.anthropic] base_url="
+                    f"{FABRO_ANTHROPIC_BASE_URL}, adapter="
+                    f"{FABRO_ANTHROPIC_ADAPTER}; no credential written — "
+                    "ADR-049 D1/D2)\n"
+                )
         else:
             out_lines.append(
-                "Wrote fabro effective settings to "
-                f"{FABRO_SETTINGS_CONTAINER_PATH} "
-                f"([llm.providers.anthropic] base_url="
-                f"{FABRO_ANTHROPIC_BASE_URL}, adapter="
-                f"{FABRO_ANTHROPIC_ADAPTER}; no credential written — "
-                "ADR-049 D1/D2)\n"
+                "Active LLM provider "
+                f"{resolved_active_provider!r} (launch-time override) — the "
+                "Anthropic anthropic-oauth-shim path is NOT engaged for this "
+                "launch: no shim listener started and no anthropic-pointing "
+                "effective settings written (lead-ifye3.2 behavior 2)\n"
             )
 
         # (4) Hand the placed .fabro/ tree to the agent user.  On the

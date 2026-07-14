@@ -70,6 +70,7 @@ class AgentSessionMixin:
         err_lines: list[str],
         launch_path: str = LAUNCH_PATH_TMUX,
         work_id: str | None = None,
+        llm_provider: str | None = None,
     ) -> CommandResult:
         """Drive the agent-start sequence against an already-provisioned
         container: start the agent tmux session, gate on the two readiness
@@ -118,6 +119,7 @@ class AgentSessionMixin:
                 work_id,
                 out_lines,
                 err_lines,
+                provider=llm_provider,
             )
 
         # Start tmux session as vscode.  Claude Code refuses

@@ -44,6 +44,7 @@ from bc_launcher.fabro import (
     _fabro_exec_env,
     _fabro_settings_install_script,
     _fabro_shim_start_script,
+    resolve_llm_provider,
 )
 from bc_launcher.manifest import (
     ManifestProductTypeError,
@@ -86,6 +87,7 @@ class LaunchMixin:
         mount_docker_socket: bool = False,
         launch_path: str = LAUNCH_PATH_TMUX,
         work_id: str | None = None,
+        llm_provider: str | None = None,
         debug: bool = False,
     ) -> CommandResult:
         """
@@ -463,6 +465,17 @@ class LaunchMixin:
         # (workflow.toml in-container rewrite + shim + settings) runs on the
         # POURED def.  It runs BEFORE the engage in `_start_agent_session`, so
         # the fabro server + run find the def + settings.
+        # Resolve the ACTIVE LLM provider for this launch (lead-ifye3.2 behavior
+        # 2).  Precedence is the explicit --llm-provider override, then the
+        # BCLAUNCHER_LLM_PROVIDER env, then the anthropic DEFAULT (owned by
+        # resolve_llm_provider).  The resolved value both (a) branches the
+        # anthropic-oauth-shim wiring below — the shim path is engaged ONLY on
+        # the anthropic default — and (b) is threaded into the fabro engage so
+        # the finite `fabro run` children inherit the active provider.  An
+        # explicit override (openrouter) therefore WINS over the default and
+        # bypasses the anthropic-oauth-shim entirely.
+        active_provider = resolve_llm_provider(llm_provider, env=os.environ)
+
         if launch_path == LAUNCH_PATH_FABRO:
             self._place_fabro_def_and_wiring(
                 bc_name,
@@ -470,6 +483,7 @@ class LaunchMixin:
                 work_id,
                 out_lines,
                 err_lines,
+                active_provider=active_provider,
             )
 
         # Agent-start sequence (shared with `start_agent`, lead-k4k7).  This is
@@ -488,4 +502,5 @@ class LaunchMixin:
             err_lines,
             launch_path=launch_path,
             work_id=work_id,
+            llm_provider=active_provider,
         )
