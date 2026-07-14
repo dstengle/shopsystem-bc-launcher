@@ -134,7 +134,18 @@ digraph BcShopLoop {
     // guarantee is UNCHANGED: an EXHAUSTED classify still fails closed to
     // emit_blk (ADR-051); we just don't let ONE transient 429 block the run.
     // classify stays read-only and route-only (no consume/emit).
-    classify [class="classify", permissions="read-only", retry=4, max_retries=4,
+    // lead-6ev8 BEHAVIOR 2 (scenario 088460f2fd9490a4): behavior 1 set the retry
+    // COUNT; behavior 2 sets the BACKOFF SPACING so the retries are BOUNDED
+    // EXPONENTIAL, not an immediate 429 retry-storm. `retry_policy="exponential"`
+    // is a FIRST-CLASS fabro v0.254.0 node attribute (the real binary's node-attr
+    // enum lists it verbatim between `max_retries` and `retry_target`), selecting
+    // fabro's `ExponentialBackoff { max_times, base_duration }`: the delay between
+    // successive attempts INCREASES. It is bounded on every axis by the finite
+    // `max_retries`: the per-attempt delay is capped at base*factor^max_retries
+    // (a finite ceiling) and the cumulative wait is a finite geometric sum, so a
+    // persistently-unavailable provider cannot hang the run forever. Drop
+    // retry_policy -> immediate retry-storm; drop max_retries -> unbounded.
+    classify [class="classify", permissions="read-only", retry=4, max_retries=4, retry_policy="exponential",
               label="bc-router classify", prompt_file="nodes/bc-router.md",
               prompt="You are the classify step ONLY. The inbox message was ALREADY read upstream by the native `armed` node; it is in your context. Do EXACTLY ONE thing: classify its message_type via the 4-row bc-router table (load nodes/bc-router.md). You MUST NOT re-read or consume the inbox, MUST NOT write code or bd issues, MUST NOT run git/push, MUST NOT run bc-emit or shop-msg respond. Emit ONLY your routing directive: end with {\"preferred_next_label\": \"scenario\"} for assign_scenarios OR non-empty request_bugfix (reviewer emits); {\"preferred_next_label\": \"flat\"} for request_maintenance OR empty request_bugfix (implementer emits). If you cannot classify, emit NO directive (fails closed to emit_blk)."]
 
@@ -148,16 +159,21 @@ digraph BcShopLoop {
     // LLM/ACP judgment node ALSO carries `max_retries=3` to actually get
     // max_attempts>1 and survive a single transient 429 (proven vs the real
     // fabro binary). The inert `retry=3` stays because lead-i0wi F1 pins it.
-    suff     [class="coding", permissions="read-only", retry=3, max_retries=3,
+    // lead-6ev8 BEHAVIOR 2 (088460f2fd9490a4): each LLM/ACP judgment node ALSO
+    // carries `retry_policy="exponential"` (fabro ExponentialBackoff) so the
+    // transient-429 retries are SPACED with increasing backoff and bounded
+    // (capped + total-wait-bounded via the finite max_retries) rather than fired
+    // immediately as a self-inflicted retry-storm against the shared account.
+    suff     [class="coding", permissions="read-only", retry=3, max_retries=3, retry_policy="exponential",
               label="bc-sufficiency-check", prompt_file="nodes/bc-sufficiency-check.md",
               prompt="You are the sufficiency step ONLY. Judge the message binary proceed|clarify per the per-message-type sufficiency criteria (load nodes/bc-sufficiency-check.md). You MUST NOT dispatch, implement, plan, write code/bd, run git/push, or run bc-emit/shop-msg respond. Emit ONLY your routing directive: {\"preferred_next_label\": \"proceed\"} if sufficient, or {\"preferred_next_label\": \"clarify\"} (naming the gap) if insufficient. Otherwise emit NO directive (fails closed to emit_blk)."]
     worktree [shape=parallelogram, deterministic=true,
               label="using-git-worktrees", prompt_file="nodes/using-git-worktrees.md",
               script="set -e; git worktree add \"../wt-${WORK_ID}\" -b \"work/${WORK_ID}\" origin/main"]
-    plan     [class="coding", permissions="read-write", retry=3, max_retries=3,
+    plan     [class="coding", permissions="read-write", retry=3, max_retries=3, retry_policy="exponential",
               label="writing-plans-bdd", prompt_file="nodes/writing-plans-bdd.md",
               prompt="You are the planning step ONLY. Decompose the assigned scenario(s) into a bd sub-issue DAG: one RED + one GREEN sub-issue per behavior, bd dep edges encoding order (load nodes/writing-plans-bdd.md). You MAY create bd issues ONLY; you MUST NOT write source/test code, run git commit/push, integrate, or run bc-emit/shop-msg respond. Emit ONLY: end with {\"preferred_next_label\": \"ok\"} on success; if you cannot decompose emit NO directive (fails closed to emit_blk)."]
-    impl     [class="coding", permissions="read-write", parallel=true, retry=3, max_retries=3,
+    impl     [class="coding", permissions="read-write", parallel=true, retry=3, max_retries=3, retry_policy="exponential",
               label="bc-implementer (parallel fan-out)", prompt_file="nodes/subagent-driven-development.md",
               prompt="You are the implementation step ONLY. subagent-driven-development: `bd ready` -> fan out unblocked sub-issues in PARALLEL to bc-implementer subagents; each runs test-driven-development RED->GREEN->REFACTOR IN THE WORKTREE `../wt-${WORK_ID}` and recomputes @scenario_hash via `scenarios hash` (block-only, ADR-019) == on-disk tag (load nodes/subagent-driven-development.md, +test-driven-development.md, +bc-implementer.md). You MUST NOT push to origin/main (the native `integ` node does that), MUST NOT run bc-emit, MUST NOT run shop-msg respond, MUST NOT consume the inbox. Emit ONLY: {\"preferred_next_label\": \"ok\"} if ALL sub-issues are GREEN; on any failure emit NO directive (fails closed to emit_blk)."]
     redgate  [shape=parallelogram, deterministic=true,
@@ -166,7 +182,7 @@ digraph BcShopLoop {
     integ    [shape=parallelogram, deterministic=true, retry=2,
               label="integrating-to-main", prompt_file="nodes/integrating-to-main.md",
               script="set -e; cd \"../wt-${WORK_ID}\"; git fetch origin; git rebase origin/main; git push origin \"HEAD:main\""]
-    review   [class="review", permissions="read-write", retry=3, max_retries=3,
+    review   [class="review", permissions="read-write", retry=3, max_retries=3, retry_policy="exponential",
               label="bc-reviewer / bc-review", prompt_file="nodes/bc-review.md",
               prompt="You are the adversarial REVIEW step ONLY. Re-run the BDD suite; probe faithful realization; probe step defs (broad regex / swallowed exceptions / state leakage); verify test(red) precedes feat(green) (load nodes/bc-review.md, +bc-reviewer.md). You MUST NOT modify source/tests, MUST NOT push or integrate, MUST NOT run bc-emit, MUST NOT run shop-msg respond, MUST NOT consume the inbox. Emit ONLY your routing directive: {\"preferred_next_label\": \"signoff\"} | {\"preferred_next_label\": \"scenario_gap\"} | {\"preferred_next_label\": \"impl_gap\"}. If you cannot conclude, emit NO directive (fails closed to emit_blk)."]
     // wdg_r/emit_r run IN THE INTEGRATED WORKTREE (../wt-$WORK_ID), NOT the stale
@@ -184,7 +200,7 @@ digraph BcShopLoop {
               script="cd \"../wt-${WORK_ID}\" || exit 1; SH=$(grep -rhoE '@scenario_hash:[0-9a-f]+' features/ | sed 's/@scenario_hash:/--scenario-hash /' | tr '\n' ' '); bc-emit work-done --bc \"$BC_NAME\" --work-id \"$WORK_ID\" $SH --status complete --summary 'reviewer signoff; work-done-gate re-run green; RED-before-GREEN verified; probes considered+dismissed'"]
 
     // ---------- flat path (implementer is the emitter; no reviewer) --------
-    impl_f   [class="coding", permissions="read-write", retry=3, max_retries=3,
+    impl_f   [class="coding", permissions="read-write", retry=3, max_retries=3, retry_policy="exponential",
               label="bc-implementer (maintenance / empty bugfix)", prompt_file="nodes/bc-implementer.md",
               prompt="You are the FLAT implementation step ONLY (no planning, no reviewer). Make the flat change for request_maintenance or empty request_bugfix (load nodes/bc-implementer.md). You MUST NOT push to origin/main (the native emit path handles integration on the flat lane), MUST NOT run bc-emit, MUST NOT run shop-msg respond, MUST NOT consume the inbox. Emit ONLY: {\"preferred_next_label\": \"ok\"} on change made; {\"preferred_next_label\": \"clarify\"} on insufficient intake; on failure emit NO directive (fails closed to emit_blk)."]
     wdg_f    [shape=parallelogram, deterministic=true,

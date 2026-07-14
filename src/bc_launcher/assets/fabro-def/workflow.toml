@@ -15,6 +15,14 @@
 # `retry=N` stays because lead-i0wi F1 pins it. The graph also declares
 # `fallback_retry_target="halt"`. The 01b draft's `[run.retry.nodes]` table was a
 # guess and is NOT a v0.254.0 config key -- superseded by the graph attributes.
+# lead-6ev8 BEHAVIOR 2 (088460f2fd9490a4): the LLM/ACP nodes ALSO carry
+# `retry_policy="exponential"` -- a first-class fabro v0.254.0 node attribute (the
+# real binary's node-attr enum lists it between `max_retries` and `retry_target`)
+# selecting fabro's `ExponentialBackoff { max_times, base_duration }`. This makes
+# the transient-429 retries BOUNDED EXPONENTIAL (spaced/increasing, per-attempt
+# capped at base*factor^max_retries, cumulative wait a finite geometric sum bounded
+# by the finite max_retries) so the client does not amplify a 429 into a
+# self-inflicted retry-storm. Also a graph-native node attribute, not a toml key.
 
 _version = 1
 
