@@ -219,12 +219,21 @@ digraph BcShopLoop {
     // (dispatch stays pending == retriable), never a de-pending `respond work_done
     // --status blocked`, never a work_done(complete); emit_r stays the sole
     // complete emitter. Teeth: revert to the content-free generic --note (empty
-    // node/reason/context) -> the behavior-1 tests RED. (Reason-class DERIVATION /
-    // infra markers = behavior 2; the unknown+run-tail floor = behavior 4; both
-    // append to the SAME emit_blk / run-context capture contract.)
+    // node/reason/context) -> the behavior-1 tests RED.
+    // lead-01jw.3 (behavior 2, scenario 738f35759127fe7f): the reason class is
+    // now DERIVED (not read from a REASON= field) by the `classify_reason` shell
+    // function from the failing NODE + captured run tail, and for an infra-path
+    // failure the failing subsystem is named with a marker token from the closed
+    // set {deliverable, oauth-shim, agent-vault, proxy, rate-limit-429, llm-path,
+    // unknown} -- mirroring the tmux-runtime launch-diagnostic cause-marker idiom
+    // (diagnostics.py CAUSE_MARKER_*). Both the derived reason-class and the
+    // marker are re-validated against their closed sets (stray -> unknown), and
+    // the classification is composed ALONGSIDE (never replacing) the raw
+    // failing-node + context diagnosis. (The unknown+run-tail floor = behavior 4;
+    // it appends to the SAME emit_blk / run-context capture contract.)
     emit_blk  [shape=parallelogram, deterministic=true, retry=2,
-               label="report BLOCKED via non-consuming nudge, enriched with failing-node + reason-class + captured context (dispatch stays pending == retriable; consume deferred to terminal complete)",
-               script="CTXF=\"/tmp/fabro_run_ctx_${WORK_ID}\"; FN=$(sed -n 's/^NODE=//p' \"$CTXF\" 2>/dev/null | head -1); RC=$(sed -n 's/^REASON=//p' \"$CTXF\" 2>/dev/null | head -1); CTX=$(sed -n 's/^CONTEXT=//p' \"$CTXF\" 2>/dev/null | tail -n 20 | tr '\n' ' '); case \"$RC\" in deliverable-gate|infra-path|llm-path|unknown) ;; *) RC=unknown ;; esac; [ -n \"$FN\" ] || FN=unknown; [ -n \"$CTX\" ] || CTX='(no captured run tail available)'; shop-msg nudge --bc \"$BC_NAME\" --reason stuck-on-you --work-id \"$WORK_ID\" --note \"fabro finite-run BLOCKED (ADR-051: non-consuming report; dispatch stays pending == retriable; consuming terminal work_done deferred to emit_r; never a silent complete). failing-node=$FN reason-class=$RC context=$CTX\""]
+               label="report BLOCKED via non-consuming nudge, enriched with failing-node + DERIVED reason-class + infra-subsystem marker + captured context (dispatch stays pending == retriable; consume deferred to terminal complete)",
+               script="CTXF=\"/tmp/fabro_run_ctx_${WORK_ID}\"; FN=$(sed -n 's/^NODE=//p' \"$CTXF\" 2>/dev/null | head -1); CTX=$(sed -n 's/^CONTEXT=//p' \"$CTXF\" 2>/dev/null | tail -n 20 | tr '\n' ' '); classify_reason() { case \"$1 $2\" in *oauth-shim*|*anthropic-oauth*) echo \"infra-path oauth-shim\" ;; *agent-vault*) echo \"infra-path agent-vault\" ;; *429*|*rate-limit*) echo \"infra-path rate-limit-429\" ;; *proxy*) echo \"infra-path proxy\" ;; *deliverable*|*Reviewer*gate*) echo \"deliverable-gate deliverable\" ;; *LLM*|*unusable*|*non-advancing*) echo \"llm-path llm-path\" ;; *) echo \"unknown unknown\" ;; esac; }; RCDM=$(classify_reason \"$FN\" \"$CTX\"); RC=${RCDM%% *}; DM=${RCDM##* }; case \"$RC\" in deliverable-gate|infra-path|llm-path|unknown) ;; *) RC=unknown ;; esac; case \"$DM\" in deliverable|oauth-shim|agent-vault|proxy|rate-limit-429|llm-path|unknown) ;; *) DM=unknown ;; esac; [ -n \"$FN\" ] || FN=unknown; [ -n \"$CTX\" ] || CTX='(no captured run tail available)'; shop-msg nudge --bc \"$BC_NAME\" --reason stuck-on-you --work-id \"$WORK_ID\" --note \"fabro finite-run BLOCKED (ADR-051: non-consuming report; dispatch stays pending == retriable; consuming terminal work_done deferred to emit_r; never a silent complete). failing-node=$FN reason-class=$RC detail-marker=$DM context=$CTX\""]
 
     // =======================================================================
     // EDGES -- PROVEN-SAFE fail-closed pattern:
