@@ -5,8 +5,21 @@ package split). Re-exported via bc_launcher.fabro (the package __init__).
 """
 from __future__ import annotations
 
+from bc_launcher.agent_vault import AGENT_VAULT_PLACEHOLDER_TOKEN
 from bc_launcher.constants import AGENT_VAULT_CONTAINER_CA_PATH, SSL_CERT_FILE_ENV
 from bc_launcher.fabro.constants import *  # noqa: F401,F403  (sibling constants)
+from bc_launcher.fabro.llm_provider import (
+    BCLAUNCHER_LLM_PROVIDER_ENV,
+    LLM_PROVIDER_OPENROUTER,
+    MODEL_INPUT_CODING,
+    MODEL_INPUT_DEFAULT,
+    MODEL_INPUT_REVIEW,
+    MODEL_TIER_CODING,
+    MODEL_TIER_DEFAULT,
+    MODEL_TIER_REVIEW,
+    resolve_llm_provider,
+    resolve_model_mapping,
+)
 
 # The REAL bc-status ONLINE staleness window (seconds) — imported from the SAME
 # module `shop-msg bc-status` classifies presence by (lead-8hpz behavior 2 /
@@ -70,7 +83,7 @@ def _fabro_run_argv(bc_name: str) -> list[str]:
 
 
 
-def _fabro_engage_script(bc_name: str) -> str:
+def _fabro_engage_script(bc_name: str, provider: str | None = None) -> str:
     """Build the ``/bin/sh -c`` script that drives the fabro ENGAGE step — the
     EXTERNAL agent-free message-driven watcher supervisor (lead-1vbw / ADR-058
     AMENDMENT-3, superseding the retired infinite ``fabro run dispatcher.toml``
@@ -142,6 +155,31 @@ def _fabro_engage_script(bc_name: str) -> str:
     def_dir = shlex.quote(FABRO_DEF_CONTAINER_DIR)
     base_url = shlex.quote(FABRO_ANTHROPIC_BASE_URL)
     dummy_key = shlex.quote(FABRO_SERVER_DUMMY_ANTHROPIC_KEY)
+    # The ACTIVE LLM provider for this launch (lead-ifye3.2 behavior 1).  A plain
+    # launch with no operator-supplied override resolves to the Anthropic DEFAULT;
+    # a later `--llm-provider` / BCLAUNCHER_LLM_PROVIDER override (behaviors 2-5)
+    # threads a different value in through `provider`.  The resolved provider is
+    # exported into the engage so the finite `fabro run` children inherit the
+    # active provider (behaviors 2-5 branch the provider block / credential / model
+    # mapping on it); on the default it stays "anthropic" and NO OpenRouter
+    # agent-vault credential is requested.
+    active_provider = resolve_llm_provider(provider)
+    provider_export = shlex.quote(active_provider)
+    # Provider-keyed model mapping (lead-ifye3.2 behavior 4): resolve the ACTIVE
+    # provider's row (coding/review/default literal model IDs) and render the
+    # three `-I MODEL_*` inputs the finite `fabro run` supplies to resolve the
+    # poured model_stylesheet's node-class input placeholders
+    # ({{ inputs.MODEL_CODING/REVIEW/DEFAULT }}).  On the openrouter override the
+    # OpenRouter-row literals are selected; with no override the Anthropic row
+    # (behavior-preserving, today's claude-haiku-4-5 everywhere).
+    model_row = resolve_model_mapping(active_provider)
+    model_inputs = " ".join(
+        (
+            f"-I {MODEL_INPUT_CODING}={shlex.quote(model_row[MODEL_TIER_CODING])}",
+            f"-I {MODEL_INPUT_REVIEW}={shlex.quote(model_row[MODEL_TIER_REVIEW])}",
+            f"-I {MODEL_INPUT_DEFAULT}={shlex.quote(model_row[MODEL_TIER_DEFAULT])}",
+        )
+    )
     gh_token = shlex.quote(FABRO_SERVER_INSTALL_GH_TOKEN)
     server_settings = shlex.quote(FABRO_SERVER_SETTINGS_CONTAINER_PATH)
     server_log = shlex.quote(f"{FABRO_DEF_CONTAINER_DIR}/fabro-server.log")
@@ -192,15 +230,45 @@ def _fabro_engage_script(bc_name: str) -> str:
     q_bc = shlex.quote(bc_name)
     workflow = FABRO_WORKFLOW_FILE
 
-    # (Defect C) the [llm.providers.anthropic] block appended to the SERVER-level
-    # ~/.fabro/settings.toml so the provider is registered AT THE SERVER
-    # (adapter + shim base_url, NO api_key — lead-sp2m; the DUMMY key rides the
-    # ANTHROPIC_API_KEY server-env export, never the settings TOML — ADR-049 D1).
-    provider_block = (
-        "\\n[llm.providers.anthropic]\\n"
-        f'adapter = "{FABRO_ANTHROPIC_ADAPTER}"\\n'
-        f'base_url = "{FABRO_ANTHROPIC_BASE_URL}"\\n'
-    )
+    # Provider-specific credential exports + registered provider block, branched
+    # on the resolved ACTIVE LLM provider (lead-ifye3.2).  BOTH register their
+    # provider AT THE SERVER by appending [llm.providers.<name>] to the
+    # server-level ~/.fabro/settings.toml with NO api_key in the TOML — the
+    # credential rides the SERVER-ENV export, never the settings TOML (ADR-049
+    # D1; the real credential rides agent-vault on the wire).
+    if active_provider == LLM_PROVIDER_OPENROUTER:
+        # OPENROUTER no-shim agent-vault-brokered credential (behavior 3),
+        # mirroring the GITHUB_TOKEN no-shim pattern (NOT the anthropic-oauth-
+        # shim header-reshaping pattern): OPENROUTER_API_KEY is the literal
+        # __PLACEHOLDER__ node-side (the finite `fabro run` children inherit it),
+        # the openrouter provider points DIRECTLY at OpenRouter's OpenAI-
+        # compatible API (Authorization: Bearer auth, NO local shim), and the
+        # agent-vault broker's MITM proxy substitutes the REAL key onto the
+        # outbound Bearer header on the wire via the container HTTPS_PROXY.
+        or_placeholder = shlex.quote(AGENT_VAULT_PLACEHOLDER_TOKEN)
+        credential_exports = (
+            f"export {OPENROUTER_API_KEY_ENV}={or_placeholder} && "
+        )
+        provider_block = (
+            "\\n[llm.providers.openrouter]\\n"
+            f'adapter = "{FABRO_OPENROUTER_ADAPTER}"\\n'
+            f'base_url = "{FABRO_OPENROUTER_BASE_URL}"\\n'
+        )
+    else:
+        # (Defect C) ANTHROPIC default path — the [llm.providers.anthropic] block
+        # appended to the SERVER-level ~/.fabro/settings.toml so the provider is
+        # registered AT THE SERVER (adapter + shim base_url, NO api_key —
+        # lead-sp2m; the DUMMY key rides the ANTHROPIC_API_KEY server-env export,
+        # never the settings TOML — ADR-049 D1).
+        credential_exports = (
+            f"export ANTHROPIC_API_KEY={dummy_key} && "
+            f"export ANTHROPIC_BASE_URL={base_url} && "
+        )
+        provider_block = (
+            "\\n[llm.providers.anthropic]\\n"
+            f'adapter = "{FABRO_ANTHROPIC_ADAPTER}"\\n'
+            f'base_url = "{FABRO_ANTHROPIC_BASE_URL}"\\n'
+        )
     provider_register = (
         f"printf '%b' {shlex.quote(provider_block)} >> {server_settings}"
     )
@@ -212,8 +280,13 @@ def _fabro_engage_script(bc_name: str) -> str:
     bootstrap = (
         f"cd {def_dir} && "
         f'export {SSL_CERT_FILE_ENV}={shlex.quote(AGENT_VAULT_CONTAINER_CA_PATH)} && '
-        f"export ANTHROPIC_API_KEY={dummy_key} && "
-        f"export ANTHROPIC_BASE_URL={base_url} && "
+        # Provider-specific credential exports (anthropic dummy + shim base_url;
+        # or the openrouter __PLACEHOLDER__ Bearer key — lead-ifye3.2).
+        f"{credential_exports}"
+        # Thread the resolved ACTIVE LLM provider into the engage env so the
+        # finite `fabro run` children inherit it (default "anthropic"; the
+        # openrouter override selects it here) — lead-ifye3.2 behavior 1.
+        f"export {BCLAUNCHER_LLM_PROVIDER_ENV}={provider_export} && "
         f"GH_TOKEN={gh_token} {install_argv} && "
         # (lead-01jw.2 P0 — iteration-3 durable fix for "Server already running")
         # `fabro install` DAEMONIZES a server on fabro's DEFAULT TCP endpoint
@@ -322,7 +395,7 @@ run_finite() {{
   _rf_sw="$(printf '%s' "$_rf_wid" | tr -c 'A-Za-z0-9._-' '_')"
   _rf_child={def_dir}/child-"$_rf_sw".toml
   materialize_child "$_rf_wid" "$_rf_child" || {{ echo "materialize $_rf_wid failed (non-fatal)" >>{run_log} 2>&1; }}
-  fabro run --server "$FABRO_SERVER" "child-$_rf_sw.toml" --auto-approve >>{run_log} 2>&1
+  fabro run --server "$FABRO_SERVER" "child-$_rf_sw.toml" {model_inputs} --auto-approve >>{run_log} 2>&1
   _rf_rc=$?
   echo "$(( $(cat {q_completed} 2>/dev/null || echo 0) + 1 ))" > {q_completed} 2>/dev/null || true
   rm -f "$_rf_child" 2>/dev/null || true

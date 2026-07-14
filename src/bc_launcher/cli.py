@@ -248,6 +248,12 @@ def main(argv: list[str] | None = None) -> int:
                 else "tmux"
             ),
             work_id=getattr(args, "work_id", None),
+            # Launch-time active LLM provider override (lead-ifye3.2 behavior 2).
+            # The explicit --llm-provider flag is the highest-precedence override
+            # source; controller.launch resolves it against BCLAUNCHER_LLM_PROVIDER
+            # and the anthropic default, and branches the anthropic-oauth-shim
+            # wiring on the result.
+            llm_provider=getattr(args, "llm_provider", None),
             debug=debug,
         )
         sys.stdout.write(result.stdout)

@@ -64,6 +64,45 @@ def _stylesheet_model(sheet: str, cls: str) -> str | None:
     return m.group(1) if m else None
 
 
+def _stylesheet_input_placeholder(sheet: str, cls: str) -> str | None:
+    """The node-class INPUT PLACEHOLDER name a stylesheet rule resolves its
+    `model:` from (lead-ifye3.2 behavior 4 converted the baked literals to
+    `{{ inputs.MODEL_* }}` placeholders resolved via `-I` at fabro-run time)."""
+    m = re.search(
+        rf"\.{re.escape(cls)}\s*\{{\s*model:\s*\{{\{{\s*inputs\.([A-Za-z0-9_]+)\s*\}}\}}",
+        sheet,
+    )
+    return m.group(1) if m else None
+
+
+def _resolved_default_model(input_name: str) -> str:
+    """The literal model ID the given MODEL_* input placeholder resolves to on
+    the DEFAULT (anthropic / no-override) path: the workflow.toml [run.inputs]
+    default (what `fabro validate` and a bare run render), which must equal the
+    Anthropic mapping-table row so the default launch is behavior-preserving."""
+    import tomllib
+
+    from bc_launcher.fabro.llm_provider import (
+        LLM_PROVIDER_ANTHROPIC,
+        resolve_model_mapping,
+    )
+
+    inputs = (
+        tomllib.loads((_fabro_def_asset_root() / "workflow.toml").read_text())
+        .get("run", {})
+        .get("inputs", {})
+    )
+    toml_default = inputs.get(input_name)
+    tier = {"MODEL_CODING": "coding", "MODEL_REVIEW": "review",
+            "MODEL_DEFAULT": "default"}[input_name]
+    row_model = resolve_model_mapping(LLM_PROVIDER_ANTHROPIC)[tier]
+    assert toml_default == row_model, (
+        f"the workflow.toml default for {input_name} ({toml_default!r}) must "
+        f"equal the Anthropic mapping row's {tier!r} model ({row_model!r})"
+    )
+    return row_model
+
+
 def _locate_fabro() -> str | None:
     on_path = shutil.which("fabro")
     if on_path:
@@ -79,30 +118,52 @@ def _locate_fabro() -> str | None:
 # ===========================================================================
 
 def test_r6_coding_stylesheet_rule_pins_haiku():
-    """The `.coding` stylesheet rule pins claude-haiku-4-5 (a REAL primary
+    """The `.coding` stylesheet rule RESOLVES to claude-haiku-4-5 (a REAL primary
     model), NOT the persistently-429 claude-sonnet-4-5.
 
-    TEETH: revert `.coding` to claude-sonnet-4-5 -> RED.
+    lead-ifye3.2 behavior 4: the `.coding` model is no longer a baked literal —
+    it is the MODEL_CODING node-class input placeholder resolved from the
+    provider-keyed mapping table.  The haiku-not-sonnet primary invariant is
+    preserved: on the default (anthropic) path MODEL_CODING resolves to
+    claude-haiku-4-5.
+
+    TEETH: point the Anthropic-row coding model (or the workflow.toml default)
+    at claude-sonnet-4-5 -> RED.
     """
-    model = _stylesheet_model(_stylesheet(_workflow_text()), "coding")
+    placeholder = _stylesheet_input_placeholder(_stylesheet(_workflow_text()), "coding")
+    assert placeholder == "MODEL_CODING", (
+        "R6(a): the `.coding` stylesheet rule must resolve its model from the "
+        f"MODEL_CODING input placeholder; got {placeholder!r}."
+    )
+    model = _resolved_default_model(placeholder)
     assert model == "claude-haiku-4-5", (
-        "R6(a): the `.coding` stylesheet rule must pin claude-haiku-4-5 as a "
-        "real primary model (sonnet-4-5 is persistently 429 on the fleet); "
-        f"got {model!r}."
+        "R6(a): the `.coding` node-class must resolve to claude-haiku-4-5 as a "
+        "real primary model on the default path (sonnet-4-5 is persistently 429 "
+        f"on the fleet); got {model!r}."
     )
 
 
 def test_r6_review_stylesheet_rule_pins_haiku():
-    """The `.review` stylesheet rule pins claude-haiku-4-5 (a REAL primary
+    """The `.review` stylesheet rule RESOLVES to claude-haiku-4-5 (a REAL primary
     model), NOT the persistently-429 claude-sonnet-4-5.
 
-    TEETH: revert `.review` to claude-sonnet-4-5 -> RED.
+    lead-ifye3.2 behavior 4: the `.review` model is the MODEL_REVIEW node-class
+    input placeholder resolved from the provider-keyed mapping table; on the
+    default (anthropic) path it resolves to claude-haiku-4-5.
+
+    TEETH: point the Anthropic-row review model (or the workflow.toml default)
+    at claude-sonnet-4-5 -> RED.
     """
-    model = _stylesheet_model(_stylesheet(_workflow_text()), "review")
+    placeholder = _stylesheet_input_placeholder(_stylesheet(_workflow_text()), "review")
+    assert placeholder == "MODEL_REVIEW", (
+        "R6(a): the `.review` stylesheet rule must resolve its model from the "
+        f"MODEL_REVIEW input placeholder; got {placeholder!r}."
+    )
+    model = _resolved_default_model(placeholder)
     assert model == "claude-haiku-4-5", (
-        "R6(a): the `.review` stylesheet rule must pin claude-haiku-4-5 as a "
-        "real primary model (sonnet-4-5 is persistently 429 on the fleet); "
-        f"got {model!r}."
+        "R6(a): the `.review` node-class must resolve to claude-haiku-4-5 as a "
+        "real primary model on the default path (sonnet-4-5 is persistently 429 "
+        f"on the fleet); got {model!r}."
     )
 
 
@@ -140,15 +201,18 @@ def test_r6_coding_review_class_nodes_resolve_to_haiku_via_real_validate():
         pytest.skip("fabro binary not available (cached/PATH); real-validate skipped")
     src = _fabro_def_asset_root() / "workflow.fabro"
 
-    def _validate(text: str, tmp: Path) -> dict:
+    def _validate(text: str, tmp: Path, sibling_overrides: dict | None = None) -> dict:
         wf = tmp / "workflow.fabro"
         wf.write_text(text)
+        overrides = sibling_overrides or {}
         # copy the sibling def files so inputs bind and no stray warnings appear
         for sib in src.parent.iterdir():
             if sib.name == "workflow.fabro":
                 continue
             dest = tmp / sib.name
-            if sib.is_dir():
+            if sib.name in overrides:
+                dest.write_text(overrides[sib.name])
+            elif sib.is_dir():
                 shutil.copytree(sib, dest)
             else:
                 dest.write_text(sib.read_text())
@@ -169,14 +233,25 @@ def test_r6_coding_review_class_nodes_resolve_to_haiku_via_real_validate():
         f"committed def must report ZERO diagnostics; got {doc.get('diagnostics')!r}"
     )
 
-    # PROOF-OF-HONORED: a bogus `.coding` model -> node_model_known diagnostics.
-    bogus = committed.replace(
-        ".coding { model: claude-haiku-4-5 }",
-        ".coding { model: claude-bogus-9-9 }",
+    # PROOF-OF-HONORED (lead-ifye3.2 behavior 4): the `.coding` model is now the
+    # MODEL_CODING input placeholder, RESOLVED from the workflow.toml [run.inputs]
+    # default (what validate renders) / the launcher's `-I MODEL_CODING`.  A
+    # BOGUS resolved model — injected via the workflow.toml default the
+    # placeholder binds from — must still be CAUGHT by fabro validate
+    # (`node_model_known` / `stylesheet_model_known`), proving the RESOLVED
+    # `model:` is HONORED/parsed (not swallowed like a `fallbacks:` key would be).
+    committed_toml = (src.parent / "workflow.toml").read_text()
+    bogus_toml = committed_toml.replace(
+        'MODEL_CODING = "claude-haiku-4-5"',
+        'MODEL_CODING = "claude-bogus-9-9"',
     )
-    assert bogus != committed, "expected to rewrite the `.coding` rule"
+    assert bogus_toml != committed_toml, (
+        "expected to rewrite the workflow.toml MODEL_CODING default"
+    )
     with tempfile.TemporaryDirectory() as d2:
-        bogus_doc = _validate(bogus, Path(d2))
+        bogus_doc = _validate(
+            committed, Path(d2), sibling_overrides={"workflow.toml": bogus_toml}
+        )
     node_model_diags = [
         diag for diag in bogus_doc.get("diagnostics", [])
         if diag.get("rule") in ("node_model_known", "stylesheet_model_known")

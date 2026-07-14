@@ -176,6 +176,36 @@ FABRO_ANTHROPIC_BASE_URL = f"http://{FABRO_SHIM_HOST}:{FABRO_SHIM_PORT}/v1"
 FABRO_ANTHROPIC_ADAPTER = "anthropic"
 
 
+# ---------------------------------------------------------------------------
+# OpenRouter no-shim agent-vault-brokered credential (lead-ifye3.2 behavior 3)
+# ---------------------------------------------------------------------------
+#
+# On the `openrouter` active-provider override the launcher wires the OpenRouter
+# credential the SAME no-shim way GITHUB_TOKEN rides agent-vault — NOT the
+# Anthropic anthropic-oauth-shim header-reshaping way:
+#
+#   * OpenRouter is an OpenAI-compatible endpoint reached DIRECTLY (base_url =
+#     https://openrouter.ai/api/v1, adapter="openai" — Authorization: Bearer
+#     auth), so NO header-reshaping shim process is launched on this path
+#     (contrast the anthropic path, which starts the anthropic-oauth-shim to
+#     strip x-api-key and add the Bearer/oauth-beta headers).
+#   * The node-side OPENROUTER_API_KEY is the literal AGENT_VAULT_PLACEHOLDER
+#     token (__PLACEHOLDER__), exported into the engage env so the finite `fabro
+#     run` children (provider=local, inheriting the engage env) carry it.  The
+#     real key is NEVER in the container fs/env.
+#   * The finite run's LLM request goes out with that placeholder Bearer token
+#     and is forwarded through the container HTTPS_PROXY, where the agent-vault
+#     broker's MITM proxy substitutes the REAL OpenRouter key onto the outbound
+#     `Authorization: Bearer` header ON THE WIRE (mirrors GITHUB_TOKEN; ADR-026
+#     / ADR-049 D1 — no real credential literal, the broker rides the wire).
+FABRO_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+
+FABRO_OPENROUTER_ADAPTER = "openai"
+
+# The container env var the fabro openrouter provider reads for its Bearer key.
+OPENROUTER_API_KEY_ENV = "OPENROUTER_API_KEY"
+
+
 # Fabro orchestrator ENGAGE step (lead-cadr — S4).  On the fabro launch path,
 # AFTER the readiness barrier passes, the launcher REPLACES the tmux/claude
 # engage tier (ADR-050 D3) with two execs:

@@ -43,6 +43,18 @@ graph = "workflow.fabro"
 [run.inputs]
 BC_NAME = "fabro-throwaway"        # canonical BC name; override per BC at run
 WORK_ID = "fabro-spike-demo-3"     # work_id of the message under service
+# Node-class MODEL input placeholders (lead-ifye3.2 behavior 4). The
+# model_stylesheet graph attribute resolves each node-class tier from these
+# inputs via minijinja `{{ inputs.MODEL_* }}`; a launch-time `-I MODEL_*=<id>`
+# fabro-run input overrides them with the ACTIVE provider's row from the
+# fleet-wide provider-keyed model mapping table (bc_launcher.fabro.llm_provider
+# PROVIDER_MODEL_MAPPING). These DEFAULTS mirror the pre-placeholder stylesheet
+# (every node-class on claude-haiku-4-5, incl. lead-i0wi classify-on-haiku) so
+# `fabro validate` renders a non-empty stylesheet and a default run is behavior-
+# preserving; the launcher ALWAYS supplies the resolved `-I MODEL_*` at runtime.
+MODEL_CODING = "claude-haiku-4-5"  # .coding node-class tier
+MODEL_REVIEW = "claude-haiku-4-5"  # .review node-class tier
+MODEL_DEFAULT = "claude-haiku-4-5" # `*` + .classify node-class tier (default)
 
 # ---- ENV OVERLAY into the NATIVE script= sandbox (Slice 5 HARDEN, PROVEN) ----
 # The GLOBAL [run.environment.env] overlay (same channel that delivers HTTPS_PROXY

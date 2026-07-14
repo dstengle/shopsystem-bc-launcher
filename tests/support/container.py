@@ -776,6 +776,9 @@ def _odd9_drive_fabro_launch(bc_name, ctx, fake_driver, controller, tmp_path,
         credential_home=ctx.get("credential_home"),
         launch_path=launch_path,
         work_id=getattr(args, "work_id", None),
+        # Forward the parsed --llm-provider override so a CLI-form provider
+        # override flows exactly as the real CLI wires it (lead-ifye3.2 b2).
+        llm_provider=getattr(args, "llm_provider", None),
     )
     assert result.exit_code == 0, (
         f"fabro-path launch failed: stdout={result.stdout!r} "

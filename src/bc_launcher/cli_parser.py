@@ -90,6 +90,19 @@ def build_parser() -> argparse.ArgumentParser:
             "--work-id passed is accepted but ignored."
         ),
     )
+    p_launch.add_argument(
+        "--llm-provider",
+        default=None,
+        help=(
+            "Launch-time active LLM provider for the container's fabro run "
+            "(lead-ifye3.2). Selects which provider the fabro engage threads "
+            "into the container's finite runs. Precedence: this flag > the "
+            "BCLAUNCHER_LLM_PROVIDER env var > the 'anthropic' default. The "
+            "'anthropic' default engages the in-container anthropic-oauth-shim; "
+            "an explicit override (e.g. 'openrouter') wins over the default and "
+            "does NOT engage the anthropic-oauth-shim path."
+        ),
+    )
     p_launch.add_argument("--shopmsg-dsn", help="SHOPMSG_DSN value for the container")
     p_launch.add_argument(
         "--image",

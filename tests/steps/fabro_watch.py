@@ -15,6 +15,8 @@ xfail-bound because it requires a live server + fabro-side reclamation (lead-01j
 """
 from __future__ import annotations
 
+import re
+
 from pytest_bdd import given, when, then, parsers  # noqa: F401
 
 from tests.conftest import (  # noqa: F401
@@ -526,8 +528,14 @@ def watch_7a_when(ctx):
     "steady-state supervision spends ZERO model tokens")
 def watch_7a_agent_free(ctx):
     script = _script(ctx)
-    assert "claude" not in script, (
-        f"the watcher dispatch path must be agent-free (no claude); script:\n{script}"
+    # Agent-free = NO `claude` CLI / model-backed agent is EXECUTED in the
+    # dispatch path.  lead-ifye3.2 behavior 4 supplies provider-keyed model IDs
+    # as `-I MODEL_*=<id>` fabro-run inputs; the Anthropic-row IDs are
+    # `claude-haiku-4-5` — DATA (a hyphenated model slug), not an agent
+    # invocation — so match a BARE `claude` agent token, not the model slug.
+    assert not re.search(r"(?<![\w./-])claude(?![\w-])", script), (
+        "the watcher dispatch path must be agent-free (no `claude` CLI agent "
+        f"executed); script:\n{script}"
     )
     assert 'shop-msg watch --bc "$BC_NAME"' in script
     assert 'graph = "workflow.fabro"' in script
