@@ -360,3 +360,195 @@ def no_openrouter_credential_requested(ctx):
             "no recorded launch exec may request an OpenRouter credential on "
             f"the plain-launch path; offending exec: {c.command[:3]!r}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Behavior 4 (@scenario_hash:22f2a5bda5c29044): the poured workflow.fabro
+# model_stylesheet carries node-class INPUT PLACEHOLDERS (MODEL_CODING /
+# MODEL_REVIEW / MODEL_DEFAULT) and the launcher resolves the ACTIVE provider's
+# row of a fleet-wide provider-keyed model mapping table into three `-I MODEL_*`
+# inputs on the finite `fabro run` — OpenRouter-row literals on the openrouter
+# override, Anthropic-row literals with no override.
+#
+# FIDELITY: the placeholder assertion reads the ACTUAL poured def bundle (the
+# same bytes `_load_fabro_def_files` places in the container), and the `-I`
+# assertions read the REAL launcher's ACTUAL recorded fabro-run command over the
+# FakeDockerDriver on TWO real drives (openrouter vs no override) — never a model
+# and never a shallow string-match: the literals are compared to the mapping
+# table's own rows, and the two provider rows must genuinely differ.
+# ---------------------------------------------------------------------------
+
+
+def _poured_workflow_fabro():
+    """The poured workflow.fabro text — the exact bytes the launcher's def-bundle
+    placement (`_load_fabro_def_files`) writes into the container at
+    /workspace/.fabro/workflow.fabro."""
+    from bc_launcher.fabro.def_bundle import _load_fabro_def_files
+
+    return _load_fabro_def_files()["workflow.fabro"].decode("utf-8")
+
+
+def _poured_model_stylesheet():
+    """Extract the model_stylesheet graph attribute value from the poured
+    workflow.fabro (the minijinja-rendered attribute the node-class inputs feed)."""
+    workflow = _poured_workflow_fabro()
+    m = re.search(r'model_stylesheet="([^"]*)"', workflow)
+    return (m.group(1) if m else None), workflow
+
+
+def _model_run_inputs(script):
+    """The three `-I MODEL_*=<value>` inputs the recorded fabro-run command line
+    supplies, read out of the engage script (the run_finite `fabro run` argv)."""
+    out = {}
+    for m in re.finditer(
+        r"-I\s+(MODEL_CODING|MODEL_REVIEW|MODEL_DEFAULT)=(\S+)", script
+    ):
+        out[m.group(1)] = m.group(2).strip("'\"")
+    return out
+
+
+@given('the poured "/workspace/.fabro/workflow.fabro" model_stylesheet carries '
+       'the node-class input placeholders "MODEL_CODING", "MODEL_REVIEW", and '
+       '"MODEL_DEFAULT"')
+def poured_stylesheet_carries_placeholders(ctx):
+    stylesheet, workflow = _poured_model_stylesheet()
+    assert stylesheet is not None, (
+        "the poured workflow.fabro must carry a model_stylesheet graph "
+        f"attribute; workflow head:\n{workflow[:400]}"
+    )
+    # The stylesheet's per-tier `model:` values must be node-class INPUT
+    # PLACEHOLDERS resolved via fabro minijinja (`{{ inputs.NAME }}`), NOT baked
+    # literal model IDs — so a launch-time `-I MODEL_*` input selects the model.
+    for placeholder in ("MODEL_CODING", "MODEL_REVIEW", "MODEL_DEFAULT"):
+        assert re.search(
+            r"\{\{\s*inputs\." + placeholder + r"\s*\}\}", stylesheet
+        ), (
+            "the poured model_stylesheet must carry the node-class input "
+            f"placeholder {{{{ inputs.{placeholder} }}}}; got "
+            f"model_stylesheet={stylesheet!r}"
+        )
+    ctx["b4_poured_stylesheet"] = stylesheet
+
+
+@given('the fleet-wide provider-keyed model mapping table has an OpenRouter row '
+       'and an Anthropic row, each naming a literal model ID for the "coding", '
+       '"review", and "default" node-class tiers')
+def mapping_table_has_both_rows(ctx):
+    from bc_launcher.fabro.llm_provider import (
+        LLM_PROVIDER_ANTHROPIC,
+        LLM_PROVIDER_OPENROUTER,
+        PROVIDER_MODEL_MAPPING,
+        resolve_model_mapping,
+    )
+
+    tiers = ("coding", "review", "default")
+    for provider in (LLM_PROVIDER_OPENROUTER, LLM_PROVIDER_ANTHROPIC):
+        assert provider in PROVIDER_MODEL_MAPPING, (
+            "the fleet-wide provider-keyed model mapping table must carry a "
+            f"{provider!r} row; got {sorted(PROVIDER_MODEL_MAPPING)!r}"
+        )
+        row = resolve_model_mapping(provider)
+        for tier in tiers:
+            assert tier in row and isinstance(row[tier], str) and row[tier].strip(), (
+                f"the {provider!r} row must name a literal model ID for the "
+                f"{tier!r} node-class tier; got {row!r}"
+            )
+    or_row = resolve_model_mapping(LLM_PROVIDER_OPENROUTER)
+    an_row = resolve_model_mapping(LLM_PROVIDER_ANTHROPIC)
+    # The two rows must genuinely differ, so the openrouter vs no-override drives
+    # are a real distinction rather than the same literals under two labels.
+    assert or_row != an_row, (
+        "the OpenRouter and Anthropic mapping rows must differ so the active "
+        f"provider genuinely selects the model set; both are {or_row!r}"
+    )
+    ctx["b4_openrouter_row"] = or_row
+    ctx["b4_anthropic_row"] = an_row
+
+
+@when(parsers.parse(
+    "bc-container launch runs the container's fabro workflow for BC name "
+    '"{bc_name}" with the OpenRouter provider override'
+))
+def launch_runs_fabro_workflow_with_override(
+    bc_name, ctx, fake_driver, controller, tmp_path
+):
+    # Drive the REAL launcher on the fabro path with the openrouter override in
+    # effect (BCLAUNCHER_LLM_PROVIDER=openrouter set by the earlier Given).
+    _odd9_drive_fabro_launch(
+        bc_name, ctx, fake_driver, controller, tmp_path, work_id=None
+    )
+    ctx["b4_openrouter_run_inputs"] = _model_run_inputs(_engage_script(ctx))
+
+
+@then('the fabro run command line supplies three "-I" inputs — MODEL_CODING, '
+      "MODEL_REVIEW, and MODEL_DEFAULT — each set to the literal model ID "
+      "recorded in the mapping table's OpenRouter row for that node-class")
+def fabro_run_supplies_openrouter_model_inputs(ctx):
+    inputs = ctx.get("b4_openrouter_run_inputs") or _model_run_inputs(
+        _engage_script(ctx)
+    )
+    or_row = ctx["b4_openrouter_row"]
+    expected = {
+        "MODEL_CODING": or_row["coding"],
+        "MODEL_REVIEW": or_row["review"],
+        "MODEL_DEFAULT": or_row["default"],
+    }
+    for name, want in expected.items():
+        assert name in inputs, (
+            "the recorded fabro-run command line must supply a "
+            f"`-I {name}=<id>` input on the openrouter override path; got "
+            f"inputs {inputs!r}; script:\n{_engage_script(ctx)}"
+        )
+        assert inputs[name] == want, (
+            f"the fabro-run `-I {name}` input must be the OpenRouter-row literal "
+            f"model ID {want!r}, got {inputs[name]!r}"
+        )
+
+
+@then("when the same launch is run with no provider override, the same three "
+      "inputs instead carry the literal model IDs recorded in the mapping "
+      "table's Anthropic row")
+def same_launch_no_override_carries_anthropic_models(
+    ctx, tmp_path, monkeypatch
+):
+    from bc_launcher.controller import BcContainerController
+    from tests.fake_driver import FakeDockerDriver
+
+    # Clear the operator override so this is a plain launch (Anthropic default).
+    monkeypatch.delenv("BCLAUNCHER_LLM_PROVIDER", raising=False)
+
+    # A SECOND real drive over a FRESH FakeDockerDriver so its recorded engage is
+    # isolated from the openrouter drive above.
+    fresh_driver = FakeDockerDriver()
+    fresh_controller = BcContainerController(
+        fresh_driver, monotonic=fresh_driver.monotonic
+    )
+    ctx2 = {"credential_home": ctx.get("credential_home")}
+    _odd9_drive_fabro_launch(
+        "shopsystem-messaging", ctx2, fresh_driver, fresh_controller,
+        tmp_path, work_id=None,
+    )
+
+    inputs = _model_run_inputs(_engage_script(ctx2))
+    an_row = ctx["b4_anthropic_row"]
+    expected = {
+        "MODEL_CODING": an_row["coding"],
+        "MODEL_REVIEW": an_row["review"],
+        "MODEL_DEFAULT": an_row["default"],
+    }
+    for name, want in expected.items():
+        assert name in inputs, (
+            "the no-override fabro-run command line must supply a "
+            f"`-I {name}=<id>` input; got inputs {inputs!r}; script:\n"
+            f"{_engage_script(ctx2)}"
+        )
+        assert inputs[name] == want, (
+            f"the no-override fabro-run `-I {name}` input must be the "
+            f"Anthropic-row literal model ID {want!r}, got {inputs[name]!r}"
+        )
+    # The two provider paths genuinely differ: the openrouter drive's inputs are
+    # NOT the anthropic ones.
+    assert inputs != ctx.get("b4_openrouter_run_inputs"), (
+        "the no-override (Anthropic) fabro-run inputs must differ from the "
+        f"openrouter-override inputs; both are {inputs!r}"
+    )
