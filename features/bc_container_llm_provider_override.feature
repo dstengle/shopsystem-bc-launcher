@@ -35,3 +35,13 @@ Feature: a launch-time --llm-provider / BCLAUNCHER_LLM_PROVIDER override selects
     When bc-container launch is run for BC name "shopsystem-messaging" with the operator-supplied provider override
     Then the container's fabro run is launched with the active LLM provider set to "openrouter"
     And the Anthropic anthropic-oauth-shim path is not engaged for this launch
+
+  @scenario_hash:14290420156c5ee0 @bc:shopsystem-bc-launcher
+  Scenario: the OpenRouter credential rides a new agent-vault-brokered credential with no header-reshaping shim, matching the GITHUB_TOKEN no-shim pattern rather than the Anthropic oauth-shim pattern
+    Given the shopsystem-bc-launcher BC is installed
+    And the operator supplies a launch-time LLM provider override of "openrouter"
+    And an agent-vault broker with a registered OpenRouter credential service is running on the shopsystem network and is reachable
+    When bc-container launch starts the agent for BC name "shopsystem-messaging" with the OpenRouter provider override
+    Then the node-side "OPENROUTER_API_KEY" value is the literal placeholder "__PLACEHOLDER__", with no header-reshaping shim process launched for the OpenRouter path
+    And the agent-vault broker's MITM proxy substitutes the real OpenRouter API key onto the outbound "Authorization: Bearer" header only on the wire
+    And the real OpenRouter API key is not present in the container's filesystem or process environment
