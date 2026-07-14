@@ -109,3 +109,48 @@ def test_bc_base_launcher_arg_default_equals_package_release_version():
         f"({arg_default}) does not equal this package's release version "
         f"({release}); a plain build would surface a stale baked-version label."
     )
+
+
+def test_bc_base_launcher_self_pin_literal_equals_arg_default():
+    """The launcher install-line literal self-pin and the
+    SHOPSYSTEM_BC_LAUNCHER_VERSION ARG default must be EQUAL to each other.
+
+    ROOT BUG (lead-tzw4y): the install line pinned @v0.3.66 while the ARG
+    default (the ENV/OCI-label surface the publish workflow overrides with the
+    release tag) read v0.3.71 — a multi-release DIVERGENCE. The workflow's
+    `SHOPSYSTEM_BC_LAUNCHER_VERSION=${github.ref_name}` build-arg feeds only
+    the ENV/label surface, NOT the literal install line; so the label reported
+    the release while the container actually baked the stale 0.3.66 launcher
+    code (`docker run bc-base:latest pip show shopsystem-bc-launcher` = 0.3.66).
+
+    This test binds the two surfaces together so they can never silently
+    diverge again: whatever version the ENV/label surface advertises, the
+    install line must bake exactly that. Keeping the install line a LITERAL
+    (not `@${SHOPSYSTEM_BC_LAUNCHER_VERSION}`) is load-bearing for the pinned
+    self-pin-poll behavior (bc_base_self_pin_poll.feature @scenario_hash
+    493bbbb7dcb61d7e), whose poll greps `...bc-launcher(?:\\.git)?@\\Kv[0-9.]+`
+    and seds the literal; this guard keeps the literal CURRENT and in lockstep
+    with the ARG rather than parameterizing it away.
+    """
+    dockerfile = _find_bc_base_dockerfile()
+    assert dockerfile is not None
+    text = dockerfile.read_text()
+    installed = _launcher_self_pin_version(text)
+    arg_default = _launcher_arg_default(text)
+
+    assert installed is not None, (
+        "bc-base Dockerfile does not install shopsystem-bc-launcher from a "
+        "vMAJOR.MINOR.PATCH literal self-pin."
+    )
+    assert arg_default is not None, (
+        "bc-base Dockerfile does not declare "
+        "ARG SHOPSYSTEM_BC_LAUNCHER_VERSION=vMAJOR.MINOR.PATCH."
+    )
+    assert installed == arg_default, (
+        "bc-base Dockerfile DIVERGES: the launcher install-line self-pin "
+        f"({installed}) does not equal the SHOPSYSTEM_BC_LAUNCHER_VERSION ARG "
+        f"default ({arg_default}). The ENV/OCI-label surface would advertise "
+        f"{arg_default} while the container actually bakes {installed} — the "
+        "exact stale-baked-launcher defect (lead-tzw4y). Bump the install-line "
+        "literal and the ARG default in lockstep."
+    )
