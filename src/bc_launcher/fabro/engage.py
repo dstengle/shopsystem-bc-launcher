@@ -144,6 +144,8 @@ def _fabro_engage_script(bc_name: str) -> str:
     completed = FABRO_WATCH_COMPLETED_FILE
     telemetry = FABRO_WATCH_TELEMETRY_FILE
     interval = FABRO_WATCH_TELEMETRY_INTERVAL_SECS
+    heartbeat_interval = FABRO_WATCH_HEARTBEAT_INTERVAL_SECS
+    heartbeat_bound = FABRO_WATCH_HEARTBEAT_BOUND_SECS
     q_state = shlex.quote(state_dir)
     q_sock = shlex.quote(sock)
     q_store = shlex.quote(store)
@@ -230,6 +232,27 @@ sample_telemetry() {{
 }}
 sample_telemetry
 ( while kill -0 "$FABRO_SERVER_PID" 2>/dev/null; do sample_telemetry; sleep {interval}; done ) &
+# Presence heartbeat (lead-8hpz / scenario a5ce1af45ade7444 / ADR-050 D3;
+# ADDITIVE, extends structural liveness pin e94a01b26ed6a4cc).  The always-
+# resident `shop-msg watch --bc "$BC_NAME"` reader BELOW wakes ONLY on a real
+# NOTIFY (never per poll tick), so it advances NO bc_presence heartbeat while the
+# BC is idle-but-live (zero resident finite runs, no message in flight) — exactly
+# the lead-8hpz regression: last_seen_at ages past the bc-status staleness window
+# (operator-confirmed ~2525s) and the BC reports OFFLINE + the container
+# healthcheck reports UNHEALTHY though it is functionally healthy.  FIX: a
+# MESSAGE-INDEPENDENT cadence UPSERT — NOT per-poll-tick, NOT only-when-work-in-
+# flight (the superseded "heartbeat each 5s poll" direction is SUPERSEDED) —
+# mirroring the telemetry sampler cadence and bounded strictly below the staleness
+# window.  Each `heartbeat` runs a BOUNDED `shop-msg watch` whose FIRST action is
+# a bc_presence UPSERT keyed on the SAME canonical presence name bc-status queries
+# (so the heartbeat cannot mis-key — lead-bppa), then exits; stdout is discarded
+# so it never dispatches (the foreground reader + drain own dispatch).  The loop
+# is gated ONLY on the shared server's liveness, so an idle-but-live BC keeps
+# UPSERTing and stays ONLINE + healthy.
+heartbeat() {{
+  timeout {heartbeat_bound} shop-msg watch --bc "$BC_NAME" >/dev/null 2>>{run_log} || true
+}}
+( heartbeat; while kill -0 "$FABRO_SERVER_PID" 2>/dev/null; do sleep {heartbeat_interval}; heartbeat; done ) &
 # Materialize the finite child config — BYTE-IDENTICAL to the reference's
 # materialize_child: UNCHANGED ADR-051 workflow.fabro graph, provider=local,
 # WORK_ID/BC_NAME delivered to the native script= nodes via [run.environment.env]
