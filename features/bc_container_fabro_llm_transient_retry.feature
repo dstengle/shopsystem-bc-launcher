@@ -52,3 +52,12 @@ Feature: the fabro LLM/ACP node retries-and-survives a transient 429 burst (lead
     And the growing backoff delay is CAPPED at a maximum per-attempt ceiling, so the interval increases but does not grow unboundedly
     And the retry count is BOUNDED — the node attempts a finite number of times, not indefinitely — and the cumulative wait across all retries is BOUNDED by a total retry-budget ceiling, so the node cannot hang the run forever waiting on a persistently-unavailable provider
     And because the retries are spaced by increasing backoff rather than fired immediately, the client does not itself amplify the rate-limit into a self-inflicted retry-storm against the shared account
+
+  @scenario_hash:acd8d90bd9d4e4df @bc:shopsystem-bc-launcher
+  Scenario: the fabro LLM path's transient-error resilience matches the tmux claude agent's — a transient rate-limit a tmux run survives, a fabro run also survives, and the operator sees the same completion outcome regardless of runtime
+    Given a tmux-engaged claude BC processing substantive work hits the same transient 429 rate-limit burst and, via Claude Code's long robust 429 backoff, survives it and drives the work to a real gated completion
+    And a fabro-engaged BC processing that same substantive work hits the same transient 429 rate-limit burst on its LLM/ACP node
+    When each runtime processes the same substantive work across the same transient rate-limit burst that resolves within a survivable window
+    Then the fabro run SURVIVES the transient burst exactly as the tmux run does — it retries with bounded exponential backoff and completes to a real gated work_done — rather than blocking opaquely on the first 429 as the pre-fix fabro run did (lead-6ev8)
+    And the operator sees the SAME completion outcome from either runtime for the same survivable transient burst — the work_id reconciles to a real gated result on both — so a transient rate-limit does not decide whether the work gets done based on which runtime ran it
+    And this closes the lead-01jw.3 facet-2 gap where tmux completed lead-ew86 (a substantive request_bugfix) while fabro blocked on the identical class of transient 429, because the two runtimes now share the same transient-error resilience posture
