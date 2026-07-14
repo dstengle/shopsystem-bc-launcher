@@ -55,3 +55,12 @@ Feature: a launch-time --llm-provider / BCLAUNCHER_LLM_PROVIDER override selects
     When bc-container launch runs the container's fabro workflow for BC name "shopsystem-messaging" with the OpenRouter provider override
     Then the fabro run command line supplies three "-I" inputs — MODEL_CODING, MODEL_REVIEW, and MODEL_DEFAULT — each set to the literal model ID recorded in the mapping table's OpenRouter row for that node-class
     And when the same launch is run with no provider override, the same three inputs instead carry the literal model IDs recorded in the mapping table's Anthropic row
+
+  @scenario_hash:c99e79ac24f56f5c @bc:shopsystem-bc-launcher
+  Scenario: a real dispatch completes end-to-end on a BC launched with the OpenRouter override, with no software release required
+    Given the shopsystem-bc-launcher BC is installed
+    And an agent-vault broker with a registered OpenRouter credential service is running on the shopsystem network and is reachable
+    And the operator supplies a launch-time LLM provider override of "openrouter"
+    When bc-container launch is run for a BC with the OpenRouter provider override and a substantive assign_scenarios dispatch is delivered to it
+    Then the dispatched work reaches a gated work_done, having executed through at least one non-trivial node-class, such as ".coding", whose model resolved to a literal OpenRouter model ID
+    And no software release, BC-base image rebuild, or template re-pour was required to reach this outcome — only the launch-time provider override and a container relaunch
