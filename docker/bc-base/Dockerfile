@@ -41,7 +41,7 @@ ARG SHOP_TEMPLATES_VERSION=v0.52.3
 # ${{ github.ref_name }}). The default below records a known-good value for a
 # plain (non-CI) build; the workflow overrides it with the pushed tag. Promoted
 # to a persisted ENV below so it surfaces in `docker inspect` (lead-5xnd).
-ARG SHOPSYSTEM_BC_LAUNCHER_VERSION=v0.3.69
+ARG SHOPSYSTEM_BC_LAUNCHER_VERSION=v0.3.70
 
 # Promote both version ARGs to PERSISTED ENV so the published image (and any
 # container started from it) surfaces the baked bc-launcher release version and
