@@ -409,22 +409,25 @@ def openrouter_mitm_substitutes_bearer_on_wire(header, ctx):
     from bc_launcher.fabro.constants import (
         FABRO_OPENROUTER_ADAPTER,
         FABRO_OPENROUTER_BASE_URL,
+        FABRO_OPENROUTER_PROVIDER_IDENTITY,
     )
 
     script = _engage_script(ctx)
 
     # The launcher wiring that MAKES the on-the-wire substitution possible: the
-    # openrouter provider is REGISTERED at the server pointing at OpenRouter's
-    # REAL API — the OpenAI-compatible endpoint that authenticates via
-    # `Authorization: Bearer <key>`.  So the finite run's LLM request is sent
-    # with the placeholder Bearer token and forwarded through HTTPS_PROXY, where
-    # the agent-vault broker's MITM proxy substitutes the REAL OpenRouter key
-    # onto the `Authorization: Bearer` header on the wire (mirrors GITHUB_TOKEN;
-    # NOT the anthropic-oauth-shim header-reshaping path).
-    assert "[llm.providers.openrouter]" in script, (
-        "the openrouter provider must be REGISTERED at the server "
-        "([llm.providers.openrouter]) so the finite run's request rides "
-        f"HTTPS_PROXY to the broker for wire substitution; script:\n{script}"
+    # override is REGISTERED at the server under fabro's NATIVE "openai" provider
+    # identity (lead-83mh8 correction — NOT a custom [llm.providers.openrouter]
+    # provider) pointing at OpenRouter's REAL API — the OpenAI-compatible endpoint
+    # that authenticates via `Authorization: Bearer <key>`.  So the finite run's
+    # LLM request is sent with the placeholder Bearer token and forwarded through
+    # HTTPS_PROXY, where the agent-vault broker's MITM proxy substitutes the REAL
+    # OpenRouter key onto the `Authorization: Bearer` header on the wire (mirrors
+    # GITHUB_TOKEN; NOT the anthropic-oauth-shim header-reshaping path).
+    assert f"[llm.providers.{FABRO_OPENROUTER_PROVIDER_IDENTITY}]" in script, (
+        "the openrouter override must be REGISTERED at the server under the "
+        f"native '[llm.providers.{FABRO_OPENROUTER_PROVIDER_IDENTITY}]' identity "
+        "so the finite run's request rides HTTPS_PROXY to the broker for wire "
+        f"substitution; script:\n{script}"
     )
     assert FABRO_OPENROUTER_BASE_URL in script, (
         "the registered openrouter provider must point at OpenRouter's REAL API "
@@ -1055,9 +1058,29 @@ def no_release_rebuild_or_repour_required(ctx, tmp_path, monkeypatch):
     assert "BCLAUNCHER_LLM_PROVIDER=openrouter" in or_script, (
         "the openrouter override must be realized as a launch-time env export"
     )
-    assert "[llm.providers.openrouter]" in or_script and (
-        "[llm.providers.openrouter]" not in an_script
-    ), "the openrouter provider block must be registered at launch time only"
+    # lead-83mh8 correction: the override registers under fabro's NATIVE "openai"
+    # provider identity (base_url overridden to OpenRouter) at launch time only —
+    # NOT a custom [llm.providers.openrouter] provider; the anthropic default path
+    # registers no such openai-with-openrouter-base_url block.
+    from bc_launcher.fabro.constants import (
+        FABRO_OPENROUTER_BASE_URL,
+        FABRO_OPENROUTER_PROVIDER_IDENTITY,
+    )
+
+    _or_block = f"[llm.providers.{FABRO_OPENROUTER_PROVIDER_IDENTITY}]"
+    assert (
+        _or_block in or_script and FABRO_OPENROUTER_BASE_URL in or_script
+    ), (
+        "the openrouter override must register the native "
+        f"{_or_block} block with base_url {FABRO_OPENROUTER_BASE_URL!r} at "
+        "launch time"
+    )
+    assert FABRO_OPENROUTER_BASE_URL not in an_script and (
+        "[llm.providers.openrouter]" not in or_script
+    ), (
+        "the anthropic default path must NOT register the OpenRouter endpoint, "
+        "and no custom [llm.providers.openrouter] provider may be registered"
+    )
     # ... BUT the difference is confined to launch-time exports + `-I` inputs:
     # with those launch-time lines normalized away, the two engages are identical
     # — proving NOTHING baked/poured changed between the two provider launches

@@ -198,9 +198,27 @@ FABRO_ANTHROPIC_ADAPTER = "anthropic"
 #     broker's MITM proxy substitutes the REAL OpenRouter key onto the outbound
 #     `Authorization: Bearer` header ON THE WIRE (mirrors GITHUB_TOKEN; ADR-026
 #     / ADR-049 D1 — no real credential literal, the broker rides the wire).
+#
+# PROVIDER-IDENTITY CORRECTION (lead-83mh8, supersedes lead-ifye3.2): the
+# override is registered under fabro's NATIVE "openai" provider identity
+# ([llm.providers.openai]) with base_url OVERRIDDEN to the OpenRouter endpoint —
+# NOT a new CUSTOM [llm.providers.openrouter] fabro provider.  A real end-to-end
+# scout proved the custom-openrouter shape never completes a dispatch: fabro's
+# catalog auto-routing resolves "anthropic/..."-prefixed OpenRouter model strings
+# (e.g. anthropic/claude-sonnet-4.5) to the BUILT-IN "anthropic" provider BEFORE
+# the custom "openrouter" provider is ever considered, so the run aborts
+# "Provider 'anthropic' not registered".  Registering under the native "openai"
+# identity makes the OpenRouter-catalog slugs resolve unambiguously to a
+# registered provider whose base_url points at OpenRouter.
 FABRO_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
 FABRO_OPENROUTER_ADAPTER = "openai"
+
+# The fabro NATIVE provider identity the openrouter override registers under: the
+# built-in "openai" provider (with base_url overridden to the OpenRouter
+# endpoint), NOT a custom provider named after the "openrouter" model catalog
+# (lead-83mh8).  Named so the engage block-name and the test bind to one source.
+FABRO_OPENROUTER_PROVIDER_IDENTITY = "openai"
 
 # The container env var the fabro openrouter provider reads for its Bearer key.
 OPENROUTER_API_KEY_ENV = "OPENROUTER_API_KEY"
