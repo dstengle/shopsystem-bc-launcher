@@ -49,6 +49,7 @@ scenario (tests/steps/llm_provider.py).
 from __future__ import annotations
 
 import ast
+import importlib.machinery
 import importlib.util
 import re
 import subprocess
@@ -97,9 +98,12 @@ def _load_openrouter_shim_module():
         "the committed openrouter-shim asset does not exist yet (bc-base "
         "Dockerfile must COPY docker/bc-base/openrouter-shim onto PATH)"
     )
-    spec = importlib.util.spec_from_file_location("openrouter_shim_under_test", shim)
+    # The committed shim is an extensionless script, so spec_from_file_location
+    # cannot infer a loader — supply a SourceFileLoader explicitly.
+    loader = importlib.machinery.SourceFileLoader("openrouter_shim_under_test", str(shim))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
     mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
+    loader.exec_module(mod)
     return mod
 
 

@@ -1595,6 +1595,7 @@ def request_reaches_shim_over_loopback(ctx):
       'incoming request path, unchanged, with no header reshaping — unlike the '
       '"anthropic-oauth-shim", which does reshape headers')
 def shim_forwards_to_openrouter_api_unchanged(ctx):
+    import importlib.machinery
     import importlib.util
 
     shim = _committed_openrouter_shim()
@@ -1602,10 +1603,12 @@ def shim_forwards_to_openrouter_api_unchanged(ctx):
 
     # The DEFAULT upstream is OpenRouter's REAL API host WITH the load-bearing
     # '/api' suffix (bare 'https://openrouter.ai' hits the website 404, not the
-    # API).  Read from the REAL committed shim module.
-    spec = importlib.util.spec_from_file_location("_or_shim_fwd", shim)
+    # API).  Read from the REAL committed shim module (extensionless script, so a
+    # SourceFileLoader is supplied explicitly).
+    loader = importlib.machinery.SourceFileLoader("_or_shim_fwd", str(shim))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
     mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
+    loader.exec_module(mod)
     assert getattr(mod, "UPSTREAM", None) == "https://openrouter.ai/api", (
         "the openrouter-shim's default UPSTREAM must be "
         "'https://openrouter.ai/api' (the '/api' suffix is REQUIRED); got "
