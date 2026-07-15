@@ -1382,14 +1382,28 @@ def dispatcher_passes_registered_provider_identity(
     run_flag, registered, active, ctx, tmp_path
 ):
     # PRECONDITION (already-satisfied, OUT-OF-SCOPE for THIS dispatch — this BC's own
-    # engage.py call site, dispatched separately as lead-ifye3.10).  Pins the
-    # EXISTENCE of the precondition only; the call-site edit itself belongs to
-    # lead-ifye3.10, whose fix is complete but deliberately not on main pending the
-    # lead's decision on amending a3b2b6bebcee78f5.
+    # engage.py call site, fixed separately by lead-ifye3.13/Defect B, now landed).
+    # Pins the EXISTENCE of the precondition only; the call-site edit itself belonged
+    # to that dispatch.
     #
-    # Bound to the REAL launcher's ACTUAL recorded engage exec (driven over the
-    # FakeDockerDriver by the earlier Givens), never a string match on source.
+    # SELF-CONTAINED, exactly as the scenario's own text requires: this precondition
+    # is pinned "satisfied once, prior to and INDEPENDENT of this launch", and this
+    # is the capstone's 6th GIVEN — every Given runs BEFORE the "When bc-container
+    # launch is run" step.  The previous body read the recorded engage out of
+    # ctx["cadr_driver"], which ONLY an actual launch populates
+    # (tests/support/container.py, _odd9_drive_fabro_launch), so it raised
+    # KeyError: 'cadr_driver' every time it was reached — masked only by Given A
+    # skipping first (Defect C, work_id lead-ifye3.14).
+    #
+    # Fidelity is UNCHANGED by going self-contained: `_fabro_engage_script` is the
+    # REAL call-site construction — controller/_engage.py:147 execs
+    # ["/bin/sh", "-c", _fabro_engage_script(bc_name, provider=provider)], so this
+    # reads the IDENTICAL script bytes the launch would record, from the same
+    # function, minus the launch.  Still never a string match on source, never a
+    # model.  This matches sibling Given A's shape, which binds directly to its own
+    # real artifact (the poured workflow.fabro) with no launch dependency.
     from bc_launcher.fabro.constants import FABRO_OPENROUTER_PROVIDER_IDENTITY
+    from bc_launcher.fabro.engage import _fabro_engage_script
 
     assert run_flag == "fabro run --provider", run_flag
     assert registered == "openai", registered
@@ -1401,19 +1415,26 @@ def dispatcher_passes_registered_provider_identity(
         f"{registered!r}; got {FABRO_OPENROUTER_PROVIDER_IDENTITY!r}"
     )
 
-    script = ctx.get("b5_engage_script") or _engage_script(ctx)
+    # Construct the dispatcher's per-child `fabro run` command line the way the
+    # launcher's OWN launch path constructs it — with the ACTIVE provider override
+    # ("openrouter") in effect, which is what this capstone launches under — and
+    # read the `--provider` flag off that ACTUAL construction.  No launch required,
+    # so this Given is honest at the position the scenario actually places it.
+    script = _fabro_engage_script("shopsystem-messaging", provider=active)
     _, provider = _model_provider_flags(script)
     if provider != registered:
         # Same honest-SKIP rationale as the shop-templates pour Given above: the
-        # precondition is genuinely unsatisfied and its fix is another dispatch's.
+        # precondition would be genuinely unsatisfied.  Defect B has LANDED
+        # (lead-ifye3.13), so this branch is now defensive — a regression of the
+        # REGISTERED-identity construction fails its own pin (bb4f75cea78091c0)
+        # rather than being attributed to this capstone.
         pytest.skip(
-            f"PRECONDITION NOT YET SATISFIED (lead-ifye3.10, in flight in this BC): "
-            f"the dispatcher's per-child {run_flag!r} still passes the "
-            f"active-provider NAME {provider!r} rather than the REGISTERED fabro "
-            f"provider identity {registered!r} (engage.py's `--provider "
-            "{shlex.quote(active_provider)}` construction).  The live end-to-end "
-            "proof of this capstone is deliberately not re-attempted until "
-            "lead-ifye3.6 and lead-ifye3.10 both land (honest SKIP, never faked)"
+            f"PRECONDITION NOT SATISFIED: the dispatcher's per-child {run_flag!r} "
+            f"passes the active-provider NAME {provider!r} rather than the "
+            f"REGISTERED fabro provider identity {registered!r} (engage.py's "
+            "`--provider {shlex.quote(fabro_provider_identity)}` construction).  "
+            "The live end-to-end proof of this capstone is not attempted while a "
+            "named precondition is unsatisfied (honest SKIP, never faked)"
         )
     ctx["b6_provider_identity_precondition_satisfied"] = True
 
