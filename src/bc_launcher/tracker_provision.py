@@ -16,6 +16,15 @@ from bc_launcher.constants import CONTAINER_WORKSPACE
 BEADS_REMOTE_ORG = "dstengle"
 
 
+# lead-wpnv3 / shopsystem_bc_launcher-1ttf — the banner the schema-skew heal
+# aborts under when it cannot PROVE the from-jsonl rebuild is lossless.  A
+# named constant so the heal script and its ordering pins agree on one string.
+PRE_HEAL_SUBSET_ABORT_BANNER = (
+    "schema-skew heal: ABORTED — committed .beads/issues.jsonl would SILENTLY "
+    "DROP issues present in the pre-heal export"
+)
+
+
 
 def _beads_dolt_remote_url(bc_name: str) -> str:
     """The `git+https://` Dolt remote URL for a BC's `<bc>-beads` registry.
@@ -98,6 +107,52 @@ def _is_schema_skew_migration_refusal(message: str) -> bool:
 
 
 
+# lead-wpnv3 / shopsystem_bc_launcher-1ttf — PRE-HEAL-EXPORT-AHEAD GUARD.
+#
+# stdlib-only python3 (the bc-base image is FROM devcontainers/python:3.11, so
+# python3 is guaranteed; `jq` is NOT installed there).  Reads two beads jsonl
+# files and proves the rebuild is LOSSLESS before the heal destroys anything.
+#
+# Keyed off `_type == "issue"`: a real `.beads/issues.jsonl` / `bd export --all`
+# capture ALSO carries `_type:"memory"` records, which have no `id` at all — so
+# the ID set must be filtered, not assumed.
+#
+# NOTE ON QUOTING: this source is embedded in a SINGLE-quoted shell string, so
+# it must contain NO single quotes.  Double quotes and chr(10) only.
+_PRE_HEAL_SUBSET_GUARD_PY = (
+    "import json,sys" "\n"
+    "def ids(p):" "\n"
+    "    s=set()" "\n"
+    "    with open(p) as f:" "\n"
+    "        for ln in f:" "\n"
+    "            ln=ln.strip()" "\n"
+    "            if not ln: continue" "\n"
+    "            r=json.loads(ln)" "\n"
+    "            if r.get(\"_type\")==\"issue\" and r.get(\"id\"):" "\n"
+    "                s.add(r[\"id\"])" "\n"
+    "    return s" "\n"
+    "exported=ids(sys.argv[1])" "\n"
+    "committed=ids(sys.argv[2])" "\n"
+    "dropped=sorted(exported-committed)" "\n"
+    "if dropped:" "\n"
+    "    w=sys.stderr.write" "\n"
+    "    w(\"" + PRE_HEAL_SUBSET_ABORT_BANNER + "\"+chr(10))" "\n"
+    "    w(str(len(dropped))+\" issue(s) captured by the pre-heal export are "
+    "ABSENT from the committed .beads/issues.jsonl:\"+chr(10))" "\n"
+    "    w(chr(10).join(dropped)+chr(10))" "\n"
+    "    w(\"Rebuilding from the committed jsonl would DESTROY these issues, "
+    "and the history-replacing reseed force-push would then propagate the loss "
+    "to the beads remote. The live database has been LEFT INTACT: no destroy, "
+    "no rebuild, no push. This is ordinary commit lag, not corruption -- the "
+    "working set is simply ahead of the last-committed issues.jsonl. Reconcile "
+    "manually per docs/runbooks/beads-schema-skew-recovery.md (establish which "
+    "side is authoritative BY EVIDENCE, then bd import the pre-heal export with "
+    "upsert semantics), commit the reconciled issues.jsonl, and re-run the "
+    "heal.\"+chr(10))" "\n"
+    "    sys.exit(1)" "\n"
+)
+
+
 def _schema_skew_heal_script(beads_remote_url: str, shop_type: str) -> str:
     """Shell to HEAL a remote-backed beads schema-skew wall (lead-915f).
 
@@ -120,6 +175,9 @@ def _schema_skew_heal_script(beads_remote_url: str, shop_type: str) -> str:
          backup path BEFORE any destructive step.  If the old DB is unreadable
          the export fails; proceed anyway from the committed issues.jsonl (the
          export is only a forensic net, never the rebuild's source of truth).
+      2a. SUBSET GUARD (lead-wpnv3 / shopsystem_bc_launcher-1ttf) — PROVE the
+         rebuild is LOSSLESS before destroying anything.  See the extended note
+         below.
       3. DESTROY — remove the broken remote-backed embedded-Dolt working set.
       4. REBUILD — `bd init --from-jsonl .beads/issues.jsonl` create-freshes a
          DB at the baked bd's CURRENT schema; the committed issues.jsonl is the
@@ -132,6 +190,61 @@ def _schema_skew_heal_script(beads_remote_url: str, shop_type: str) -> str:
          the MITM SSL / non-interactive-credential gap and fails, leaving the
          remote behind — NON-FATAL: the BC is online locally and a subsequent
          launch re-heals.
+
+    STEP 2a — THE SUBSET GUARD (lead-wpnv3 / shopsystem_bc_launcher-1ttf).
+
+    ADDITIVE to @scenario_hash:fbf7480ef25f766c; it contradicts nothing.  That
+    scenario pins the committed issues.jsonl as the rebuild's source of truth,
+    and its negative row covers pre-heal-export-UNREADABLE.  Neither row covers
+    the case this BC hit while dogfooding the heal on its OWN wedged tracker:
+    the pre-heal export READABLE AND CORRECT BUT AHEAD of the committed jsonl.
+    Live DB 356 issues, committed jsonl 330, and the heal dutifully rebuilt from
+    the 330 — silently destroying 26 issues (two complete epics) and chasing it
+    with a history-replacing force-push.  This is ORDINARY COMMIT LAG, not an
+    edge case: every BC whose working set is ahead of its last-committed
+    issues.jsonl is exposed, fleet-wide.
+
+    The invariant that makes step 4's "rebuild from the committed jsonl" SAFE is
+    exactly `exported_ids ⊆ committed_ids`.  When it holds, the committed jsonl
+    is a superset and the rebuild loses no issue — so fbf7480ef25f766c's pinned
+    behavior is preserved UNCHANGED.  When it does NOT hold, that same step is a
+    silent deletion.  So the heal now PROVES the invariant before destroying
+    anything, and REFUSES when it cannot.
+
+    WHY ABORT (option b) RATHER THAN AUTO-REBUILD FROM THE EXPORT (option a):
+
+      * Option (a) is NOT symmetric-safe.  It fixes `exported - committed` but
+        silently drops `committed - exported` — issues the committed jsonl
+        carries that the live DB never had (a fresh `git pull` of issues.jsonl
+        into a wedged DB that never imported them is exactly how that arises).
+        Trading one silent data loss for the opposite one is not a fix.
+      * The UNION would be ID-lossless but demands a CONTENT conflict policy for
+        ids on both sides with divergent bodies.  The manual recovery that
+        worked (commit 64bb2f1) resolved that with `bd import` upsert semantics
+        ONLY AFTER a human proved the pre-heal side was newer-or-equal
+        everywhere; `bd import` upsert REVERTS shared issues when its source is
+        older than the target.  That is a judgement call on evidence, not a
+        rule a script can safely apply unattended.
+      * docs/runbooks/beads-schema-skew-recovery.md — written by this BC from
+        this very incident — states the rule directly: "Establish which side is
+        authoritative by evidence.  Do NOT infer it from which side looks
+        newer."  Hardcoding "the export always wins" IS that forbidden
+        inference, just automated.
+      * The blast radius is asymmetric.  This heal DESTROYS the local DB and
+        then FORCE-PUSHES, so a wrong guess is near-unrecoverable, while a
+        wrong abort costs one manual runbook run.
+      * An abort is NOT a strand.  `_provision_beads_tracker` treats a non-zero
+        heal as warn-and-continue and still starts the agent (lead-5k8c), and
+        because the abort precedes step 3 the live DB is still INTACT — every
+        at-risk issue survives for reconciliation.
+      * PRECEDENT: step 1 already REFUSES (non-zero) for a lead-role beads when
+        a safety precondition cannot be established.  Refusing on an unprovable
+        precondition is this script's existing idiom, not a new one.
+
+    So: subset provable → rebuild (unchanged).  Export failed → rebuild
+    (unchanged, no knowledge of the live DB to contradict it).  Subset
+    DISPROVED → abort non-zero, naming the specific at-risk ids.  Fail-closed:
+    if the guard cannot parse the capture it aborts rather than guessing.
     """
     # Strip the `git+` transport prefix so raw git accepts the URL; the dolt
     # remote itself keeps the original `git+https://` scheme.
@@ -150,9 +263,26 @@ def _schema_skew_heal_script(beads_remote_url: str, shop_type: str) -> str:
         "NOT the lead (it would discard non-reconstructable Dolt history); "
         "directing a manual migrate on the lead host instead' >&2; exit 1; fi; "
         # (2) PRE-HEAL EXPORT (safety net) BEFORE any destructive step.
-        "bd export --all > .beads/pre-heal-export.jsonl 2>/dev/null || "
+        #     Track whether it SUCCEEDED: a failed export leaves a truncated
+        #     file behind (the redirect already created it), so the exit status
+        #     — not the file's existence or emptiness — is what distinguishes
+        #     "the old DB is unreadable" from "the old DB is genuinely empty".
+        #     The (2a) guard must not read a truncated capture as an empty ID
+        #     set and silently conclude the subset invariant holds.
+        "if bd export --all > .beads/pre-heal-export.jsonl 2>/dev/null; then "
+        "pre_heal_export_ok=1; else pre_heal_export_ok=0; "
         "echo 'schema-skew heal: pre-heal export failed (old DB unreadable); "
         "proceeding from the committed .beads/issues.jsonl source of truth' >&2; "
+        "fi; "
+        # (2a) SUBSET GUARD (lead-wpnv3) — PROVE the from-jsonl rebuild is
+        #      LOSSLESS before any destructive step.  Runs ONLY when the export
+        #      SUCCEEDED: a failed export yields no knowledge of the live DB, so
+        #      fbf7480ef25f766c's negative row (proceed from the jsonl) stands
+        #      unchanged.  On a disproved subset this exits non-zero BEFORE (3),
+        #      leaving the live DB — and every at-risk issue — intact.
+        "if [ \"$pre_heal_export_ok\" = 1 ]; then "
+        f"python3 -c '{_PRE_HEAL_SUBSET_GUARD_PY}' "
+        ".beads/pre-heal-export.jsonl .beads/issues.jsonl || exit 1; fi; "
         # (3) DESTROY the broken remote-backed embedded-Dolt working set.
         "rm -rf .beads/embeddeddolt; "
         # (3a) STRIP sync.remote from .beads/config.yaml BEFORE the reinit so the
