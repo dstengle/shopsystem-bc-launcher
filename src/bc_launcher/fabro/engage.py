@@ -239,8 +239,11 @@ def _fabro_engage_script(bc_name: str, provider: str | None = None) -> str:
     if active_provider == LLM_PROVIDER_OPENROUTER:
         # OPENROUTER no-shim agent-vault-brokered credential (behavior 3),
         # mirroring the GITHUB_TOKEN no-shim pattern (NOT the anthropic-oauth-
-        # shim header-reshaping pattern): OPENROUTER_API_KEY is the literal
-        # __PLACEHOLDER__ node-side (the finite `fabro run` children inherit it),
+        # shim header-reshaping pattern): fabro's NATIVE OPENAI_API_KEY (lead-83mh8
+        # correction — the retired custom OPENROUTER_API_KEY never reached fabro's
+        # sandboxed-worker startup precondition check, which recognizes only
+        # ANTHROPIC_API_KEY / OPENAI_API_KEY) is the literal __PLACEHOLDER__
+        # node-side (the finite `fabro run` children inherit it),
         # the provider points DIRECTLY at OpenRouter's OpenAI-compatible API
         # (Authorization: Bearer auth, NO local shim), and the agent-vault
         # broker's MITM proxy substitutes the REAL key onto the outbound Bearer
@@ -257,7 +260,7 @@ def _fabro_engage_script(bc_name: str, provider: str | None = None) -> str:
         # OpenRouter-catalog slugs resolve to a registered provider.
         or_placeholder = shlex.quote(AGENT_VAULT_PLACEHOLDER_TOKEN)
         credential_exports = (
-            f"export {OPENROUTER_API_KEY_ENV}={or_placeholder} && "
+            f"export {OPENROUTER_NODE_CREDENTIAL_ENV}={or_placeholder} && "
         )
         provider_block = (
             f"\\n[llm.providers.{FABRO_OPENROUTER_PROVIDER_IDENTITY}]\\n"

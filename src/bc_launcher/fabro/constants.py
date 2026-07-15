@@ -189,10 +189,18 @@ FABRO_ANTHROPIC_ADAPTER = "anthropic"
 #     auth), so NO header-reshaping shim process is launched on this path
 #     (contrast the anthropic path, which starts the anthropic-oauth-shim to
 #     strip x-api-key and add the Bearer/oauth-beta headers).
-#   * The node-side OPENROUTER_API_KEY is the literal AGENT_VAULT_PLACEHOLDER
-#     token (__PLACEHOLDER__), exported into the engage env so the finite `fabro
+#   * The node-side credential env is fabro's NATIVE OPENAI_API_KEY (lead-83mh8
+#     correction), set to the literal AGENT_VAULT_PLACEHOLDER token
+#     (__PLACEHOLDER__) and exported into the engage env so the finite `fabro
 #     run` children (provider=local, inheriting the engage env) carry it.  The
-#     real key is NEVER in the container fs/env.
+#     real key is NEVER in the container fs/env.  The RETIRED custom
+#     OPENROUTER_API_KEY node-side env never worked: fabro's startup precondition
+#     check (run in the sandboxed worker) only recognizes ANTHROPIC_API_KEY /
+#     OPENAI_API_KEY, so a custom OPENROUTER_API_KEY never reached that check and
+#     the native openai provider never saw its key.  The agent-vault broker-side
+#     vault-lookup key STAYS OPENROUTER_API_KEY and is DECOUPLED from this
+#     node-side env var name — the MITM substitution matches by DESTINATION HOST
+#     (openrouter.ai), not by env var name, so the two need not match.
 #   * The finite run's LLM request goes out with that placeholder Bearer token
 #     and is forwarded through the container HTTPS_PROXY, where the agent-vault
 #     broker's MITM proxy substitutes the REAL OpenRouter key onto the outbound
@@ -220,8 +228,14 @@ FABRO_OPENROUTER_ADAPTER = "openai"
 # (lead-83mh8).  Named so the engage block-name and the test bind to one source.
 FABRO_OPENROUTER_PROVIDER_IDENTITY = "openai"
 
-# The container env var the fabro openrouter provider reads for its Bearer key.
-OPENROUTER_API_KEY_ENV = "OPENROUTER_API_KEY"
+# The node-side container env var the fabro openrouter override credential rides
+# for its Bearer key: fabro's NATIVE OPENAI_API_KEY (lead-83mh8 correction — what
+# the native openai provider reads AND what fabro's sandboxed-worker startup
+# precondition check recognizes). NOT the retired custom OPENROUTER_API_KEY,
+# which never reached that precondition check. DECOUPLED from the agent-vault
+# broker-side OPENROUTER_API_KEY vault-lookup key (the MITM substitution matches
+# by destination host openrouter.ai, not by env var name — they need not match).
+OPENROUTER_NODE_CREDENTIAL_ENV = "OPENAI_API_KEY"
 
 
 # Fabro orchestrator ENGAGE step (lead-cadr — S4).  On the fabro launch path,
