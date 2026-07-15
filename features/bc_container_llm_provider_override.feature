@@ -179,6 +179,36 @@ Feature: a launch-time --llm-provider / BCLAUNCHER_LLM_PROVIDER override selects
   #     the Architect initiates that retry once lead-ifye3.6 and lead-ifye3.10 both
   #     report work_done.
   #     work_id lead-ifye3.12.
+  #
+  # RETIRED-SCENARIO PROVENANCE (work_id lead-ifye3.13):
+  #   a3b2b6bebcee78f5  superseded-by  bb4f75cea78091c0
+  #   reason: the retired scenario's Then-clause pinned the BROKEN value verbatim —
+  #     'the child "fabro run" command line carries "--model <literal-model-id>
+  #     --provider openrouter", sourced from the mapping table for the active
+  #     provider'.  That clause pinned the operator-facing ACTIVE-provider NAME
+  #     ("openrouter") onto the "--provider" flag, which fabro resolves by LITERAL
+  #     provider lookup.  It therefore contradicted the live af07c326a031fafe, which
+  #     pins verbatim that "no new custom \"openrouter\" fabro provider is
+  #     registered" — so "--provider openrouter" named a provider that, by that same
+  #     live pin, cannot exist.  No reading satisfied both.  a28018af66182e33 closes
+  #     the only escape hatch (registering a second "openrouter" entry breaks fabro's
+  #     startup precondition gate).  Confirmed against reality by lead-lp4us's live
+  #     verification: the config that drove 11 real HTTP-200 OpenRouter completions
+  #     carries "--provider openai", not "--provider openrouter".
+  #     The successor (bb4f75cea78091c0) keeps the acceptance bar and the behavioral
+  #     shape UNCHANGED — run-wide "--model"/"--provider" flags replacing the retired
+  #     per-node-class "-I MODEL_*" inputs — and corrects ONLY the provider VALUE and
+  #     its sourcing: it names fabro's REGISTERED native identity ("openai", the
+  #     "[llm.providers.openai]" entry the override registers) and disentangles
+  #     model-sourcing from provider-sourcing, since "sourced from the mapping table"
+  #     correctly describes the MODEL only — the provider is sourced from the
+  #     registered identity, never from the mapping table.
+  #     The defect this retirement unblocks (this BC's dispatcher passing the active
+  #     provider NAME to "fabro run --provider" instead of the REGISTERED identity)
+  #     was fixed under lead-ifye3.10 and lands in this same commit range; the
+  #     successor's wording is the BC's own proposal, ratified verbatim by the PO in
+  #     brief-021 §14.
+  #     work_id lead-ifye3.13.
 
   @scenario_hash:1d9d3777e3c3d8f5 @bc:shopsystem-bc-launcher
   Scenario: a plain launch with no operator-supplied provider override keeps the Anthropic-subscription path as the active LLM provider
@@ -225,13 +255,13 @@ Feature: a launch-time --llm-provider / BCLAUNCHER_LLM_PROVIDER override selects
     And the "openrouter-shim" process's own environment (not the sandboxed node's) carries the real "HTTPS_PROXY", through which the agent-vault broker's MITM proxy substitutes the real OpenRouter API key onto that same "Authorization: Bearer" header only on the shim's outbound wire hop, scoped to requests directed at the OpenRouter host
     And the real OpenRouter API key is not present in the sandboxed node's filesystem or process environment at any point, including via "[run.environment.env]" overlays, because fabro's sandboxed execution path clears and filters credential-shaped environment variables before spawning
 
-  @scenario_hash:a3b2b6bebcee78f5 @bc:shopsystem-bc-launcher
+  @scenario_hash:bb4f75cea78091c0 @bc:shopsystem-bc-launcher
   Scenario: the dispatcher's per-child "fabro run" command line carries run-wide "--model"/"--provider" flags, replacing the retired per-node-class "-I MODEL_CODING"/"MODEL_REVIEW"/"MODEL_DEFAULT" inputs
     Given the shopsystem-bc-launcher BC is installed
     And the operator supplies a launch-time LLM provider override of "openrouter"
     And the fleet-wide provider-keyed model mapping table names a literal model ID for the active provider
     When bc-container launch's dispatcher spawns a child "fabro run" for BC name "shopsystem-messaging" with the OpenRouter provider override
-    Then the child "fabro run" command line carries "--model <literal-model-id> --provider openrouter", sourced from the mapping table for the active provider
+    Then the child "fabro run" command line carries "--model <literal-model-id> --provider openai", the model sourced from the mapping table for the active provider and the provider naming fabro's REGISTERED native identity — the "[llm.providers.openai]" entry the override registers — never the operator-facing "openrouter" provider name, which fabro's literal provider lookup cannot resolve
     And the command line carries no "-I MODEL_CODING=", "-I MODEL_REVIEW=", or "-I MODEL_DEFAULT=" input for this launch
     And every node in the workflow, regardless of its ".coding"/".review"/"*" node-class, resolves to that same single run-wide model — per-node-class model differentiation is not supplied by this launch
 
