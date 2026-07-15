@@ -16,6 +16,7 @@ container/remote required (docker is unavailable in this env).
 from __future__ import annotations
 
 import subprocess
+from pathlib import Path
 
 import pytest
 from pytest_bdd import given, parsers, then, when
@@ -57,7 +58,11 @@ def _bd_stub(probe: str) -> str:
     - ``bd export --all`` : records whether the OLD ``.beads/embeddeddolt`` is
                             still present AT EXPORT TIME (the ordering probe);
                             fails non-zero iff ``.beads/EXPORT_FAILS`` (old DB
-                            unreadable); otherwise writes a capture to stdout.
+                            unreadable); otherwise writes a capture to stdout —
+                            the ``.beads/LIVE_EXPORT.jsonl`` fixture when
+                            present (lead-gfqvi, so the export can carry a REAL
+                            issue-ID set for the subset guard), else the
+                            id-less placeholder the other rows rely on.
     - ``bd init --from-jsonl`` : CREATE-FRESH at the current schema — makes the
                             embedded-Dolt set, marks HEALTHY, records the
                             rebuilt issue count (from issues.jsonl) and schema.
@@ -76,6 +81,8 @@ def _bd_stub(probe: str) -> str:
         '    if [ -e .beads/embeddeddolt ]; then printf present > "$PROBE/at_export"; '
         '    else printf absent > "$PROBE/at_export"; fi; '
         '    if [ -f .beads/EXPORT_FAILS ]; then return 1; fi; '
+        '    if [ -f .beads/LIVE_EXPORT.jsonl ]; then '
+        '      cat .beads/LIVE_EXPORT.jsonl; return 0; fi; '
         '    printf "{\\"exported\\": true}\\n"; return 0; '
         '  fi; '
         '  if [ "$1" = "init" ]; then '
@@ -511,3 +518,156 @@ def then_heal_exit(ctx, heal_exit):
         assert rc == 0, f"expected zero exit for a BC, got {rc}"
     else:
         assert rc != 0, f"expected nonzero exit for a lead, got {rc}"
+
+
+# ---------------------------------------------------------------------------
+# lead-gfqvi / @scenario_hash:c1236f6f55c639f8 — the NON-SUBSET ABORT.
+#
+# ADDITIVE to fbf7480ef25f766c, which pins the committed issues.jsonl as the
+# rebuild's SOURCE OF TRUTH and names only the export-UNREADABLE negative case.
+# Neither of its rows covers the case this BC hit dogfooding the heal on its OWN
+# wedged tracker: the pre-heal export READABLE AND CORRECT BUT AHEAD of the
+# committed jsonl.  The invariant that makes the from-jsonl rebuild safe is
+# exactly `exported_ids ⊆ committed_ids`; when it is DISPROVED the same rebuild
+# is a silent deletion, so the shipped guard (lead-wpnv3 / merge 36bc2d2,
+# tracker_provision.py step 2a) ABORTS before any destructive step.
+#
+# These steps drive the LIVE `_schema_skew_heal_script` — real teeth on the
+# shipped guard, not a re-implementation of it.
+# ---------------------------------------------------------------------------
+
+# The real incident shape (shopsystem_bc_launcher-1ttf): the live DB held 356
+# issues, the committed jsonl 330, and the 26-issue difference was two complete
+# epics (1f4n and vipd) that the pre-guard heal silently destroyed.
+_NON_SUBSET_COMMITTED = 330
+_NON_SUBSET_AT_RISK = (
+    [f"bclaunch-1f4n-{i}" for i in range(1, 14)]
+    + [f"bclaunch-vipd-{i}" for i in range(1, 14)]
+)
+
+
+def _write_live_export(beads, issue_ids):
+    """A READABLE `bd export --all` capture carrying a real issue-ID set.
+
+    Includes a `_type:"memory"` record — which has NO `id` at all — exactly as a
+    real export does, so the guard's ID extraction must key off `_type` rather
+    than assume every record is an issue.
+    """
+    lines = ['{"_type":"memory","key":"k1","value":"a memory record has no id"}']
+    lines += [
+        f'{{"_type":"issue","id":"{i}","title":"issue {i}","status":"open",'
+        f'"priority":1}}'
+        for i in issue_ids
+    ]
+    (beads / "LIVE_EXPORT.jsonl").write_text("\n".join(lines) + "\n")
+
+
+@given("the standup's schema-skew heal has taken a full pre-heal export that "
+       "is READABLE")
+def given_readable_pre_heal_export(ctx, tmp_path):
+    _setup_skewed(ctx, tmp_path, count=_NON_SUBSET_COMMITTED)
+    ctx["export_fails"] = False
+    beads = ctx["ws"] / ".beads"
+    # Snapshot the pre-heal live state so the abort can PROVE it left the live
+    # database — and every at-risk issue — intact and unmodified.
+    ctx["pre_old_schema"] = (beads / "embeddeddolt" / "OLD_SCHEMA").read_text()
+    ctx["pre_issues"] = (beads / "issues.jsonl").read_text()
+
+
+@given("the pre-heal export's issue ID set is NOT a subset of the committed "
+       "\".beads/issues.jsonl\"'s issue ID set, so at least one issue present "
+       "in the export is absent from the committed jsonl")
+def given_pre_heal_export_not_a_subset(ctx):
+    beads = ctx["ws"] / ".beads"
+    committed = [f"bclaunch-{i}" for i in range(1, ctx["committed_count"] + 1)]
+    live = committed + _NON_SUBSET_AT_RISK
+    _write_live_export(beads, live)
+    ctx["at_risk_ids"] = _NON_SUBSET_AT_RISK
+    # The precondition the scenario names, asserted rather than assumed.
+    assert set(live) - set(committed) == set(_NON_SUBSET_AT_RISK), (
+        "fixture must make the export a NON-subset of the committed jsonl"
+    )
+
+
+@when("the heal evaluates whether to proceed with the rebuild")
+def when_heal_evaluates_subset_invariant(ctx):
+    _run_heal(ctx)
+
+
+@then("the heal ABORTS before any destructive step, performing NEITHER a "
+      "rebuild from the committed jsonl NOR a rebuild from the pre-heal export")
+def then_aborts_before_any_destructive_step(ctx):
+    assert _probe(ctx, "at_init") is None, (
+        "no from-jsonl rebuild may run once the subset invariant is DISPROVED "
+        "— rebuilding from the committed jsonl silently destroys the issues "
+        "only the live DB carries (lead-gfqvi / lead-wpnv3)"
+    )
+    assert _probe(ctx, "at_push") is None, (
+        "no history-replacing reseed force-push may run once the subset "
+        "invariant is DISPROVED — it would propagate the loss to the remote"
+    )
+    # The abort must precede step (3)'s `rm -rf .beads/embeddeddolt`.
+    assert (ctx["ws"] / ".beads" / "embeddeddolt").exists(), (
+        "the abort must precede the destroy step so the live DB survives for "
+        "manual reconciliation (lead-gfqvi)"
+    )
+
+
+@then("the heal's abort output names the specific at-risk issue ids and their "
+      "count that are present in the pre-heal export but absent from the "
+      "committed jsonl")
+def then_abort_names_at_risk_ids_and_count(ctx):
+    err = ctx["result"].stderr
+    for at_risk in ctx["at_risk_ids"]:
+        assert at_risk in err, (
+            f"the abort must name the specific at-risk issue id {at_risk!r} so "
+            f"the operator can reconcile it (lead-gfqvi); stderr={err!r}"
+        )
+    assert str(len(ctx["at_risk_ids"])) in err, (
+        f"the abort must surface the COUNT of at-risk issues "
+        f"({len(ctx['at_risk_ids'])}); stderr={err!r}"
+    )
+    # Only the AT-RISK ids: an operator reconciling by hand must not be handed
+    # every id when only the difference is at risk.
+    assert "bclaunch-200" not in err, (
+        "an id present in BOTH the export and the committed jsonl is not at "
+        f"risk and must not be named; stderr={err!r}"
+    )
+
+
+@then("the heal's abort output directs the operator to the recovery runbook "
+      "\"docs/runbooks/beads-schema-skew-recovery.md\"")
+def then_abort_directs_to_runbook(ctx):
+    runbook = "docs/runbooks/beads-schema-skew-recovery.md"
+    assert runbook in ctx["result"].stderr, (
+        "a bare non-zero exit is not actionable — the abort must direct the "
+        f"operator to {runbook} (lead-gfqvi); stderr={ctx['result'].stderr!r}"
+    )
+    # A DANGLING pointer is as unactionable as no pointer: the runbook the LIVE
+    # guard names must actually exist in the repo.
+    repo_root = Path(__file__).resolve().parents[2]
+    assert (repo_root / runbook).exists(), (
+        f"the heal directs the operator to {runbook}, which does not exist"
+    )
+
+
+@then("the heal exits nonzero, leaving the live local dolt database and every "
+      "issue intact and unmodified")
+def then_exits_nonzero_leaving_live_db_intact(ctx):
+    result = ctx["result"]
+    assert result.returncode != 0, (
+        "the heal must exit NONZERO when it cannot prove the rebuild lossless, "
+        f"not silently succeed on a lossy rebuild; got {result.returncode} "
+        f"stdout={result.stdout!r}"
+    )
+    beads = ctx["ws"] / ".beads"
+    # INTACT AND UNMODIFIED — content equality, not mere existence.
+    assert (beads / "embeddeddolt" / "OLD_SCHEMA").read_text() == (
+        ctx["pre_old_schema"]
+    ), "the abort must leave the live dolt database byte-for-byte unmodified"
+    assert (beads / "issues.jsonl").read_text() == ctx["pre_issues"], (
+        "the abort must leave the committed issues.jsonl unmodified"
+    )
+    assert not (beads / "HEALTHY").exists(), (
+        "an aborted heal must never mark the DB rebuilt/healthy (lead-gfqvi)"
+    )
