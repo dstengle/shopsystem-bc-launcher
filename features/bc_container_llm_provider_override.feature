@@ -96,6 +96,25 @@ Feature: a launch-time --llm-provider / BCLAUNCHER_LLM_PROVIDER override selects
   #     inputs; the fleet-wide provider-keyed model mapping table (ADR-063) is
   #     UNCHANGED as the lookup structure — only what bc-launcher does with the
   #     resolved value changes.  work_id lead-ifye3.5.
+  #
+  #   c99e79ac24f56f5c  superseded-by  76badc67216f0d91
+  #   reason: the retired end-to-end capstone still asserted the completion through
+  #     the REMOVED model_stylesheet "{{ inputs.MODEL_CODING }}" templating and the
+  #     retired per-node-class "-I MODEL_*" inputs (both gone after a3b2b6bebcee78f5:
+  #     fabro >= v0.267.0 removed model_stylesheet templating outright), so its
+  #     ".coding"-resolves-via-stylesheet binding could no longer hold.  The
+  #     corrected scenario below (76badc67216f0d91) pins the same end-to-end outcome
+  #     against the CORRECTED architecture: the completion now runs through the
+  #     UNSANDBOXED "openrouter-shim" with the run-wide "--model/--provider" pair,
+  #     and the ".coding" node's model resolves to a literal OpenRouter model ID via
+  #     the shim (resolve_run_wide_model / the ADR-063 mapping table), NOT the
+  #     removed stylesheet.  The one-time FABRO_VERSION native-"[llm.providers.
+  #     openai]"-support image precondition (an out-of-scope Architect-level infra
+  #     action) is stated as an ALREADY-SATISFIED Given, prior to and independent of
+  #     this launch — so reaching the outcome needs NO further software release,
+  #     BC-base image rebuild, or template re-pour beyond that satisfied precondition,
+  #     only the launch-time provider override + a container relaunch.
+  #     work_id lead-ifye3.5.
 
   @scenario_hash:1d9d3777e3c3d8f5 @bc:shopsystem-bc-launcher
   Scenario: a plain launch with no operator-supplied provider override keeps the Anthropic-subscription path as the active LLM provider
@@ -152,11 +171,12 @@ Feature: a launch-time --llm-provider / BCLAUNCHER_LLM_PROVIDER override selects
     And the command line carries no "-I MODEL_CODING=", "-I MODEL_REVIEW=", or "-I MODEL_DEFAULT=" input for this launch
     And every node in the workflow, regardless of its ".coding"/".review"/"*" node-class, resolves to that same single run-wide model — per-node-class model differentiation is not supplied by this launch
 
-  @scenario_hash:c99e79ac24f56f5c @bc:shopsystem-bc-launcher
-  Scenario: a real dispatch completes end-to-end on a BC launched with the OpenRouter override, with no software release required
-    Given the shopsystem-bc-launcher BC is installed
-    And an agent-vault broker with a registered OpenRouter credential service is running on the shopsystem network and is reachable
+  @scenario_hash:76badc67216f0d91 @bc:shopsystem-bc-launcher
+  Scenario: a real dispatch completes end-to-end on a BC launched with the OpenRouter override, given an already-satisfied one-time FABRO_VERSION image precondition, with no further software release required
+    Given the shopsystem-bc-launcher BC's container image was already built from a bc-base image pinned to a FABRO_VERSION carrying native "[llm.providers.openai]" support, satisfied once, prior to and independent of this launch
+    And the "openrouter-shim" process is part of that same already-built image
+    And an agent-vault broker with a registered OpenRouter-host credential service is running on the shopsystem network and is reachable
     And the operator supplies a launch-time LLM provider override of "openrouter"
     When bc-container launch is run for a BC with the OpenRouter provider override and a substantive assign_scenarios dispatch is delivered to it
-    Then the dispatched work reaches a gated work_done, having executed through at least one non-trivial node-class, such as ".coding", whose model resolved to a literal OpenRouter model ID
-    And no software release, BC-base image rebuild, or template re-pour was required to reach this outcome — only the launch-time provider override and a container relaunch
+    Then the dispatched work reaches a gated work_done, having executed through at least one non-trivial node-class, such as ".coding", whose model resolved to a literal OpenRouter model ID via the "openrouter-shim"
+    And no further software release, BC-base image rebuild, or template re-pour beyond the already-satisfied FABRO_VERSION image precondition was required to reach this outcome — only the launch-time provider override and a container relaunch
