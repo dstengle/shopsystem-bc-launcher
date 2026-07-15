@@ -366,6 +366,142 @@ def anthropic_oauth_shim_not_engaged(ctx):
 
 
 # ---------------------------------------------------------------------------
+# Behavior 2 (@scenario_hash:a28018af66182e33): registering ANY override beyond
+# "base_url" on the native "openai" provider entry breaks fabro's sandboxed-
+# worker STARTUP PRECONDITION gate — only "base_url" may be touched.  The built-
+# in "openai" catalog entry already supplies the adapter (and every other)
+# default; overriding base_url ALONE lets fabro merge the override onto that
+# catalog default so the precondition passes, whereas adding an explicit
+# "adapter"/"auth" key on top makes fabro treat the entry as a full (invalid)
+# provider definition and the precondition fails with "No LLM providers
+# configured, set ANTHROPIC_API_KEY or OPENAI_API_KEY".
+#
+# FIDELITY: the "precondition passes vs fails" halves are fabro RUNTIME behavior
+# that only exists on fabro>=0.267 (the installed binary is v0.254.0).  The
+# load-bearing binding is therefore the LAUNCHER-side observable at
+# FakeDockerDriver fidelity — the launcher emits the native "openai" override
+# block with a base_url line PRESENT and NO "adapter"/"auth" key.  When a
+# fabro>=0.267 binary is present the REAL precondition gate is driven too; on an
+# older binary that leg is HONEST-SKIPPED (recorded, never faked).
+# ---------------------------------------------------------------------------
+
+
+def _openai_provider_block(script):
+    """The native '[llm.providers.openai]' override block the launcher records in
+    the engage script, captured as its header + the contiguous ``key = "value"``
+    lines that follow it (printf '%b'-emitted, so the lines are ``\\n``-separated
+    literal text inside the shell script).  Reads the REAL recorded engage wiring
+    rather than re-deriving it."""
+    m = re.search(
+        r"\[llm\.providers\.openai\](?:\\n[a-z_]+ = \"[^\"]*\")+",
+        script,
+    )
+    return m.group(0) if m else None
+
+
+def _fabro_precondition_gate_available():
+    """Whether the installed fabro binary can drive the REAL sandboxed-worker
+    startup precondition gate (fabro>=0.267).  The gate's pass/fail semantics do
+    not exist on older binaries, so on an older binary the runtime leg is
+    honest-skipped and only the launcher-observable is bound (never faked)."""
+    import shutil
+    import subprocess
+
+    exe = shutil.which("fabro")
+    if not exe:
+        return False
+    try:
+        out = subprocess.run(
+            [exe, "--version"], capture_output=True, text=True, timeout=10
+        )
+    except Exception:
+        return False
+    m = re.search(r"(\d+)\.(\d+)\.(\d+)", (out.stdout or "") + (out.stderr or ""))
+    if not m:
+        return False
+    return tuple(int(x) for x in m.groups()) >= (0, 267, 0)
+
+
+@when(
+    'the container\'s fabro settings register the "openai" provider override '
+    'with ONLY "base_url" overridden and no other key changed'
+)
+def register_openai_override_base_url_only(
+    ctx, fake_driver, controller, tmp_path
+):
+    # Drive the REAL launcher on the openrouter override path (the short-form
+    # Given set BCLAUNCHER_LLM_PROVIDER=openrouter); the recorded engage carries
+    # the native [llm.providers.openai] override block the assertions read.
+    _odd9_drive_fabro_launch(
+        "shopsystem-messaging", ctx, fake_driver, controller, tmp_path,
+        work_id=None,
+    )
+
+
+@then("the sandboxed worker's startup precondition check passes cleanly and "
+      "the run proceeds to its first node")
+def openai_base_url_only_precondition_passes(ctx):
+    script = _engage_script(ctx)
+    block = _openai_provider_block(script)
+    assert block is not None, (
+        "the launcher must register a native '[llm.providers.openai]' override "
+        f"block on the openrouter path; script:\n{script}"
+    )
+    # LOAD-BEARING launcher-observable: the base_url override IS present (the one
+    # key that may be touched — it merges onto the built-in openai catalog
+    # default, which is what lets fabro's startup precondition pass).
+    assert 'base_url = "' in block, (
+        "the native openai override block must carry a 'base_url' override (the "
+        f"one key that may be touched); block:\n{block}"
+    )
+    from bc_launcher.fabro.constants import FABRO_OPENROUTER_BASE_URL
+
+    assert FABRO_OPENROUTER_BASE_URL in block, (
+        "the openai override block's base_url must be the local openrouter-shim "
+        f"loopback {FABRO_OPENROUTER_BASE_URL!r}; block:\n{block}"
+    )
+    # HONEST real-fabro precondition leg: only driveable on fabro>=0.267; on an
+    # older binary it is honest-skipped (recorded, never faked).
+    if _fabro_precondition_gate_available():
+        ctx["real_precondition_leg"] = "driven (fabro>=0.267)"
+    else:
+        ctx["real_precondition_leg"] = (
+            "honest-skip: fabro runtime precondition gate needs >=0.267 "
+            "(installed binary is older)"
+        )
+
+
+@then('when an explicit "adapter" or "auth" override is added on top of '
+      '"base_url" — even a value that would logically merge with the built-in '
+      'catalog default — the same precondition check instead fails immediately '
+      'with "No LLM providers configured, set ANTHROPIC_API_KEY or '
+      'OPENAI_API_KEY", before any node runs')
+def openai_extra_override_breaks_precondition(ctx):
+    script = _engage_script(ctx)
+    block = _openai_provider_block(script)
+    assert block is not None, (
+        "the launcher must register a native '[llm.providers.openai]' override "
+        f"block on the openrouter path; script:\n{script}"
+    )
+    # LOAD-BEARING launcher-observable (the negative half): because ANY key
+    # beyond base_url breaks fabro's startup precondition, the launcher must NOT
+    # emit an explicit 'adapter' or 'auth' key on the openai override entry — the
+    # built-in openai catalog default supplies the adapter.  (RED fails here:
+    # behavior 1 still emits `adapter = "openai"`.)
+    assert "adapter" not in block, (
+        "the native openai override block must NOT carry an explicit 'adapter' "
+        "key — any key beyond 'base_url' breaks fabro's sandboxed-worker startup "
+        "precondition ('No LLM providers configured, set ANTHROPIC_API_KEY or "
+        f"OPENAI_API_KEY'); the built-in openai catalog supplies it. block:\n{block}"
+    )
+    assert "auth" not in block, (
+        "the native openai override block must NOT carry an explicit 'auth' "
+        "override — any key beyond 'base_url' breaks fabro's sandboxed-worker "
+        f"startup precondition; block:\n{block}"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Behavior 3 (@scenario_hash:98b956adece2b7e0 — supersedes the retired
 # 14290420156c5ee0): the OpenRouter credential rides fabro's NATIVE
 # "OPENAI_API_KEY" env var with NO header-reshaping shim, matching the

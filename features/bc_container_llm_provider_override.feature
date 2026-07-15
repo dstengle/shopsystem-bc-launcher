@@ -78,6 +78,14 @@ Feature: a launch-time --llm-provider / BCLAUNCHER_LLM_PROVIDER override selects
     And the "openrouter-shim" process is launched as an unsandboxed, container-level process alongside the fabro sandboxed run, the same launch-lifecycle shape the existing "anthropic-oauth-shim" already uses
     And the Anthropic anthropic-oauth-shim path is not engaged for this launch
 
+  @scenario_hash:a28018af66182e33 @bc:shopsystem-bc-launcher
+  Scenario: registering any override beyond "base_url" on the openai provider entry breaks fabro's startup precondition gate — only "base_url" may be touched
+    Given the shopsystem-bc-launcher BC is installed
+    And the operator supplies a launch-time LLM provider override of "openrouter"
+    When the container's fabro settings register the "openai" provider override with ONLY "base_url" overridden and no other key changed
+    Then the sandboxed worker's startup precondition check passes cleanly and the run proceeds to its first node
+    But when an explicit "adapter" or "auth" override is added on top of "base_url" — even a value that would logically merge with the built-in catalog default — the same precondition check instead fails immediately with "No LLM providers configured, set ANTHROPIC_API_KEY or OPENAI_API_KEY", before any node runs
+
   @scenario_hash:98b956adece2b7e0 @bc:shopsystem-bc-launcher
   Scenario: the OpenRouter credential rides fabro's native "OPENAI_API_KEY" env var with no header-reshaping shim, matching the GITHUB_TOKEN no-shim pattern — not the retired custom "OPENROUTER_API_KEY" shape
     Given the shopsystem-bc-launcher BC is installed
