@@ -11,14 +11,8 @@ from bc_launcher.fabro.constants import *  # noqa: F401,F403  (sibling constants
 from bc_launcher.fabro.llm_provider import (
     BCLAUNCHER_LLM_PROVIDER_ENV,
     LLM_PROVIDER_OPENROUTER,
-    MODEL_INPUT_CODING,
-    MODEL_INPUT_DEFAULT,
-    MODEL_INPUT_REVIEW,
-    MODEL_TIER_CODING,
-    MODEL_TIER_DEFAULT,
-    MODEL_TIER_REVIEW,
     resolve_llm_provider,
-    resolve_model_mapping,
+    resolve_run_wide_model,
 )
 
 # The REAL bc-status ONLINE staleness window (seconds) — imported from the SAME
@@ -165,20 +159,28 @@ def _fabro_engage_script(bc_name: str, provider: str | None = None) -> str:
     # agent-vault credential is requested.
     active_provider = resolve_llm_provider(provider)
     provider_export = shlex.quote(active_provider)
-    # Provider-keyed model mapping (lead-ifye3.2 behavior 4): resolve the ACTIVE
-    # provider's row (coding/review/default literal model IDs) and render the
-    # three `-I MODEL_*` inputs the finite `fabro run` supplies to resolve the
-    # poured model_stylesheet's node-class input placeholders
-    # ({{ inputs.MODEL_CODING/REVIEW/DEFAULT }}).  On the openrouter override the
-    # OpenRouter-row literals are selected; with no override the Anthropic row
-    # (behavior-preserving, today's claude-haiku-4-5 everywhere).
-    model_row = resolve_model_mapping(active_provider)
-    model_inputs = " ".join(
-        (
-            f"-I {MODEL_INPUT_CODING}={shlex.quote(model_row[MODEL_TIER_CODING])}",
-            f"-I {MODEL_INPUT_REVIEW}={shlex.quote(model_row[MODEL_TIER_REVIEW])}",
-            f"-I {MODEL_INPUT_DEFAULT}={shlex.quote(model_row[MODEL_TIER_DEFAULT])}",
-        )
+    # Run-wide model/provider flags (lead-ifye3.5 behavior 5 / a3b2b6bebcee78f5,
+    # supersedes lead-ifye3.2 behavior 4's per-node-class `-I MODEL_*` inputs).
+    # fabro >= v0.267.0 (the FABRO_VERSION the openrouter base_url override depends
+    # on) removed model_stylesheet templating outright (fabro commit 911e080f3,
+    # "Limit DOT templates to prompt + goal"): `{{ inputs.X }}` inside
+    # model_stylesheet became a HARD PARSE ERROR, so the retired three
+    # `-I MODEL_CODING/REVIEW/DEFAULT` inputs can no longer resolve any per-node-
+    # class model.  Per explicit product-authority direction, per-node-class model
+    # differentiation is DEPRIORITIZED (not permanently dropped) in favor of a
+    # single run-wide `fabro run --model <literal> --provider <active>` flag pair on
+    # every finite child (scout-proven with ZERO model_stylesheet: real OpenRouter
+    # response, both nodes).  The fleet-wide provider-keyed model mapping table
+    # (ADR-063) STAYS as the lookup structure — only what bc-launcher does with the
+    # resolved value changes: the run-wide model is the ACTIVE provider's row's
+    # `coding` tier (the substantive-work tier), the OpenRouter-row literal on the
+    # openrouter override and the Anthropic row (claude-haiku-4-5) with no override.
+    # `--provider` carries the ACTIVE provider value (the scenario pins the
+    # openrouter override as `--provider openrouter`).
+    run_wide_model = resolve_run_wide_model(active_provider)
+    model_flags = (
+        f"--model {shlex.quote(run_wide_model)} "
+        f"--provider {shlex.quote(active_provider)}"
     )
     gh_token = shlex.quote(FABRO_SERVER_INSTALL_GH_TOKEN)
     server_settings = shlex.quote(FABRO_SERVER_SETTINGS_CONTAINER_PATH)
@@ -262,9 +264,18 @@ def _fabro_engage_script(bc_name: str, provider: str | None = None) -> str:
         credential_exports = (
             f"export {OPENROUTER_NODE_CREDENTIAL_ENV}={or_placeholder} && "
         )
+        # base_url-ONLY override (behavior 2, @scenario_hash:a28018af66182e33):
+        # register the native "openai" provider entry with ONLY "base_url"
+        # overridden — NO explicit "adapter"/"auth".  The built-in "openai"
+        # catalog entry already supplies the adapter (and every other) default;
+        # overriding base_url ALONE merges onto that default so fabro's
+        # sandboxed-worker STARTUP PRECONDITION passes.  Adding an explicit
+        # "adapter"/"auth" key on top makes fabro treat the entry as a full
+        # (invalid) provider definition and the precondition fails with
+        # "No LLM providers configured, set ANTHROPIC_API_KEY or OPENAI_API_KEY"
+        # before any node runs.
         provider_block = (
             f"\\n[llm.providers.{FABRO_OPENROUTER_PROVIDER_IDENTITY}]\\n"
-            f'adapter = "{FABRO_OPENROUTER_ADAPTER}"\\n'
             f'base_url = "{FABRO_OPENROUTER_BASE_URL}"\\n'
         )
     else:
@@ -408,7 +419,7 @@ run_finite() {{
   _rf_sw="$(printf '%s' "$_rf_wid" | tr -c 'A-Za-z0-9._-' '_')"
   _rf_child={def_dir}/child-"$_rf_sw".toml
   materialize_child "$_rf_wid" "$_rf_child" || {{ echo "materialize $_rf_wid failed (non-fatal)" >>{run_log} 2>&1; }}
-  fabro run --server "$FABRO_SERVER" "child-$_rf_sw.toml" {model_inputs} --auto-approve >>{run_log} 2>&1
+  fabro run --server "$FABRO_SERVER" "child-$_rf_sw.toml" {model_flags} --auto-approve >>{run_log} 2>&1
   _rf_rc=$?
   echo "$(( $(cat {q_completed} 2>/dev/null || echo 0) + 1 ))" > {q_completed} 2>/dev/null || true
   rm -f "$_rf_child" 2>/dev/null || true
@@ -474,3 +485,35 @@ def _fabro_exec_env() -> dict[str, str]:
     a login shell.
     """
     return {SSL_CERT_FILE_ENV: AGENT_VAULT_CONTAINER_CA_PATH}
+
+
+def _openrouter_shim_exec_env(proxy_url: str | None) -> dict[str, str]:
+    """The exec env the launcher pins on the openrouter-shim START exec
+    (lead-ifye3.5 behavior 4 — the credential HOP).
+
+    The whole point of the openrouter-shim is that the SANDBOXED fabro node never
+    carries a real credential (fabro clears + FilterSensitive-strips credential-
+    shaped env vars before spawning, and its LLM call never routes through
+    HTTPS_PROXY).  Instead the UNSANDBOXED shim's OWN outbound ``curl`` hop carries
+    the real ``HTTPS_PROXY`` so it egresses through the agent-vault MITM proxy,
+    where the broker substitutes the real OpenRouter key onto the ``Authorization:
+    Bearer`` header on the wire, scoped to the OpenRouter host.
+
+    Extends ``_fabro_exec_env`` (SSL_CERT_FILE, the lead-ze4w BUG#3 non-login-shell
+    CA trust) with the real container-runtime ``HTTPS_PROXY`` (plus the lowercase
+    ``https_proxy`` some libcurl builds honour, mirroring the brokered clone) and
+    ``CURL_CA_BUNDLE`` so the shim's curl trusts the agent-vault MITM CA over that
+    proxied HTTPS hop.  When no runtime proxy was derived (no operator broker /
+    incomplete agent-vault triple) the proxy keys are omitted rather than set to an
+    empty value, so the exec env carries a real proxy or none.
+    """
+    env = {
+        SSL_CERT_FILE_ENV: AGENT_VAULT_CONTAINER_CA_PATH,
+        # curl's canonical CA-bundle var (the shim's outbound hop is curl, not
+        # urllib), pointed at the SAME materialized broker CA as SSL_CERT_FILE.
+        "CURL_CA_BUNDLE": AGENT_VAULT_CONTAINER_CA_PATH,
+    }
+    if proxy_url:
+        env["HTTPS_PROXY"] = proxy_url
+        env["https_proxy"] = proxy_url
+    return env

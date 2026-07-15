@@ -43,18 +43,17 @@ graph = "workflow.fabro"
 [run.inputs]
 BC_NAME = "fabro-throwaway"        # canonical BC name; override per BC at run
 WORK_ID = "fabro-spike-demo-3"     # work_id of the message under service
-# Node-class MODEL input placeholders (lead-ifye3.2 behavior 4). The
-# model_stylesheet graph attribute resolves each node-class tier from these
-# inputs via minijinja `{{ inputs.MODEL_* }}`; a launch-time `-I MODEL_*=<id>`
-# fabro-run input overrides them with the ACTIVE provider's row from the
-# fleet-wide provider-keyed model mapping table (bc_launcher.fabro.llm_provider
-# PROVIDER_MODEL_MAPPING). These DEFAULTS mirror the pre-placeholder stylesheet
-# (every node-class on claude-haiku-4-5, incl. lead-i0wi classify-on-haiku) so
-# `fabro validate` renders a non-empty stylesheet and a default run is behavior-
-# preserving; the launcher ALWAYS supplies the resolved `-I MODEL_*` at runtime.
-MODEL_CODING = "claude-haiku-4-5"  # .coding node-class tier
-MODEL_REVIEW = "claude-haiku-4-5"  # .review node-class tier
-MODEL_DEFAULT = "claude-haiku-4-5" # `*` + .classify node-class tier (default)
+# NOTE (lead-ifye3.5 behavior 5 / a3b2b6bebcee78f5): the node-class MODEL_CODING/
+# MODEL_REVIEW/MODEL_DEFAULT input placeholders (lead-ifye3.2 behavior 4) are
+# REMOVED.  fabro >= v0.267.0 removed model_stylesheet templating outright (fabro
+# commit 911e080f3), so `{{ inputs.MODEL_* }}` inside model_stylesheet became a
+# HARD PARSE ERROR and the per-node-class `-I MODEL_*` inputs can no longer resolve
+# a model.  Per product-authority direction, per-node-class differentiation is
+# DEPRIORITIZED in favor of a single RUN-WIDE model the launcher supplies on the
+# finite `fabro run` command as `--model <literal> --provider <active>`
+# (engage.py run_finite; the run-wide literal is the ACTIVE provider's mapping-row
+# `coding` tier).  The provider-keyed mapping table (ADR-063) STAYS as that
+# lookup; there is no longer any MODEL_* run-input to declare here.
 
 # ---- ENV OVERLAY into the NATIVE script= sandbox (Slice 5 HARDEN, PROVEN) ----
 # The GLOBAL [run.environment.env] overlay (same channel that delivers HTTPS_PROXY

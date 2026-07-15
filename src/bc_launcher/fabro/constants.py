@@ -122,6 +122,20 @@ FABRO_SHIM_HOST = "127.0.0.1"
 FABRO_SHIM_PORT = 8788
 
 
+# The baked openrouter-shim binary (lead-ifye3.5 behavior 1).  An UNSANDBOXED,
+# container-level reverse proxy launched with the SAME launch-lifecycle shape as
+# the anthropic-oauth-shim, but on its OWN distinct loopback port so the two
+# shims coexist.  The sandboxed fabro node talks to this shim over plain loopback
+# (no HTTPS_PROXY needed for that hop); the shim itself makes the real outbound
+# OpenRouter call through the container HTTPS_PROXY, where agent-vault substitutes
+# the real credential on the shim's OWN hop — the hop the sandboxed node cannot
+# reach (fabro's sandbox clears + FilterSensitive-strips credential-shaped env
+# vars AND never routes the sandboxed LLM call through HTTPS_PROXY).
+OPENROUTER_SHIM_BIN = "/usr/local/bin/openrouter-shim"
+
+FABRO_OPENROUTER_SHIM_PORT = 8789
+
+
 # The placed def's effective fabro settings file (settings.toml lives at the
 # def root alongside workflow.fabro / project.toml).
 FABRO_SETTINGS_CONTAINER_PATH = f"{FABRO_DEF_CONTAINER_DIR}/settings.toml"
@@ -218,9 +232,33 @@ FABRO_ANTHROPIC_ADAPTER = "anthropic"
 # "Provider 'anthropic' not registered".  Registering under the native "openai"
 # identity makes the OpenRouter-catalog slugs resolve unambiguously to a
 # registered provider whose base_url points at OpenRouter.
-FABRO_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+#
+# EGRESS CORRECTION (lead-ifye3.5 behavior 1, supersedes the direct-to-OpenRouter
+# lead-83mh8 shape): the native "openai" provider's base_url points at the LOCAL
+# "openrouter-shim" LOOPBACK endpoint (127.0.0.1:<FABRO_OPENROUTER_SHIM_PORT>/v1)
+# — NOT directly at "https://openrouter.ai".  A this-session root-cause dive
+# proved the direct-to-OpenRouter base_url never completes a real dispatch:
+# fabro's SANDBOXED node execution clears + FilterSensitive-strips credential-
+# shaped env vars AND the sandboxed LLM call never routes through HTTPS_PROXY, so
+# agent-vault can never substitute the real credential from inside the sandbox.
+# The sandboxed node instead talks to the openrouter-shim over plain loopback
+# (mirroring the anthropic base_url pointing at the anthropic-oauth-shim); the
+# UNSANDBOXED shim makes the real outbound OpenRouter call through HTTPS_PROXY,
+# where agent-vault substitutes the credential on the shim's OWN hop.  (The
+# openrouter-shim reverse-proxy SCRIPT + its /api upstream + Cloudflare-safe
+# client are behavior 3; behavior 1 wires the loopback base_url + the shim's
+# unsandboxed launch.)
+FABRO_OPENROUTER_BASE_URL = (
+    f"http://{FABRO_SHIM_HOST}:{FABRO_OPENROUTER_SHIM_PORT}/v1"
+)
 
-FABRO_OPENROUTER_ADAPTER = "openai"
+# NOTE (behavior 2, @scenario_hash:a28018af66182e33): there is deliberately NO
+# FABRO_OPENROUTER_ADAPTER constant.  The openrouter override registers the
+# native "openai" provider entry with ONLY "base_url" overridden — the built-in
+# "openai" catalog entry supplies the adapter default.  Emitting an explicit
+# adapter (or auth) key on the override entry breaks fabro's sandboxed-worker
+# startup precondition ("No LLM providers configured, set ANTHROPIC_API_KEY or
+# OPENAI_API_KEY").
 
 # The fabro NATIVE provider identity the openrouter override registers under: the
 # built-in "openai" provider (with base_url overridden to the OpenRouter

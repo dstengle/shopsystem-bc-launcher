@@ -45,6 +45,76 @@ Feature: a launch-time --llm-provider / BCLAUNCHER_LLM_PROVIDER override selects
   #     scoped to the OpenRouter host — the broker-side vault lookup key stays
   #     OPENROUTER_API_KEY and is DECOUPLED from the node-side env var name (the
   #     substitution matches by DESTINATION HOST, not by env var name).
+  #
+  # RETIRED-SCENARIO PROVENANCE (work_id lead-ifye3.5):
+  #   4c9f5b265c5098b7  superseded-by  af07c326a031fafe
+  #   reason: the retired scenario pointed the native "openai" provider's base_url
+  #     DIRECTLY at "https://openrouter.ai/api/v1", a shape a this-session
+  #     root-cause dive proved never completes a real dispatch — fabro's SANDBOXED
+  #     node execution clears + FilterSensitive-strips credential-shaped env vars
+  #     (*_api_key/*_token/…) AND the sandboxed LLM call never routes through
+  #     HTTPS_PROXY, so agent-vault can never substitute the real credential from
+  #     inside the sandbox.  The corrected scenario below (af07c326a031fafe) points
+  #     the native "openai" provider's base_url at the LOCAL "openrouter-shim"
+  #     loopback endpoint (an unsandboxed, container-level reverse proxy launched
+  #     with the same launch-lifecycle shape as the existing anthropic-oauth-shim),
+  #     moving the real outbound egress — where agent-vault substitutes the
+  #     credential — onto the shim's OWN hop instead of the sandboxed node's.
+  #
+  #   98b956adece2b7e0  superseded-by  05638241a033ef0c
+  #   reason: the retired scenario placed the agent-vault substitution on the
+  #     SANDBOXED node's OWN outbound wire hop (real key onto the node's
+  #     Authorization: Bearer header via the container HTTPS_PROXY).  fabro's
+  #     sandboxed execution path CLEARS + FilterSensitive-strips credential-shaped
+  #     env vars before spawning AND never routes the sandboxed LLM call through
+  #     HTTPS_PROXY, so agent-vault could never substitute the real key from inside
+  #     the sandbox.  The corrected scenario below (05638241a033ef0c) moves the
+  #     substitution ONE HOP OUT: the node-side "OPENAI_API_KEY" stays the literal
+  #     "__PLACEHOLDER__" (carried unchanged onto the "Authorization: Bearer"
+  #     header the node sends to the local "openrouter-shim"), and the UNSANDBOXED
+  #     "openrouter-shim" process's OWN environment carries the real "HTTPS_PROXY"
+  #     through which agent-vault substitutes the real OpenRouter key on the shim's
+  #     outbound wire hop, scoped to the OpenRouter host — the GITHUB_TOKEN no-shim
+  #     pattern moved one hop out.  work_id lead-ifye3.5.
+  #
+  #   22f2a5bda5c29044  superseded-by  a3b2b6bebcee78f5
+  #   reason: the retired scenario resolved each poured node-class placeholder to a
+  #     literal model ID via three per-child fabro-run "-I MODEL_CODING/REVIEW/
+  #     DEFAULT" inputs feeding the workflow.fabro model_stylesheet's
+  #     "{{ inputs.MODEL_* }}" templating.  fabro >= v0.267.0 (the FABRO_VERSION the
+  #     openrouter base_url override depends on) removed model_stylesheet templating
+  #     outright (fabro commit 911e080f3, "Limit DOT templates to prompt + goal"):
+  #     "{{ inputs.X }}" inside model_stylesheet becomes literal, unparseable text —
+  #     a HARD PARSE ERROR, so the "-I MODEL_*" inputs can no longer resolve any
+  #     per-node-class model.  Per explicit product-authority direction, per-node-
+  #     class model differentiation is DEPRIORITIZED (not permanently dropped) in
+  #     favor of a proven run-wide "fabro run --model <resolved-literal> --provider
+  #     <active>" flag pair on the dispatcher's per-child spawn command (scout-proven
+  #     with ZERO model_stylesheet in the graph: real OpenRouter response, both
+  #     nodes).  The corrected scenario below (a3b2b6bebcee78f5) pins the run-wide
+  #     "--model/--provider" flags REPLACING the retired per-node-class "-I MODEL_*"
+  #     inputs; the fleet-wide provider-keyed model mapping table (ADR-063) is
+  #     UNCHANGED as the lookup structure — only what bc-launcher does with the
+  #     resolved value changes.  work_id lead-ifye3.5.
+  #
+  #   c99e79ac24f56f5c  superseded-by  76badc67216f0d91
+  #   reason: the retired end-to-end capstone still asserted the completion through
+  #     the REMOVED model_stylesheet "{{ inputs.MODEL_CODING }}" templating and the
+  #     retired per-node-class "-I MODEL_*" inputs (both gone after a3b2b6bebcee78f5:
+  #     fabro >= v0.267.0 removed model_stylesheet templating outright), so its
+  #     ".coding"-resolves-via-stylesheet binding could no longer hold.  The
+  #     corrected scenario below (76badc67216f0d91) pins the same end-to-end outcome
+  #     against the CORRECTED architecture: the completion now runs through the
+  #     UNSANDBOXED "openrouter-shim" with the run-wide "--model/--provider" pair,
+  #     and the ".coding" node's model resolves to a literal OpenRouter model ID via
+  #     the shim (resolve_run_wide_model / the ADR-063 mapping table), NOT the
+  #     removed stylesheet.  The one-time FABRO_VERSION native-"[llm.providers.
+  #     openai]"-support image precondition (an out-of-scope Architect-level infra
+  #     action) is stated as an ALREADY-SATISFIED Given, prior to and independent of
+  #     this launch — so reaching the outcome needs NO further software release,
+  #     BC-base image rebuild, or template re-pour beyond that satisfied precondition,
+  #     only the launch-time provider override + a container relaunch.
+  #     work_id lead-ifye3.5.
 
   @scenario_hash:1d9d3777e3c3d8f5 @bc:shopsystem-bc-launcher
   Scenario: a plain launch with no operator-supplied provider override keeps the Anthropic-subscription path as the active LLM provider
@@ -54,40 +124,59 @@ Feature: a launch-time --llm-provider / BCLAUNCHER_LLM_PROVIDER override selects
     Then the container's fabro run is launched with the active LLM provider set to "anthropic"
     And no OpenRouter agent-vault credential is requested for this launch
 
-  @scenario_hash:4c9f5b265c5098b7 @bc:shopsystem-bc-launcher
-  Scenario: an explicit launch-time provider override selects OpenRouter access via fabro's NATIVE "openai" provider identity, with its "base_url" overridden to the OpenRouter endpoint — not a new custom "openrouter" fabro provider
+  @scenario_hash:af07c326a031fafe @bc:shopsystem-bc-launcher
+  Scenario: an explicit launch-time provider override registers fabro's NATIVE "openai" provider identity with its "base_url" pointed at the LOCAL "openrouter-shim" loopback endpoint, not directly at OpenRouter's own host
     Given the shopsystem-bc-launcher BC is installed
     And the operator supplies a launch-time LLM provider override of "openrouter" via "--llm-provider openrouter" (or "BCLAUNCHER_LLM_PROVIDER=openrouter")
     When bc-container launch is run for BC name "shopsystem-messaging" with the operator-supplied provider override
-    Then the container's fabro settings register the override under fabro's NATIVE "openai" provider identity, with its "base_url" set to "https://openrouter.ai/api/v1" — no new custom "openrouter" fabro provider is registered
-    And fabro's catalog auto-routing for OpenRouter-catalog-qualified model strings such as "anthropic/claude-sonnet-4.5" resolves unambiguously to the "openai" provider, with no collision against fabro's built-in "anthropic" catalog entry
+    Then the container's fabro settings register the override under fabro's NATIVE "openai" provider identity, with its "base_url" set to the local "openrouter-shim" process's loopback address — not "https://openrouter.ai" directly and no new custom "openrouter" fabro provider is registered
+    And the "openrouter-shim" process is launched as an unsandboxed, container-level process alongside the fabro sandboxed run, the same launch-lifecycle shape the existing "anthropic-oauth-shim" already uses
     And the Anthropic anthropic-oauth-shim path is not engaged for this launch
 
-  @scenario_hash:98b956adece2b7e0 @bc:shopsystem-bc-launcher
-  Scenario: the OpenRouter credential rides fabro's native "OPENAI_API_KEY" env var with no header-reshaping shim, matching the GITHUB_TOKEN no-shim pattern — not the retired custom "OPENROUTER_API_KEY" shape
+  @scenario_hash:a28018af66182e33 @bc:shopsystem-bc-launcher
+  Scenario: registering any override beyond "base_url" on the openai provider entry breaks fabro's startup precondition gate — only "base_url" may be touched
+    Given the shopsystem-bc-launcher BC is installed
+    And the operator supplies a launch-time LLM provider override of "openrouter"
+    When the container's fabro settings register the "openai" provider override with ONLY "base_url" overridden and no other key changed
+    Then the sandboxed worker's startup precondition check passes cleanly and the run proceeds to its first node
+    But when an explicit "adapter" or "auth" override is added on top of "base_url" — even a value that would logically merge with the built-in catalog default — the same precondition check instead fails immediately with "No LLM providers configured, set ANTHROPIC_API_KEY or OPENAI_API_KEY", before any node runs
+
+  @scenario_hash:7f55b8ee9e092692 @bc:shopsystem-bc-launcher
+  Scenario: the "openrouter-shim" is an unsandboxed, container-level reverse proxy that forwards the sandboxed node's request unchanged to OpenRouter's real API host, with no header reshaping
+    Given the shopsystem-bc-launcher BC is installed
+    And the operator supplies a launch-time LLM provider override of "openrouter"
+    And the "openrouter-shim" process is running, listening on a loopback address only
+    When the sandboxed fabro node issues its LLM call to the "openai"-identified provider's configured "base_url"
+    Then the request reaches the "openrouter-shim" process over plain loopback, with no "HTTPS_PROXY" needed for that hop
+    And the shim forwards the request to "https://openrouter.ai/api" plus the incoming request path, unchanged, with no header reshaping — unlike the "anthropic-oauth-shim", which does reshape headers
+    And the shim streams the upstream response back to the sandboxed node unchanged
+
+  @scenario_hash:05638241a033ef0c @bc:shopsystem-bc-launcher
+  Scenario: the real OpenRouter credential is substituted on the shim's own outbound hop by agent-vault, matching the GITHUB_TOKEN no-shim pattern moved one hop out — never present in the sandboxed node's filesystem or process environment
     Given the shopsystem-bc-launcher BC is installed
     And the operator supplies a launch-time LLM provider override of "openrouter"
     And an agent-vault broker with a registered OpenRouter-host credential service is running on the shopsystem network and is reachable
     When bc-container launch starts the agent for BC name "shopsystem-messaging" with the OpenRouter provider override
-    Then the node-side "OPENAI_API_KEY" value is the literal placeholder "__PLACEHOLDER__", with no header-reshaping shim process launched for the OpenRouter path
-    And the agent-vault broker's MITM proxy substitutes the real OpenRouter API key onto the outbound "Authorization: Bearer" header only on the wire, scoped to requests directed at the OpenRouter host
-    And the real OpenRouter API key is not present in the container's filesystem or process environment
+    Then the sandboxed node's "OPENAI_API_KEY" value is the literal placeholder "__PLACEHOLDER__", carried unchanged onto the "Authorization: Bearer" header the node sends to the "openrouter-shim"
+    And the "openrouter-shim" process's own environment (not the sandboxed node's) carries the real "HTTPS_PROXY", through which the agent-vault broker's MITM proxy substitutes the real OpenRouter API key onto that same "Authorization: Bearer" header only on the shim's outbound wire hop, scoped to requests directed at the OpenRouter host
+    And the real OpenRouter API key is not present in the sandboxed node's filesystem or process environment at any point, including via "[run.environment.env]" overlays, because fabro's sandboxed execution path clears and filters credential-shaped environment variables before spawning
 
-  @scenario_hash:22f2a5bda5c29044 @bc:shopsystem-bc-launcher
-  Scenario: bc-launcher resolves each poured node-class placeholder to a literal model ID via fabro run "-I" inputs, sourced from the provider-keyed mapping table for the active provider
+  @scenario_hash:a3b2b6bebcee78f5 @bc:shopsystem-bc-launcher
+  Scenario: the dispatcher's per-child "fabro run" command line carries run-wide "--model"/"--provider" flags, replacing the retired per-node-class "-I MODEL_CODING"/"MODEL_REVIEW"/"MODEL_DEFAULT" inputs
     Given the shopsystem-bc-launcher BC is installed
-    And the poured "/workspace/.fabro/workflow.fabro" model_stylesheet carries the node-class input placeholders "MODEL_CODING", "MODEL_REVIEW", and "MODEL_DEFAULT"
-    And the fleet-wide provider-keyed model mapping table has an OpenRouter row and an Anthropic row, each naming a literal model ID for the "coding", "review", and "default" node-class tiers
     And the operator supplies a launch-time LLM provider override of "openrouter"
-    When bc-container launch runs the container's fabro workflow for BC name "shopsystem-messaging" with the OpenRouter provider override
-    Then the fabro run command line supplies three "-I" inputs — MODEL_CODING, MODEL_REVIEW, and MODEL_DEFAULT — each set to the literal model ID recorded in the mapping table's OpenRouter row for that node-class
-    And when the same launch is run with no provider override, the same three inputs instead carry the literal model IDs recorded in the mapping table's Anthropic row
+    And the fleet-wide provider-keyed model mapping table names a literal model ID for the active provider
+    When bc-container launch's dispatcher spawns a child "fabro run" for BC name "shopsystem-messaging" with the OpenRouter provider override
+    Then the child "fabro run" command line carries "--model <literal-model-id> --provider openrouter", sourced from the mapping table for the active provider
+    And the command line carries no "-I MODEL_CODING=", "-I MODEL_REVIEW=", or "-I MODEL_DEFAULT=" input for this launch
+    And every node in the workflow, regardless of its ".coding"/".review"/"*" node-class, resolves to that same single run-wide model — per-node-class model differentiation is not supplied by this launch
 
-  @scenario_hash:c99e79ac24f56f5c @bc:shopsystem-bc-launcher
-  Scenario: a real dispatch completes end-to-end on a BC launched with the OpenRouter override, with no software release required
-    Given the shopsystem-bc-launcher BC is installed
-    And an agent-vault broker with a registered OpenRouter credential service is running on the shopsystem network and is reachable
+  @scenario_hash:76badc67216f0d91 @bc:shopsystem-bc-launcher
+  Scenario: a real dispatch completes end-to-end on a BC launched with the OpenRouter override, given an already-satisfied one-time FABRO_VERSION image precondition, with no further software release required
+    Given the shopsystem-bc-launcher BC's container image was already built from a bc-base image pinned to a FABRO_VERSION carrying native "[llm.providers.openai]" support, satisfied once, prior to and independent of this launch
+    And the "openrouter-shim" process is part of that same already-built image
+    And an agent-vault broker with a registered OpenRouter-host credential service is running on the shopsystem network and is reachable
     And the operator supplies a launch-time LLM provider override of "openrouter"
     When bc-container launch is run for a BC with the OpenRouter provider override and a substantive assign_scenarios dispatch is delivered to it
-    Then the dispatched work reaches a gated work_done, having executed through at least one non-trivial node-class, such as ".coding", whose model resolved to a literal OpenRouter model ID
-    And no software release, BC-base image rebuild, or template re-pour was required to reach this outcome — only the launch-time provider override and a container relaunch
+    Then the dispatched work reaches a gated work_done, having executed through at least one non-trivial node-class, such as ".coding", whose model resolved to a literal OpenRouter model ID via the "openrouter-shim"
+    And no further software release, BC-base image rebuild, or template re-pour beyond the already-satisfied FABRO_VERSION image precondition was required to reach this outcome — only the launch-time provider override and a container relaunch

@@ -171,6 +171,24 @@ COPY anthropic-oauth-shim /usr/local/bin/anthropic-oauth-shim
 RUN chmod 0755 /usr/local/bin/anthropic-oauth-shim \
     && anthropic-oauth-shim --help >/dev/null
 
+# The openrouter-shim — the REAL listening reverse-proxy shim for the launch-time
+# `--llm-provider openrouter` override (lead-ifye3.5). Like the anthropic-oauth-shim
+# it is a committed stdlib-ONLY python3 ThreadingHTTPServer reverse proxy (curl is
+# invoked as an external binary via subprocess, NOT a python import) that BINDS +
+# LISTENS on 127.0.0.1:8789 (fabro's openrouter-override base_url
+# http://127.0.0.1:8789/v1). UNLIKE the anthropic-oauth-shim it does NO header
+# reshaping: it forwards the incoming `Authorization: Bearer <placeholder>` header
+# UNCHANGED to OpenRouter's REAL API host "https://openrouter.ai/api" + the incoming
+# path (the "/api" suffix is REQUIRED — bare https://openrouter.ai 404s), via the env
+# HTTPS_PROXY so agent-vault injects the real key on the shim's OWN hop (NO real
+# secret is baked). It uses curl (NOT urllib) for the outbound hop because bare
+# urllib is Cloudflare-BLOCKED against openrouter.ai. COPIED onto PATH + made
+# executable with a build-time `--help` self-check so a broken install FAILS the
+# build. Real artifact, not a placeholder/stub.
+COPY openrouter-shim /usr/local/bin/openrouter-shim
+RUN chmod 0755 /usr/local/bin/openrouter-shim \
+    && openrouter-shim --help >/dev/null
+
 # beads (bd) — third-party Go binary from steveyegge/beads releases (NOT pip-installable)
 RUN set -e && \
     ARCH=$(uname -m) && \

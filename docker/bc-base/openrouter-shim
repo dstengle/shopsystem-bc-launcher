@@ -1,0 +1,243 @@
+#!/usr/bin/env python3
+"""
+openrouter-shim — the OpenRouter provider-override reverse proxy (lead-ifye3.5).
+
+WHY THIS EXISTS
+---------------
+On the launch-time `--llm-provider openrouter` override the launcher registers
+fabro's NATIVE "openai" provider with its base_url pointed at THIS shim's local
+loopback endpoint (127.0.0.1:8789/v1), NOT directly at OpenRouter.  A root-cause
+dive proved a direct-to-OpenRouter base_url never completes a real dispatch:
+fabro's SANDBOXED node execution clears + FilterSensitive-strips
+credential-shaped env vars AND never routes the sandboxed LLM call through
+HTTPS_PROXY, so agent-vault can never substitute the real credential from inside
+the sandbox.  The sandboxed node instead talks to THIS shim over plain loopback
+(no HTTPS_PROXY needed for that hop); the shim — an UNSANDBOXED, container-level
+process — makes the real outbound OpenRouter call through the container
+HTTPS_PROXY, where agent-vault substitutes the real credential on the shim's OWN
+hop.
+
+WHAT THIS DOES
+--------------
+A tiny local reverse proxy.  On each request it:
+  1. FORWARDS to OpenRouter's REAL API host + the INCOMING request path,
+     UNCHANGED.  The upstream is "https://openrouter.ai/api" — the "/api"
+     suffix is REQUIRED: bare "https://openrouter.ai" hits OpenRouter's website
+     404 page, not the API.  So the OpenAI-compatible path the node sends
+     (e.g. /v1/chat/completions) is appended to /api.
+  2. Does NO HEADER RESHAPING.  The incoming `Authorization: Bearer <placeholder>`
+     header is forwarded UNCHANGED (agent-vault substitutes the real key on the
+     outbound wire, scoped to the OpenRouter host).  This is DELIBERATELY UNLIKE
+     the anthropic-oauth-shim, which strips `x-api-key` and rewrites
+     `Authorization` + adds `anthropic-beta`.  Only genuinely hop-by-hop headers
+     (host / content-length / accept-encoding / connection / transfer-encoding)
+     are dropped, as any correct reverse proxy must.
+  3. STREAMS the upstream response (SSE or plain JSON) straight back to the node,
+     unchanged.
+
+WHY curl AND NOT urllib — THE CLOUDFLARE FINDING
+------------------------------------------------
+The outbound OpenRouter hop is made with `curl` via subprocess, NOT Python's
+`urllib`.  A real scout proved bare Python `urllib` is CLOUDFLARE-BLOCKED
+(403 "Access denied ... Cloudflare") against openrouter.ai even with a CORRECT
+credential, because Cloudflare's bot-detection fingerprints urllib's TLS/HTTP
+stack.  `curl`'s standard fingerprint is NOT blocked.  The anthropic-oauth-shim
+uses urllib SUCCESSFULLY — but only because api.anthropic.com has no Cloudflare
+bot-detection; matching it is NOT sufficient for openrouter.ai.  So this shim
+uses curl by construction.  curl honours the env HTTPS_PROXY (so agent-vault
+substitutes the real credential on the wire) and SSL_CERT_FILE / CURL_CA_BUNDLE
+(so the agent-vault MITM CA validates) automatically.
+
+  NOTE: the LIVE openrouter.ai leg (a real request that Cloudflare would block
+  under urllib but passes under curl) needs a real OpenRouter key + live network
+  + the agent-vault broker — NONE present in-session — so it is honest-DEFERRED
+  to a live container.  The Cloudflare-resistant client is picked by
+  CONSTRUCTION; this shim does NOT ship bare urllib and claim it is fine.
+
+NATIVE-VAULT INVARIANT (ADR-049) IS PRESERVED: this process never sees or stores
+a real secret.  The real credential is injected by agent-vault on the wire on
+the shim's OWN outbound hop; fabro's vault + OPENAI_API_KEY stay dummy
+placeholders.
+
+USAGE
+-----
+    ./openrouter-shim [--port 8789] [--host 127.0.0.1] [--upstream https://openrouter.ai/api]
+
+Must run in an environment where HTTPS_PROXY and SSL_CERT_FILE point at
+agent-vault (as any agent shell here does).
+"""
+import argparse
+import os
+import subprocess
+import sys
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+# The '/api' suffix is REQUIRED — bare 'https://openrouter.ai' hits the website
+# 404, not the API (the Cloudflare-fronted OpenAI-compatible endpoint).
+UPSTREAM = "https://openrouter.ai/api"
+
+# Genuinely hop-by-hop request headers a correct proxy must NOT forward.  NOTE:
+# `authorization` is deliberately ABSENT — the incoming Bearer header is
+# forwarded UNCHANGED (no reshaping; contrast the anthropic-oauth-shim, which
+# drops authorization + x-api-key).
+_DROP_REQ = {
+    "host",
+    "content-length",     # recomputed from the forwarded body
+    "accept-encoding",    # force identity so streaming stays uncompressed
+    "connection",
+    "proxy-connection",
+    "keep-alive",
+    "transfer-encoding",
+}
+# Hop-by-hop response headers we must not copy back verbatim.
+_DROP_RESP = {
+    "connection", "keep-alive", "proxy-connection", "transfer-encoding",
+    "content-length", "content-encoding",
+}
+
+
+class Handler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+    server_version = "openrouter-shim/1.0"
+
+    def log_message(self, fmt, *args):  # quieter, to stderr
+        sys.stderr.write("[openrouter-shim] %s - %s\n"
+                         % (self.address_string(), fmt % args))
+
+    def _proxy(self):
+        length = int(self.headers.get("content-length") or 0)
+        body = self.rfile.read(length) if length else b""
+
+        # Build the outbound header set: forward EVERY incoming header except the
+        # hop-by-hop drop list — the Authorization header rides through UNCHANGED
+        # (agent-vault substitutes the real key on the wire).  NO reshaping.
+        curl_headers = []
+        for k, v in self.headers.items():
+            if k.lower() in _DROP_REQ:
+                continue
+            curl_headers.extend(["-H", "%s: %s" % (k, v)])
+
+        url = UPSTREAM.rstrip("/") + self.path
+
+        # OUTBOUND via curl (NOT urllib) — Cloudflare blocks urllib against
+        # openrouter.ai (see module docstring).  curl honours HTTPS_PROXY +
+        # SSL_CERT_FILE/CURL_CA_BUNDLE from the env, so agent-vault substitutes
+        # the real credential on the wire and the MITM CA validates.  `-D -`
+        # writes the response status line + headers to stdout ahead of the body,
+        # `-o -` streams the body; we split at the header/body boundary and relay.
+        argv = [
+            "curl", "-sS", "--no-buffer", "--http1.1",
+            "-X", self.command,
+            "-D", "-", "-o", "-",
+            url,
+        ] + curl_headers
+        if body:
+            argv += ["--data-binary", "@-"]
+
+        try:
+            proc = subprocess.Popen(
+                argv,
+                stdin=subprocess.PIPE if body else None,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+        except FileNotFoundError:
+            self.send_error(502, "openrouter-shim: curl not found on PATH")
+            return
+
+        out, err = proc.communicate(input=body if body else None, timeout=600)
+        if proc.returncode != 0:
+            self.send_error(
+                502, "openrouter-shim upstream curl error: %s"
+                % (err.decode("utf-8", "replace") or ("exit %d" % proc.returncode))
+            )
+            return
+
+        status, resp_headers, resp_body = _split_curl_response(out)
+
+        # Relay status + headers, then the body.  We use Connection: close and no
+        # Content-Length so the client reads the (possibly SSE) body to EOF.
+        self.send_response(status)
+        for k, v in resp_headers:
+            if k.lower() in _DROP_RESP:
+                continue
+            self.send_header(k, v)
+        self.send_header("Connection", "close")
+        self.end_headers()
+        try:
+            self.wfile.write(resp_body)
+            self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        self.close_connection = True
+
+    do_POST = _proxy
+    do_GET = _proxy
+    do_PUT = _proxy
+    do_DELETE = _proxy
+
+
+def _split_curl_response(raw):
+    """Split curl's `-D - -o -` output into (status_code, [(header, value)], body).
+
+    curl writes the response status line + headers (from `-D -`) then the body
+    (from `-o -`).  There may be MULTIPLE header blocks (a 100-continue or a
+    redirect precedes the final response); the LAST header block is the final
+    response's, and everything after its blank line is the body."""
+    # Normalize CRLF so the header/body split is robust.
+    marker = b"\r\n\r\n"
+    if marker not in raw:
+        marker = b"\n\n"
+    head, _, body = raw.rpartition(marker)
+    if not head:
+        # No recognizable header block — treat the whole thing as body.
+        return 502, [], raw
+    block = head.replace(b"\r\n", b"\n")
+    lines = block.split(b"\n")
+    # Find the LAST status line ("HTTP/x yyy ...") — the final response's start.
+    start = 0
+    status = 200
+    for i, ln in enumerate(lines):
+        if ln[:5].upper() == b"HTTP/":
+            start = i
+            parts = ln.split(None, 2)
+            if len(parts) >= 2 and parts[1].isdigit():
+                status = int(parts[1])
+    headers = []
+    for ln in lines[start + 1:]:
+        if not ln.strip():
+            continue
+        if b":" not in ln:
+            continue
+        k, _, v = ln.partition(b":")
+        headers.append((k.strip().decode("latin-1"), v.strip().decode("latin-1")))
+    return status, headers, body
+
+
+def main():
+    global UPSTREAM
+    ap = argparse.ArgumentParser(
+        description="OpenRouter provider-override reverse proxy (no header "
+                    "reshaping; forwards to https://openrouter.ai/api + path)."
+    )
+    ap.add_argument("--host", default="127.0.0.1")
+    ap.add_argument("--port", type=int, default=8789)
+    ap.add_argument("--upstream", default=UPSTREAM)
+    args = ap.parse_args()
+    UPSTREAM = args.upstream
+    srv = ThreadingHTTPServer((args.host, args.port), Handler)
+    proxy = os.environ.get("HTTPS_PROXY", "<unset>")
+    if "@" in proxy:
+        proxy = "http://<redacted>@" + proxy.split("@", 1)[1]
+    sys.stderr.write(
+        "[openrouter-shim] listening on http://%s:%d  ->  %s  via HTTPS_PROXY=%s\n"
+        % (args.host, args.port, UPSTREAM, proxy)
+    )
+    try:
+        srv.serve_forever()
+    except KeyboardInterrupt:
+        srv.shutdown()
+
+
+if __name__ == "__main__":
+    main()

@@ -55,3 +55,48 @@ def _fabro_shim_start_script() -> str:
         f"{shlex.quote(AGENT_VAULT_CONTAINER_CA_PATH)}"
     )
     return f"{ssl_export}\nnohup {argv} >{log} 2>&1 &\n"
+
+
+
+def _openrouter_shim_start_argv() -> list[str]:
+    """The argv the launcher uses to START the baked openrouter-shim in serve mode
+    (lead-ifye3.5 behavior 1).
+
+    Mirrors the anthropic-oauth-shim's ``--host`` / ``--port`` serve args, but
+    targets the openrouter-shim's OWN distinct loopback port
+    (127.0.0.1:FABRO_OPENROUTER_SHIM_PORT) — the endpoint fabro's openrouter-
+    override ``[llm.providers.openai]`` base_url points at.  Returned as a list so
+    the test can assert the launcher starts the shim at that mode + host + port.
+    """
+    return [
+        OPENROUTER_SHIM_BIN,
+        "--host",
+        FABRO_SHIM_HOST,
+        "--port",
+        str(FABRO_OPENROUTER_SHIM_PORT),
+    ]
+
+
+
+def _openrouter_shim_start_script() -> str:
+    """Build the ``/bin/sh -c`` script that starts the baked openrouter-shim as a
+    BACKGROUND listener on 127.0.0.1:FABRO_OPENROUTER_SHIM_PORT (lead-ifye3.5
+    behavior 1).
+
+    The SAME launch-lifecycle shape ``_fabro_shim_start_script`` uses for the
+    anthropic-oauth-shim: the shim's ``serve_forever`` blocks, so it is
+    backgrounded (``&``) and disowned via ``nohup`` so the exec returns and the
+    unsandboxed, container-level listener survives.  SSL_CERT_FILE is pinned to
+    the materialized broker CA path (same lead-ze4w BUG#3 non-login-shell reason
+    the anthropic shim pins it) so the shim's own outbound OpenRouter call over
+    HTTPS_PROXY trusts the agent-vault MITM CA.
+    """
+    import shlex
+
+    argv = " ".join(shlex.quote(tok) for tok in _openrouter_shim_start_argv())
+    log = shlex.quote(f"{FABRO_DEF_CONTAINER_DIR}/openrouter-shim.log")
+    ssl_export = (
+        f"export {SSL_CERT_FILE_ENV}="
+        f"{shlex.quote(AGENT_VAULT_CONTAINER_CA_PATH)}"
+    )
+    return f"{ssl_export}\nnohup {argv} >{log} 2>&1 &\n"
