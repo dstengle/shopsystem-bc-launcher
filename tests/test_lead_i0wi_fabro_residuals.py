@@ -200,11 +200,21 @@ def test_f1_classify_node_routes_to_haiku_not_sonnet():
     claude-haiku-4-5, NOT claude-sonnet-4-5 — a sonnet 429 on the agent-vault
     wire must not deterministically fail-close the deliverable at node 1.
 
-    Structurally: classify must NOT carry the `.coding` class (which the
-    stylesheet pins to claude-sonnet-4-5); it carries the `.classify` class,
-    and the stylesheet pins `.classify` to claude-haiku-4-5.
+    Structurally: classify must NOT carry the `.coding` class; it carries the
+    `.classify` class.  This class-routing pin is UNCHANGED by lead-ifye3.5.
 
-    TEETH: revert classify to `class="coding"` (sonnet) -> RED.
+    MODEL (lead-ifye3.5 behavior 5 / a3b2b6bebcee78f5 reconciliation): the
+    model_stylesheet is GONE (fabro >= v0.267.0 removed its templating), so
+    per-node-class model differentiation is DEPRIORITIZED in favor of a single
+    RUN-WIDE model the launcher supplies on the finite `fabro run --model`.  The
+    haiku-not-sonnet invariant is PRESERVED on the DEFAULT (anthropic) path: the
+    run-wide model there is claude-haiku-4-5, so the light classify node still
+    runs on haiku (never the 429-throttled sonnet-4-5).  The class-routing pin is
+    NOT weakened; only the (now-removed) per-class stylesheet MODEL assertion is
+    rebound to the run-wide model.
+
+    TEETH: revert classify to `class="coding"` -> RED (class-routing pin); make
+    the run-wide default model sonnet-4-5 -> RED (haiku-not-sonnet invariant).
     """
     graph = _workflow_text()
     body = _node_body(graph, "classify")
@@ -212,30 +222,33 @@ def test_f1_classify_node_routes_to_haiku_not_sonnet():
     assert m is not None, f"classify must declare a class; body:\n{body}"
     cls = m.group(1)
     assert cls != "coding", (
-        "classify must be routed OFF the `.coding` class (which pins "
-        "claude-sonnet-4-5); a sonnet 429 would otherwise fail-close the whole "
-        f"deliverable at node 1. classify class is {cls!r}."
+        "classify must be routed OFF the `.coding` class; a sonnet 429 would "
+        "otherwise fail-close the whole deliverable at node 1. classify class is "
+        f"{cls!r}."
     )
     assert cls == "classify", (
-        f"classify must carry the `.classify` class (haiku); got {cls!r}."
+        f"classify must carry the `.classify` class; got {cls!r}."
     )
-    sheet = _stylesheet(graph)
-    # lead-ifye3.2 behavior 4: the `.classify` rule's model is no longer a baked
-    # literal — it is the MODEL_DEFAULT node-class input placeholder (classify
-    # folds into the DEFAULT tier), resolved to a literal model ID via the
-    # provider-keyed mapping table.  The haiku-not-sonnet invariant is preserved:
-    # MODEL_DEFAULT resolves (default/anthropic path) to claude-haiku-4-5.
-    placeholder = _stylesheet_input_placeholder(sheet, "classify")
-    assert placeholder == "MODEL_DEFAULT", (
-        "the `.classify` stylesheet rule must resolve its model from the "
-        "MODEL_DEFAULT input placeholder (classify folds into the default node-"
-        f"class tier); sheet:\n{sheet}"
+    # The model_stylesheet is REMOVED (fabro >= v0.267.0 parse error on its
+    # `{{ inputs.MODEL_* }}` templating); model resolution is now run-wide, not
+    # per-node-class.
+    assert "model_stylesheet=" not in graph, (
+        "the poured workflow.fabro must carry NO model_stylesheet (fabro >= "
+        "v0.267.0 removed its templating); model resolution is run-wide"
     )
-    resolved = _resolved_default_model(placeholder)
-    assert resolved == "claude-haiku-4-5", (
-        "the `.classify` node-class model must resolve to claude-haiku-4-5 on "
-        "the default path so the light classify node runs on haiku (sonnet-4-5 "
-        f"is persistently 429 on the fleet); resolved {resolved!r}."
+    # The classify node (like every node) resolves to the single RUN-WIDE model.
+    # On the DEFAULT (anthropic) path that run-wide model is claude-haiku-4-5, so
+    # the light classify node still runs on haiku, preserving the invariant.
+    from bc_launcher.fabro.llm_provider import (
+        LLM_PROVIDER_ANTHROPIC,
+        resolve_run_wide_model,
+    )
+
+    run_wide_default = resolve_run_wide_model(LLM_PROVIDER_ANTHROPIC)
+    assert run_wide_default == "claude-haiku-4-5", (
+        "the RUN-WIDE model on the default (anthropic) path must resolve to "
+        "claude-haiku-4-5 so the light classify node still runs on haiku "
+        f"(sonnet-4-5 is persistently 429 on the fleet); got {run_wide_default!r}."
     )
 
 

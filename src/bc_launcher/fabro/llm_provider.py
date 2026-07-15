@@ -39,32 +39,27 @@ BCLAUNCHER_LLM_PROVIDER_ENV = "BCLAUNCHER_LLM_PROVIDER"
 # Fleet-wide provider-keyed model mapping table (lead-ifye3.2 behavior 4)
 # ---------------------------------------------------------------------------
 #
-# The poured ``workflow.fabro`` model_stylesheet no longer bakes literal model
-# IDs; each node-class tier is a fabro minijinja INPUT PLACEHOLDER
-# (``{{ inputs.MODEL_CODING }}`` / ``MODEL_REVIEW`` / ``MODEL_DEFAULT``) that a
-# launch-time ``-I MODEL_*=<id>`` fabro-run input resolves.  This table is the
-# fleet-wide source of those literals: one ROW per provider, each naming a
-# literal model ID for the ``coding`` / ``review`` / ``default`` node-class
-# tiers.  The engage resolves the ACTIVE provider's row into the three
-# ``-I MODEL_*`` inputs it puts on every finite ``fabro run`` — so the operator
-# selects the whole per-provider model set with the same ``--llm-provider``
-# override, no software release.
+# This table is the fleet-wide source of the run-wide model literal: one ROW per
+# provider, each naming a literal model ID for the ``coding`` / ``review`` /
+# ``default`` tiers.
 #
-# The scenario (22f2a5bda5c29044) names exactly THREE tiers — coding, review,
-# default — so the graph's ``.classify`` node-class folds into the ``default``
-# tier (MODEL_DEFAULT): today the poured stylesheet routes ``.classify`` (and
-# the ``*`` catch-all) on ``claude-haiku-4-5`` — the lead-i0wi classify-on-haiku
-# routing — and the Anthropic row below preserves that exactly, so the default
-# (anthropic) path stays behavior-equivalent to today.
+# lead-ifye3.5 behavior 5 (a3b2b6bebcee78f5, supersedes 22f2a5bda5c29044): fabro
+# >= v0.267.0 removed model_stylesheet templating outright (fabro commit
+# 911e080f3), so the retired per-node-class ``-I MODEL_CODING/REVIEW/DEFAULT``
+# inputs — which fed the poured stylesheet's ``{{ inputs.MODEL_* }}`` placeholders
+# — are GONE (the placeholder names are no longer poured or supplied).  Per
+# product-authority direction, per-node-class model differentiation is
+# DEPRIORITIZED in favor of a single RUN-WIDE model the engage supplies on the
+# finite ``fabro run`` as ``--model <literal> --provider <active>``.  This mapping
+# table (ADR-063) STAYS UNCHANGED as the lookup structure; the engage selects the
+# ACTIVE provider's row's ``coding`` tier (the substantive-work tier) as the
+# run-wide literal — so the operator still selects the whole per-provider model
+# with the same ``--llm-provider`` override, no software release.  The row keys
+# below are retained (the mapping row shape is unchanged); only the graph-side
+# ``-I MODEL_*`` placeholder-input names are retired.
 MODEL_TIER_CODING = "coding"
 MODEL_TIER_REVIEW = "review"
 MODEL_TIER_DEFAULT = "default"
-
-# The three node-class INPUT PLACEHOLDER names the poured model_stylesheet
-# carries and the finite ``fabro run`` supplies as ``-I`` inputs.
-MODEL_INPUT_CODING = "MODEL_CODING"
-MODEL_INPUT_REVIEW = "MODEL_REVIEW"
-MODEL_INPUT_DEFAULT = "MODEL_DEFAULT"
 
 PROVIDER_MODEL_MAPPING: dict[str, dict[str, str]] = {
     # Anthropic row — the DEFAULT path.  Preserves today's effective models:
@@ -102,6 +97,29 @@ def resolve_model_mapping(provider: str | None = None) -> dict[str, str]:
     return PROVIDER_MODEL_MAPPING.get(
         provider or LLM_PROVIDER_DEFAULT, PROVIDER_MODEL_MAPPING[LLM_PROVIDER_ANTHROPIC]
     )
+
+
+# The run-wide model tier (lead-ifye3.5 behavior 5 / a3b2b6bebcee78f5).  With
+# per-node-class model differentiation DEPRIORITIZED (fabro >= v0.267.0 removed
+# model_stylesheet templating), the launcher supplies ONE run-wide model on the
+# finite ``fabro run --model``.  It is the mapping row's ``coding`` tier — the
+# substantive-work tier — so the real BC work gets the provider's stronger model.
+MODEL_TIER_RUN_WIDE = MODEL_TIER_CODING
+
+
+def resolve_run_wide_model(provider: str | None = None) -> str:
+    """The single RUN-WIDE literal model ID the launcher supplies on every finite
+    ``fabro run --model`` for the ACTIVE ``provider`` (lead-ifye3.5 behavior 5 /
+    a3b2b6bebcee78f5).
+
+    fabro >= v0.267.0 removed model_stylesheet templating (fabro commit
+    911e080f3), so per-node-class differentiation is deprioritized in favor of
+    this one run-wide model; it is the ACTIVE provider's mapping-row ``coding``
+    tier (the substantive-work tier).  Every node-class (``*`` / ``.classify`` /
+    ``.coding`` / ``.review``) resolves to this single model at run time.  The
+    provider-keyed mapping table (ADR-063) is unchanged as the lookup structure.
+    """
+    return resolve_model_mapping(provider)[MODEL_TIER_RUN_WIDE]
 
 
 def resolve_llm_provider(

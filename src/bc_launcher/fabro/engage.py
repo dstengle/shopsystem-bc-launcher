@@ -11,14 +11,8 @@ from bc_launcher.fabro.constants import *  # noqa: F401,F403  (sibling constants
 from bc_launcher.fabro.llm_provider import (
     BCLAUNCHER_LLM_PROVIDER_ENV,
     LLM_PROVIDER_OPENROUTER,
-    MODEL_INPUT_CODING,
-    MODEL_INPUT_DEFAULT,
-    MODEL_INPUT_REVIEW,
-    MODEL_TIER_CODING,
-    MODEL_TIER_DEFAULT,
-    MODEL_TIER_REVIEW,
     resolve_llm_provider,
-    resolve_model_mapping,
+    resolve_run_wide_model,
 )
 
 # The REAL bc-status ONLINE staleness window (seconds) — imported from the SAME
@@ -165,20 +159,28 @@ def _fabro_engage_script(bc_name: str, provider: str | None = None) -> str:
     # agent-vault credential is requested.
     active_provider = resolve_llm_provider(provider)
     provider_export = shlex.quote(active_provider)
-    # Provider-keyed model mapping (lead-ifye3.2 behavior 4): resolve the ACTIVE
-    # provider's row (coding/review/default literal model IDs) and render the
-    # three `-I MODEL_*` inputs the finite `fabro run` supplies to resolve the
-    # poured model_stylesheet's node-class input placeholders
-    # ({{ inputs.MODEL_CODING/REVIEW/DEFAULT }}).  On the openrouter override the
-    # OpenRouter-row literals are selected; with no override the Anthropic row
-    # (behavior-preserving, today's claude-haiku-4-5 everywhere).
-    model_row = resolve_model_mapping(active_provider)
-    model_inputs = " ".join(
-        (
-            f"-I {MODEL_INPUT_CODING}={shlex.quote(model_row[MODEL_TIER_CODING])}",
-            f"-I {MODEL_INPUT_REVIEW}={shlex.quote(model_row[MODEL_TIER_REVIEW])}",
-            f"-I {MODEL_INPUT_DEFAULT}={shlex.quote(model_row[MODEL_TIER_DEFAULT])}",
-        )
+    # Run-wide model/provider flags (lead-ifye3.5 behavior 5 / a3b2b6bebcee78f5,
+    # supersedes lead-ifye3.2 behavior 4's per-node-class `-I MODEL_*` inputs).
+    # fabro >= v0.267.0 (the FABRO_VERSION the openrouter base_url override depends
+    # on) removed model_stylesheet templating outright (fabro commit 911e080f3,
+    # "Limit DOT templates to prompt + goal"): `{{ inputs.X }}` inside
+    # model_stylesheet became a HARD PARSE ERROR, so the retired three
+    # `-I MODEL_CODING/REVIEW/DEFAULT` inputs can no longer resolve any per-node-
+    # class model.  Per explicit product-authority direction, per-node-class model
+    # differentiation is DEPRIORITIZED (not permanently dropped) in favor of a
+    # single run-wide `fabro run --model <literal> --provider <active>` flag pair on
+    # every finite child (scout-proven with ZERO model_stylesheet: real OpenRouter
+    # response, both nodes).  The fleet-wide provider-keyed model mapping table
+    # (ADR-063) STAYS as the lookup structure — only what bc-launcher does with the
+    # resolved value changes: the run-wide model is the ACTIVE provider's row's
+    # `coding` tier (the substantive-work tier), the OpenRouter-row literal on the
+    # openrouter override and the Anthropic row (claude-haiku-4-5) with no override.
+    # `--provider` carries the ACTIVE provider value (the scenario pins the
+    # openrouter override as `--provider openrouter`).
+    run_wide_model = resolve_run_wide_model(active_provider)
+    model_flags = (
+        f"--model {shlex.quote(run_wide_model)} "
+        f"--provider {shlex.quote(active_provider)}"
     )
     gh_token = shlex.quote(FABRO_SERVER_INSTALL_GH_TOKEN)
     server_settings = shlex.quote(FABRO_SERVER_SETTINGS_CONTAINER_PATH)
@@ -417,7 +419,7 @@ run_finite() {{
   _rf_sw="$(printf '%s' "$_rf_wid" | tr -c 'A-Za-z0-9._-' '_')"
   _rf_child={def_dir}/child-"$_rf_sw".toml
   materialize_child "$_rf_wid" "$_rf_child" || {{ echo "materialize $_rf_wid failed (non-fatal)" >>{run_log} 2>&1; }}
-  fabro run --server "$FABRO_SERVER" "child-$_rf_sw.toml" {model_inputs} --auto-approve >>{run_log} 2>&1
+  fabro run --server "$FABRO_SERVER" "child-$_rf_sw.toml" {model_flags} --auto-approve >>{run_log} 2>&1
   _rf_rc=$?
   echo "$(( $(cat {q_completed} 2>/dev/null || echo 0) + 1 ))" > {q_completed} 2>/dev/null || true
   rm -f "$_rf_child" 2>/dev/null || true

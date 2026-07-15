@@ -117,151 +117,168 @@ def _locate_fabro() -> str | None:
 # R6 — .coding / .review resolve to claude-haiku-4-5 (real, HONORED primary).
 # ===========================================================================
 
-def test_r6_coding_stylesheet_rule_pins_haiku():
-    """The `.coding` stylesheet rule RESOLVES to claude-haiku-4-5 (a REAL primary
-    model), NOT the persistently-429 claude-sonnet-4-5.
+def _node_classes(graph: str) -> set[str]:
+    """Every `class="…"` node-class present on the committed graph's agent nodes
+    (native `script=` nodes carry no class)."""
+    return set(re.findall(r'class="([^"]+)"', graph))
 
-    lead-ifye3.2 behavior 4: the `.coding` model is no longer a baked literal —
-    it is the MODEL_CODING node-class input placeholder resolved from the
-    provider-keyed mapping table.  The haiku-not-sonnet primary invariant is
-    preserved: on the default (anthropic) path MODEL_CODING resolves to
-    claude-haiku-4-5.
 
-    TEETH: point the Anthropic-row coding model (or the workflow.toml default)
-    at claude-sonnet-4-5 -> RED.
+def _run_wide_model_provider(script: str) -> tuple[str | None, str | None]:
+    """The run-wide `--model <id> --provider <name>` flags on the recorded finite
+    `fabro run` command line (lead-ifye3.5 behavior 5 — read off the REAL argv)."""
+    for line in script.splitlines():
+        if "fabro run" in line and "--server" in line:
+            m = re.search(r"--model\s+(\S+)", line)
+            p = re.search(r"--provider\s+(\S+)", line)
+            return (
+                m.group(1).strip("'\"") if m else None,
+                p.group(1).strip("'\"") if p else None,
+            )
+    return (None, None)
+
+
+def test_r6_coding_class_nodes_run_wide_haiku_primary_on_default_path():
+    """The `.coding` node-class nodes run on claude-haiku-4-5 (a REAL primary
+    model), NOT the persistently-429 claude-sonnet-4-5, on the DEFAULT path.
+
+    lead-ifye3.5 behavior 5 (a3b2b6bebcee78f5) reconciliation: the model_stylesheet
+    is GONE (fabro >= v0.267.0 removed its templating), so per-node-class model
+    differentiation is DEPRIORITIZED in favor of a single RUN-WIDE model the
+    launcher supplies on the finite `fabro run --model`.  The `.coding` nodes
+    (which still carry the `.coding` class) resolve to that one run-wide model; on
+    the DEFAULT (anthropic) path it is claude-haiku-4-5 — the haiku-not-sonnet
+    primary invariant is preserved.
+
+    TEETH: point the Anthropic-row run-wide (coding-tier) model at
+    claude-sonnet-4-5 -> RED.
     """
-    placeholder = _stylesheet_input_placeholder(_stylesheet(_workflow_text()), "coding")
-    assert placeholder == "MODEL_CODING", (
-        "R6(a): the `.coding` stylesheet rule must resolve its model from the "
-        f"MODEL_CODING input placeholder; got {placeholder!r}."
-    )
-    model = _resolved_default_model(placeholder)
-    assert model == "claude-haiku-4-5", (
-        "R6(a): the `.coding` node-class must resolve to claude-haiku-4-5 as a "
-        "real primary model on the default path (sonnet-4-5 is persistently 429 "
-        f"on the fleet); got {model!r}."
+    from bc_launcher.fabro.llm_provider import (
+        LLM_PROVIDER_ANTHROPIC,
+        resolve_run_wide_model,
     )
 
+    graph = _workflow_text()
+    assert "coding" in _node_classes(graph), (
+        "the committed workflow.fabro must still carry `.coding`-class nodes; "
+        f"classes: {_node_classes(graph)!r}"
+    )
+    assert "model_stylesheet=" not in graph, (
+        "the poured workflow.fabro must carry NO model_stylesheet (fabro >= "
+        "v0.267.0 removed its templating); model resolution is run-wide"
+    )
+    run_wide = resolve_run_wide_model(LLM_PROVIDER_ANTHROPIC)
+    assert run_wide == "claude-haiku-4-5", (
+        "R6(a): the `.coding` nodes must run on the run-wide claude-haiku-4-5 "
+        "primary on the default path (sonnet-4-5 is persistently 429 on the "
+        f"fleet); got run-wide model {run_wide!r}."
+    )
 
-def test_r6_review_stylesheet_rule_pins_haiku():
-    """The `.review` stylesheet rule RESOLVES to claude-haiku-4-5 (a REAL primary
-    model), NOT the persistently-429 claude-sonnet-4-5.
 
-    lead-ifye3.2 behavior 4: the `.review` model is the MODEL_REVIEW node-class
-    input placeholder resolved from the provider-keyed mapping table; on the
-    default (anthropic) path it resolves to claude-haiku-4-5.
+def test_r6_review_class_nodes_run_wide_haiku_primary_on_default_path():
+    """The `.review` node-class nodes run on claude-haiku-4-5 (a REAL primary
+    model), NOT the persistently-429 claude-sonnet-4-5, on the DEFAULT path.
 
-    TEETH: point the Anthropic-row review model (or the workflow.toml default)
-    at claude-sonnet-4-5 -> RED.
+    lead-ifye3.5 behavior 5 reconciliation: the single RUN-WIDE model covers the
+    `.review` node-class too (per-node-class differentiation deprioritized); on
+    the DEFAULT (anthropic) path it resolves to claude-haiku-4-5.
+
+    TEETH: point the Anthropic-row run-wide model at claude-sonnet-4-5 -> RED.
     """
-    placeholder = _stylesheet_input_placeholder(_stylesheet(_workflow_text()), "review")
-    assert placeholder == "MODEL_REVIEW", (
-        "R6(a): the `.review` stylesheet rule must resolve its model from the "
-        f"MODEL_REVIEW input placeholder; got {placeholder!r}."
-    )
-    model = _resolved_default_model(placeholder)
-    assert model == "claude-haiku-4-5", (
-        "R6(a): the `.review` node-class must resolve to claude-haiku-4-5 as a "
-        "real primary model on the default path (sonnet-4-5 is persistently 429 "
-        f"on the fleet); got {model!r}."
+    from bc_launcher.fabro.llm_provider import (
+        LLM_PROVIDER_ANTHROPIC,
+        resolve_run_wide_model,
     )
 
+    graph = _workflow_text()
+    assert "review" in _node_classes(graph), (
+        "the committed workflow.fabro must still carry `.review`-class nodes; "
+        f"classes: {_node_classes(graph)!r}"
+    )
+    run_wide = resolve_run_wide_model(LLM_PROVIDER_ANTHROPIC)
+    assert run_wide == "claude-haiku-4-5", (
+        "R6(a): the `.review` nodes must run on the run-wide claude-haiku-4-5 "
+        "primary on the default path (sonnet-4-5 is persistently 429 on the "
+        f"fleet); got run-wide model {run_wide!r}."
+    )
 
-def test_r6_no_swallowed_fallbacks_key_remains():
-    """No `fallbacks:` key remains in the stylesheet — fabro 0.254.0 SILENTLY
-    SWALLOWS it (a false-green), so the fix must use a real `model:` value, not
-    a swallowed `fallbacks:` chain.
 
-    TEETH: add `.coding { model: ...; fallbacks: ... }` -> RED.
+def test_r6_no_model_stylesheet_remains():
+    """No model_stylesheet remains in the poured def — fabro >= v0.267.0 makes
+    `{{ inputs.X }}` inside model_stylesheet a HARD PARSE ERROR (fabro commit
+    911e080f3).  The run-wide `fabro run --model` replaces per-node-class model
+    resolution outright, so there is no stylesheet to carry a swallowed
+    `fallbacks:` false-green either.
+
+    TEETH: re-add a `model_stylesheet="…"` graph attribute -> RED.
     """
-    sheet = _stylesheet(_workflow_text())
-    assert "fallbacks" not in sheet, (
-        "the model_stylesheet must carry NO `fallbacks:` key — fabro 0.254.0 "
-        "silently swallows it (unhonored false-green); use a real `model:` "
-        f"value instead. sheet:\n{sheet}"
+    graph = _workflow_text()
+    assert "model_stylesheet=" not in graph, (
+        "the poured workflow.fabro must carry NO model_stylesheet (removed under "
+        f"lead-ifye3.5 behavior 5); model resolution is the run-wide `--model`."
+    )
+    assert "fallbacks" not in graph, (
+        "no swallowed `fallbacks:` false-green may remain; model resolution is "
+        "the run-wide `--model`."
     )
 
 
-def test_r6_coding_review_class_nodes_resolve_to_haiku_via_real_validate():
-    """PROOF-OF-HONORED (the lead's own technique): a `model:` value IS parsed
-    and APPLIED to the class nodes by `fabro validate`.  A bogus `model:` on a
-    `.coding` node is CAUGHT (`stylesheet_model_known` / `node_model_known`),
-    whereas a swallowed `fallbacks:` key would NOT be — proving the haiku
-    primary is REALLY applied, not silently dropped.
+def test_r6_run_wide_haiku_primary_honored_on_recorded_command_and_def_validates(tmp_path):
+    """PROOF-OF-HONORED, re-bound to the run-wide `--model` (lead-ifye3.5 behavior
+    5).  Two legs:
 
-    (1) The committed def validates exit 0 + valid:true + zero diagnostics with
-        the haiku primary.
-    (2) A BOGUS `.coding` model produces `node_model_known` diagnostics naming
-        the `.coding`-class nodes -> the `model:` value is HONORED/parsed.
+    (1) The committed def (no model_stylesheet) validates exit 0 + valid:true +
+        ZERO diagnostics under the REAL `fabro validate` — the stylesheet removal
+        did not break the def.
+    (2) The haiku primary is HONORED on the wire: the REAL launcher's recorded
+        finite `fabro run` command on the DEFAULT (anthropic) path carries
+        `--model claude-haiku-4-5 --provider anthropic` — the run-wide model that
+        every node-class actually runs on.  `fabro validate` no longer accepts a
+        run-wide `--model` (it is a run-time flag), so the honored-primary proof
+        binds to the ACTUAL recorded run command, not to validate.
 
-    SKIP honestly only if the real fabro binary cannot be obtained.
+    SKIP honestly only if the real fabro binary cannot be obtained (leg 1).
     """
+    # --- (1) the committed def still validates (no stylesheet) --------------
     fabro = _locate_fabro()
     if fabro is None:
         pytest.skip("fabro binary not available (cached/PATH); real-validate skipped")
     src = _fabro_def_asset_root() / "workflow.fabro"
-
-    def _validate(text: str, tmp: Path, sibling_overrides: dict | None = None) -> dict:
-        wf = tmp / "workflow.fabro"
-        wf.write_text(text)
-        overrides = sibling_overrides or {}
-        # copy the sibling def files so inputs bind and no stray warnings appear
+    import tempfile
+    with tempfile.TemporaryDirectory() as d1:
+        tmp = Path(d1)
         for sib in src.parent.iterdir():
-            if sib.name == "workflow.fabro":
-                continue
             dest = tmp / sib.name
-            if sib.name in overrides:
-                dest.write_text(overrides[sib.name])
-            elif sib.is_dir():
+            if sib.is_dir():
                 shutil.copytree(sib, dest)
             else:
                 dest.write_text(sib.read_text())
         proc = subprocess.run(
-            [fabro, "validate", "--no-upgrade-check", "--json", str(wf)],
+            [fabro, "validate", "--no-upgrade-check", "--json",
+             str(tmp / "workflow.toml")],
             capture_output=True, text=True, timeout=120,
         )
-        return json.loads(proc.stdout)
-
-    import tempfile
-    committed = src.read_text()
-    with tempfile.TemporaryDirectory() as d1:
-        doc = _validate(committed, Path(d1))
+        doc = json.loads(proc.stdout)
     assert doc.get("valid") is True, (
-        f"committed def must validate valid:true; got {doc.get('valid')!r}"
+        f"committed def (no stylesheet) must validate valid:true; got "
+        f"{doc.get('valid')!r}; stderr={proc.stderr!r}"
     )
     assert doc.get("diagnostics") == [], (
         f"committed def must report ZERO diagnostics; got {doc.get('diagnostics')!r}"
     )
 
-    # PROOF-OF-HONORED (lead-ifye3.2 behavior 4): the `.coding` model is now the
-    # MODEL_CODING input placeholder, RESOLVED from the workflow.toml [run.inputs]
-    # default (what validate renders) / the launcher's `-I MODEL_CODING`.  A
-    # BOGUS resolved model — injected via the workflow.toml default the
-    # placeholder binds from — must still be CAUGHT by fabro validate
-    # (`node_model_known` / `stylesheet_model_known`), proving the RESOLVED
-    # `model:` is HONORED/parsed (not swallowed like a `fallbacks:` key would be).
-    committed_toml = (src.parent / "workflow.toml").read_text()
-    bogus_toml = committed_toml.replace(
-        'MODEL_CODING = "claude-haiku-4-5"',
-        'MODEL_CODING = "claude-bogus-9-9"',
+    # --- (2) the run-wide haiku primary is HONORED on the recorded command ---
+    # Drive the REAL launcher on the DEFAULT (no-override) path and read the
+    # ACTUAL recorded finite `fabro run` command.
+    script = _fabro_engage_exec(tmp_path).command[2]
+    model, provider = _run_wide_model_provider(script)
+    assert model == "claude-haiku-4-5", (
+        "the DEFAULT-path finite `fabro run` must carry the run-wide "
+        f"`--model claude-haiku-4-5` (real haiku primary); got --model {model!r}; "
+        f"script:\n{script}"
     )
-    assert bogus_toml != committed_toml, (
-        "expected to rewrite the workflow.toml MODEL_CODING default"
-    )
-    with tempfile.TemporaryDirectory() as d2:
-        bogus_doc = _validate(
-            committed, Path(d2), sibling_overrides={"workflow.toml": bogus_toml}
-        )
-    node_model_diags = [
-        diag for diag in bogus_doc.get("diagnostics", [])
-        if diag.get("rule") in ("node_model_known", "stylesheet_model_known")
-        and "claude-bogus-9-9" in (diag.get("message") or "")
-    ]
-    assert node_model_diags, (
-        "a BOGUS `.coding` `model:` value must be CAUGHT by fabro validate "
-        "(node_model_known / stylesheet_model_known) — proving `model:` is "
-        "HONORED/parsed (not swallowed like a `fallbacks:` key would be). "
-        f"diagnostics:\n{bogus_doc.get('diagnostics')!r}"
+    assert provider == "anthropic", (
+        "the DEFAULT-path finite `fabro run` must carry `--provider anthropic`; "
+        f"got --provider {provider!r}; script:\n{script}"
     )
 
 

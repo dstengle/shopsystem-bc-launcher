@@ -81,7 +81,18 @@
 digraph BcShopLoop {
     graph [
         goal="Recreate the bc-shop Implementer->Reviewer loop for BC {{ inputs.BC_NAME }} / work {{ inputs.WORK_ID }} and emit a GATED work_done via shop-msg/bc-emit. Reviewer is the SOLE work_done emitter on the scenario path. HARD RULE: a FAILED node must never advance to the SUCCEEDED terminal; every fallible node carries an explicit unconditional failsafe edge to halt (infra) or emit_blk (deliverable). STRUCTURAL RULE: every state-changing action (inbox drain, integrate, work-done gate, bc-emit) is a NATIVE non-LLM script node; agents may ONLY judge and route."
-        model_stylesheet="* { model: {{ inputs.MODEL_DEFAULT }} } .classify { model: {{ inputs.MODEL_DEFAULT }} } .coding { model: {{ inputs.MODEL_CODING }} } .review { model: {{ inputs.MODEL_REVIEW }} }"
+        // MODEL RESOLUTION (lead-ifye3.5 behavior 5 / a3b2b6bebcee78f5): NO
+        // model_stylesheet.  fabro >= v0.267.0 (the FABRO_VERSION the openrouter
+        // base_url override depends on) removed model_stylesheet templating outright
+        // (fabro commit 911e080f3, "Limit DOT templates to prompt + goal"):
+        // `{{ inputs.X }}` inside model_stylesheet became a HARD PARSE ERROR.  Per
+        // product-authority direction, per-node-class model differentiation is
+        // DEPRIORITIZED in favor of a single RUN-WIDE model supplied on the finite
+        // `fabro run` command as `--model <literal> --provider <active>` (engage.py
+        // run_finite); every node-class (`*` / `.classify` / `.coding` / `.review`)
+        // resolves to that one run-wide model.  The provider-keyed mapping table
+        // (ADR-063, bc_launcher.fabro.llm_provider) STAYS as the run-wide model's
+        // lookup.  Scout-proven with ZERO model_stylesheet: real OpenRouter response.
         rankdir=TB
         fallback_retry_target="halt"
     ]
