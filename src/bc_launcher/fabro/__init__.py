@@ -19,8 +19,10 @@ from bc_launcher.fabro.constants import (  # noqa: F401
     LAUNCH_PATH_TMUX,
     LAUNCH_PATH_FABRO,
     ANTHROPIC_OAUTH_SHIM_BIN,
+    OPENROUTER_SHIM_BIN,
     FABRO_SHIM_HOST,
     FABRO_SHIM_PORT,
+    FABRO_OPENROUTER_SHIM_PORT,
     FABRO_SETTINGS_CONTAINER_PATH,
     FABRO_WORKFLOW_TOML_CONTAINER_PATH,
     FABRO_DISPATCHER_TOML_CONTAINER_PATH,
@@ -53,6 +55,8 @@ from bc_launcher.fabro.def_bundle import (  # noqa: F401
 from bc_launcher.fabro.provider import (  # noqa: F401
     _fabro_shim_start_argv,
     _fabro_shim_start_script,
+    _openrouter_shim_start_argv,
+    _openrouter_shim_start_script,
 )
 from bc_launcher.fabro.llm_provider import (  # noqa: F401
     LLM_PROVIDER_ANTHROPIC,

@@ -16,18 +16,22 @@ from bc_launcher.constants import (
 )
 from bc_launcher.fabro import (
     ANTHROPIC_OAUTH_SHIM_BIN,
+    OPENROUTER_SHIM_BIN,
     FABRO_ANTHROPIC_ADAPTER,
     FABRO_ANTHROPIC_BASE_URL,
     FABRO_DEF_CONTAINER_DIR,
     FABRO_DISPATCHER_TOML_CONTAINER_PATH,
+    FABRO_OPENROUTER_SHIM_PORT,
     FABRO_SETTINGS_CONTAINER_PATH,
     FABRO_SHIM_HOST,
     FABRO_SHIM_PORT,
     FABRO_WORKFLOW_TOML_CONTAINER_PATH,
     LLM_PROVIDER_ANTHROPIC,
+    LLM_PROVIDER_OPENROUTER,
     _fabro_exec_env,
     _fabro_settings_install_script,
     _fabro_shim_start_script,
+    _openrouter_shim_start_script,
     _fabro_workflow_toml_read_script,
     _fabro_workflow_toml_rewrite,
     _fabro_workflow_toml_writeback_script,
@@ -376,6 +380,45 @@ class LaunchPrepMixin:
                     f"{FABRO_ANTHROPIC_BASE_URL}, adapter="
                     f"{FABRO_ANTHROPIC_ADAPTER}; no credential written — "
                     "ADR-049 D1/D2)\n"
+                )
+        elif resolved_active_provider == LLM_PROVIDER_OPENROUTER:
+            # OPENROUTER-SHIM PATH (lead-ifye3.5 behavior 1).  The openrouter
+            # override's [llm.providers.openai] base_url points at the LOCAL
+            # openrouter-shim loopback (registered AT THE SERVER by the engage),
+            # so here the launcher STARTS the openrouter-shim as an UNSANDBOXED,
+            # container-level background listener — the SAME launch-lifecycle
+            # shape the anthropic-oauth-shim uses, but on the openrouter-shim's
+            # OWN distinct loopback port so both shims coexist.  The direct-to-
+            # OpenRouter base_url could never complete a dispatch from inside
+            # fabro's sandbox (env cleared/filtered + no HTTPS_PROXY egress); the
+            # unsandboxed shim makes the real outbound call through HTTPS_PROXY
+            # where agent-vault substitutes the credential on the shim's OWN hop.
+            # The Anthropic anthropic-oauth-shim is deliberately NOT started on
+            # this path.
+            shim_result = self._driver.exec_run(
+                container,
+                ["/bin/sh", "-c", _openrouter_shim_start_script()],
+                user=AGENT_CONTAINER_USER,
+                env=_fabro_exec_env(),
+            )
+            if shim_result.returncode != 0:
+                err_lines.append(
+                    "warning: openrouter-shim start failed (exit "
+                    f"{shim_result.returncode}): "
+                    f"{(shim_result.stderr or shim_result.stdout).strip()}"
+                    f"; fabro's openrouter override may lack a local endpoint "
+                    f"on {FABRO_SHIM_HOST}:{FABRO_OPENROUTER_SHIM_PORT} but "
+                    "the agent will still be started (lead-ifye3.5)\n"
+                )
+            else:
+                out_lines.append(
+                    "Started the baked openrouter-shim "
+                    f"({OPENROUTER_SHIM_BIN}) as an unsandboxed, container-level "
+                    f"background listener on {FABRO_SHIM_HOST}:"
+                    f"{FABRO_OPENROUTER_SHIM_PORT} — the same launch-lifecycle "
+                    "shape the anthropic-oauth-shim uses; the Anthropic "
+                    "anthropic-oauth-shim path is NOT engaged for this launch "
+                    "(lead-ifye3.5 behavior 1)\n"
                 )
         else:
             out_lines.append(
