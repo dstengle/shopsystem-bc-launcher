@@ -262,9 +262,18 @@ def _fabro_engage_script(bc_name: str, provider: str | None = None) -> str:
         credential_exports = (
             f"export {OPENROUTER_NODE_CREDENTIAL_ENV}={or_placeholder} && "
         )
+        # base_url-ONLY override (behavior 2, @scenario_hash:a28018af66182e33):
+        # register the native "openai" provider entry with ONLY "base_url"
+        # overridden — NO explicit "adapter"/"auth".  The built-in "openai"
+        # catalog entry already supplies the adapter (and every other) default;
+        # overriding base_url ALONE merges onto that default so fabro's
+        # sandboxed-worker STARTUP PRECONDITION passes.  Adding an explicit
+        # "adapter"/"auth" key on top makes fabro treat the entry as a full
+        # (invalid) provider definition and the precondition fails with
+        # "No LLM providers configured, set ANTHROPIC_API_KEY or OPENAI_API_KEY"
+        # before any node runs.
         provider_block = (
             f"\\n[llm.providers.{FABRO_OPENROUTER_PROVIDER_IDENTITY}]\\n"
-            f'adapter = "{FABRO_OPENROUTER_ADAPTER}"\\n'
             f'base_url = "{FABRO_OPENROUTER_BASE_URL}"\\n'
         )
     else:

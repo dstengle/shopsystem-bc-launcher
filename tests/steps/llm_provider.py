@@ -626,7 +626,6 @@ def openrouter_mitm_substitutes_bearer_on_wire(header, ctx):
     from urllib.parse import urlparse
 
     from bc_launcher.fabro.constants import (
-        FABRO_OPENROUTER_ADAPTER,
         FABRO_OPENROUTER_BASE_URL,
         FABRO_OPENROUTER_PROVIDER_IDENTITY,
     )
@@ -654,12 +653,19 @@ def openrouter_mitm_substitutes_bearer_on_wire(header, ctx):
         f"the wire for the broker to substitute); script:\n{script}"
     )
     # OpenRouter's OpenAI-compatible API authenticates via `Authorization:
-    # Bearer` — the header the broker substitutes on — so the provider uses the
-    # openai adapter (NOT an anthropic x-api-key header-reshaping shim).
-    assert f'adapter = "{FABRO_OPENROUTER_ADAPTER}"' in script, (
-        f"the openrouter provider must use the {FABRO_OPENROUTER_ADAPTER!r} "
-        f"adapter (Authorization: Bearer auth — the {header!r} header the "
-        f"broker substitutes on the wire); script:\n{script}"
+    # Bearer` — the header the broker substitutes on.  That Bearer-auth behavior
+    # comes from the built-in "openai" catalog adapter default, which the native
+    # "openai" provider identity ([llm.providers.openai], asserted above) already
+    # supplies.  (behavior 2, @scenario_hash:a28018af66182e33: the override entry
+    # must carry NO explicit "adapter" key — an explicit adapter/auth key breaks
+    # fabro's sandboxed-worker startup precondition; the openai catalog supplies
+    # it.)  So the override block must NOT emit an explicit adapter override.
+    or_block = _openai_provider_block(script)
+    assert or_block is not None and "adapter" not in or_block, (
+        "the openrouter override registers the native openai identity, whose "
+        "built-in catalog adapter default supplies Authorization: Bearer auth — "
+        "the override block must NOT emit an explicit 'adapter' key (which would "
+        f"break fabro's startup precondition); script:\n{script}"
     )
     # SCOPED TO THE OpenRouter HOST: the broker's MITM substitution matches by
     # DESTINATION HOST (openrouter.ai), not by env var name — so the wiring that

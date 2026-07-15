@@ -252,7 +252,13 @@ FABRO_OPENROUTER_BASE_URL = (
     f"http://{FABRO_SHIM_HOST}:{FABRO_OPENROUTER_SHIM_PORT}/v1"
 )
 
-FABRO_OPENROUTER_ADAPTER = "openai"
+# NOTE (behavior 2, @scenario_hash:a28018af66182e33): there is deliberately NO
+# FABRO_OPENROUTER_ADAPTER constant.  The openrouter override registers the
+# native "openai" provider entry with ONLY "base_url" overridden — the built-in
+# "openai" catalog entry supplies the adapter default.  Emitting an explicit
+# adapter (or auth) key on the override entry breaks fabro's sandboxed-worker
+# startup precondition ("No LLM providers configured, set ANTHROPIC_API_KEY or
+# OPENAI_API_KEY").
 
 # The fabro NATIVE provider identity the openrouter override registers under: the
 # built-in "openai" provider (with base_url overridden to the OpenRouter
