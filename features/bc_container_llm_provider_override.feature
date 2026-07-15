@@ -40,6 +40,19 @@ Feature: a launch-time --llm-provider / BCLAUNCHER_LLM_PROVIDER override selects
   #     override under fabro's NATIVE "openai" provider identity with base_url
   #     overridden to the OpenRouter endpoint, so catalog routing lands
   #     unambiguously on a registered provider.
+  #
+  #   14290420156c5ee0  superseded-by  98b956adece2b7e0
+  #   reason: the retired scenario pinned the node-side credential env var as a
+  #     CUSTOM "OPENROUTER_API_KEY". fabro's startup precondition check (run in
+  #     the sandboxed worker) only recognizes ANTHROPIC_API_KEY / OPENAI_API_KEY,
+  #     so a custom OPENROUTER_API_KEY never reached that check and the native
+  #     openai provider never saw its key. The corrected scenario below
+  #     (98b956adece2b7e0) rides fabro's NATIVE "OPENAI_API_KEY" env var
+  #     (__PLACEHOLDER__ node-side, no header-reshaping shim), with the
+  #     agent-vault broker's MITM proxy substituting the real key on the wire
+  #     scoped to the OpenRouter host — the broker-side vault lookup key stays
+  #     OPENROUTER_API_KEY and is DECOUPLED from the node-side env var name (the
+  #     substitution matches by DESTINATION HOST, not by env var name).
   @scenario_hash:4c9f5b265c5098b7 @bc:shopsystem-bc-launcher
   Scenario: an explicit launch-time provider override selects OpenRouter access via fabro's NATIVE "openai" provider identity, with its "base_url" overridden to the OpenRouter endpoint — not a new custom "openrouter" fabro provider
     Given the shopsystem-bc-launcher BC is installed
@@ -49,14 +62,14 @@ Feature: a launch-time --llm-provider / BCLAUNCHER_LLM_PROVIDER override selects
     And fabro's catalog auto-routing for OpenRouter-catalog-qualified model strings such as "anthropic/claude-sonnet-4.5" resolves unambiguously to the "openai" provider, with no collision against fabro's built-in "anthropic" catalog entry
     And the Anthropic anthropic-oauth-shim path is not engaged for this launch
 
-  @scenario_hash:14290420156c5ee0 @bc:shopsystem-bc-launcher
-  Scenario: the OpenRouter credential rides a new agent-vault-brokered credential with no header-reshaping shim, matching the GITHUB_TOKEN no-shim pattern rather than the Anthropic oauth-shim pattern
+  @scenario_hash:98b956adece2b7e0 @bc:shopsystem-bc-launcher
+  Scenario: the OpenRouter credential rides fabro's native "OPENAI_API_KEY" env var with no header-reshaping shim, matching the GITHUB_TOKEN no-shim pattern — not the retired custom "OPENROUTER_API_KEY" shape
     Given the shopsystem-bc-launcher BC is installed
     And the operator supplies a launch-time LLM provider override of "openrouter"
-    And an agent-vault broker with a registered OpenRouter credential service is running on the shopsystem network and is reachable
+    And an agent-vault broker with a registered OpenRouter-host credential service is running on the shopsystem network and is reachable
     When bc-container launch starts the agent for BC name "shopsystem-messaging" with the OpenRouter provider override
-    Then the node-side "OPENROUTER_API_KEY" value is the literal placeholder "__PLACEHOLDER__", with no header-reshaping shim process launched for the OpenRouter path
-    And the agent-vault broker's MITM proxy substitutes the real OpenRouter API key onto the outbound "Authorization: Bearer" header only on the wire
+    Then the node-side "OPENAI_API_KEY" value is the literal placeholder "__PLACEHOLDER__", with no header-reshaping shim process launched for the OpenRouter path
+    And the agent-vault broker's MITM proxy substitutes the real OpenRouter API key onto the outbound "Authorization: Bearer" header only on the wire, scoped to requests directed at the OpenRouter host
     And the real OpenRouter API key is not present in the container's filesystem or process environment
 
   @scenario_hash:22f2a5bda5c29044 @bc:shopsystem-bc-launcher
