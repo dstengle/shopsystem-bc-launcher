@@ -34,14 +34,14 @@ USER root
 # (ADR-022 / lead-czwo: this replaces the retired shopsystem-templates-release
 # repository_dispatch fan-in, which previously threaded the released tag in via
 # --build-arg from a dispatch client_payload.)
-ARG SHOP_TEMPLATES_VERSION=v0.52.4
+ARG SHOP_TEMPLATES_VERSION=v0.52.5
 
 # The bc-launcher RELEASE version (the pushed v* tag) is threaded in as a build
 # ARG by the publish workflow (build-args: SHOPSYSTEM_BC_LAUNCHER_VERSION=
 # ${{ github.ref_name }}). The default below records a known-good value for a
 # plain (non-CI) build; the workflow overrides it with the pushed tag. Promoted
 # to a persisted ENV below so it surfaces in `docker inspect` (lead-5xnd).
-ARG SHOPSYSTEM_BC_LAUNCHER_VERSION=v0.3.73
+ARG SHOPSYSTEM_BC_LAUNCHER_VERSION=v0.3.74
 
 # Promote both version ARGs to PERSISTED ENV so the published image (and any
 # container started from it) surfaces the baked bc-launcher release version and
