@@ -906,7 +906,7 @@ class FakeDockerDriver:
     # in-container exec model report the pinned version faithfully. It is
     # DERIVED from the Dockerfile FABRO_VERSION pin at seed time so the two
     # cannot silently drift.
-    _BC_BASE_FABRO_VERSION = "v0.254.0"
+    _BC_BASE_FABRO_VERSION = "v0.267.0-nightly.0"
 
     def set_running_on_bc_base_image(
         self, container_name: str, image: str

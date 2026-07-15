@@ -146,7 +146,7 @@ _BC_BASE_PINNED_IMAGE = (
 )
 
 
-_FABRO_PIN = "v0.254.0"
+_FABRO_PIN = "v0.267.0-nightly.0"
 
 
 def _strip_dockerfile_comments(text: str) -> str:
