@@ -20,14 +20,6 @@ Feature: a launch-time --llm-provider / BCLAUNCHER_LLM_PROVIDER override selects
   FakeDockerDriver) and bind to its ACTUAL recorded fabro engage exec — never
   a model, never a shallow string-match.
 
-  @scenario_hash:1d9d3777e3c3d8f5 @bc:shopsystem-bc-launcher
-  Scenario: a plain launch with no operator-supplied provider override keeps the Anthropic-subscription path as the active LLM provider
-    Given the shopsystem-bc-launcher BC is installed
-    And no launch-time "--llm-provider" or "BCLAUNCHER_LLM_PROVIDER" override is supplied
-    When bc-container launch is run for BC name "shopsystem-messaging"
-    Then the container's fabro run is launched with the active LLM provider set to "anthropic"
-    And no OpenRouter agent-vault credential is requested for this launch
-
   # RETIRED-SCENARIO PROVENANCE (work_id lead-83mh8):
   #   b3054f5439369fa8  superseded-by  4c9f5b265c5098b7
   #   reason: the retired scenario pinned only "active LLM provider = openrouter"
@@ -53,6 +45,15 @@ Feature: a launch-time --llm-provider / BCLAUNCHER_LLM_PROVIDER override selects
   #     scoped to the OpenRouter host — the broker-side vault lookup key stays
   #     OPENROUTER_API_KEY and is DECOUPLED from the node-side env var name (the
   #     substitution matches by DESTINATION HOST, not by env var name).
+
+  @scenario_hash:1d9d3777e3c3d8f5 @bc:shopsystem-bc-launcher
+  Scenario: a plain launch with no operator-supplied provider override keeps the Anthropic-subscription path as the active LLM provider
+    Given the shopsystem-bc-launcher BC is installed
+    And no launch-time "--llm-provider" or "BCLAUNCHER_LLM_PROVIDER" override is supplied
+    When bc-container launch is run for BC name "shopsystem-messaging"
+    Then the container's fabro run is launched with the active LLM provider set to "anthropic"
+    And no OpenRouter agent-vault credential is requested for this launch
+
   @scenario_hash:4c9f5b265c5098b7 @bc:shopsystem-bc-launcher
   Scenario: an explicit launch-time provider override selects OpenRouter access via fabro's NATIVE "openai" provider identity, with its "base_url" overridden to the OpenRouter endpoint — not a new custom "openrouter" fabro provider
     Given the shopsystem-bc-launcher BC is installed
