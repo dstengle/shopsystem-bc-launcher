@@ -76,6 +76,26 @@ Feature: a launch-time --llm-provider / BCLAUNCHER_LLM_PROVIDER override selects
   #     through which agent-vault substitutes the real OpenRouter key on the shim's
   #     outbound wire hop, scoped to the OpenRouter host — the GITHUB_TOKEN no-shim
   #     pattern moved one hop out.  work_id lead-ifye3.5.
+  #
+  #   22f2a5bda5c29044  superseded-by  a3b2b6bebcee78f5
+  #   reason: the retired scenario resolved each poured node-class placeholder to a
+  #     literal model ID via three per-child fabro-run "-I MODEL_CODING/REVIEW/
+  #     DEFAULT" inputs feeding the workflow.fabro model_stylesheet's
+  #     "{{ inputs.MODEL_* }}" templating.  fabro >= v0.267.0 (the FABRO_VERSION the
+  #     openrouter base_url override depends on) removed model_stylesheet templating
+  #     outright (fabro commit 911e080f3, "Limit DOT templates to prompt + goal"):
+  #     "{{ inputs.X }}" inside model_stylesheet becomes literal, unparseable text —
+  #     a HARD PARSE ERROR, so the "-I MODEL_*" inputs can no longer resolve any
+  #     per-node-class model.  Per explicit product-authority direction, per-node-
+  #     class model differentiation is DEPRIORITIZED (not permanently dropped) in
+  #     favor of a proven run-wide "fabro run --model <resolved-literal> --provider
+  #     <active>" flag pair on the dispatcher's per-child spawn command (scout-proven
+  #     with ZERO model_stylesheet in the graph: real OpenRouter response, both
+  #     nodes).  The corrected scenario below (a3b2b6bebcee78f5) pins the run-wide
+  #     "--model/--provider" flags REPLACING the retired per-node-class "-I MODEL_*"
+  #     inputs; the fleet-wide provider-keyed model mapping table (ADR-063) is
+  #     UNCHANGED as the lookup structure — only what bc-launcher does with the
+  #     resolved value changes.  work_id lead-ifye3.5.
 
   @scenario_hash:1d9d3777e3c3d8f5 @bc:shopsystem-bc-launcher
   Scenario: a plain launch with no operator-supplied provider override keeps the Anthropic-subscription path as the active LLM provider
@@ -122,15 +142,15 @@ Feature: a launch-time --llm-provider / BCLAUNCHER_LLM_PROVIDER override selects
     And the "openrouter-shim" process's own environment (not the sandboxed node's) carries the real "HTTPS_PROXY", through which the agent-vault broker's MITM proxy substitutes the real OpenRouter API key onto that same "Authorization: Bearer" header only on the shim's outbound wire hop, scoped to requests directed at the OpenRouter host
     And the real OpenRouter API key is not present in the sandboxed node's filesystem or process environment at any point, including via "[run.environment.env]" overlays, because fabro's sandboxed execution path clears and filters credential-shaped environment variables before spawning
 
-  @scenario_hash:22f2a5bda5c29044 @bc:shopsystem-bc-launcher
-  Scenario: bc-launcher resolves each poured node-class placeholder to a literal model ID via fabro run "-I" inputs, sourced from the provider-keyed mapping table for the active provider
+  @scenario_hash:a3b2b6bebcee78f5 @bc:shopsystem-bc-launcher
+  Scenario: the dispatcher's per-child "fabro run" command line carries run-wide "--model"/"--provider" flags, replacing the retired per-node-class "-I MODEL_CODING"/"MODEL_REVIEW"/"MODEL_DEFAULT" inputs
     Given the shopsystem-bc-launcher BC is installed
-    And the poured "/workspace/.fabro/workflow.fabro" model_stylesheet carries the node-class input placeholders "MODEL_CODING", "MODEL_REVIEW", and "MODEL_DEFAULT"
-    And the fleet-wide provider-keyed model mapping table has an OpenRouter row and an Anthropic row, each naming a literal model ID for the "coding", "review", and "default" node-class tiers
     And the operator supplies a launch-time LLM provider override of "openrouter"
-    When bc-container launch runs the container's fabro workflow for BC name "shopsystem-messaging" with the OpenRouter provider override
-    Then the fabro run command line supplies three "-I" inputs — MODEL_CODING, MODEL_REVIEW, and MODEL_DEFAULT — each set to the literal model ID recorded in the mapping table's OpenRouter row for that node-class
-    And when the same launch is run with no provider override, the same three inputs instead carry the literal model IDs recorded in the mapping table's Anthropic row
+    And the fleet-wide provider-keyed model mapping table names a literal model ID for the active provider
+    When bc-container launch's dispatcher spawns a child "fabro run" for BC name "shopsystem-messaging" with the OpenRouter provider override
+    Then the child "fabro run" command line carries "--model <literal-model-id> --provider openrouter", sourced from the mapping table for the active provider
+    And the command line carries no "-I MODEL_CODING=", "-I MODEL_REVIEW=", or "-I MODEL_DEFAULT=" input for this launch
+    And every node in the workflow, regardless of its ".coding"/".review"/"*" node-class, resolves to that same single run-wide model — per-node-class model differentiation is not supplied by this launch
 
   @scenario_hash:c99e79ac24f56f5c @bc:shopsystem-bc-launcher
   Scenario: a real dispatch completes end-to-end on a BC launched with the OpenRouter override, with no software release required

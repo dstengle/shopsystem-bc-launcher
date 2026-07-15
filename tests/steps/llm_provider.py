@@ -810,19 +810,28 @@ def no_openrouter_credential_requested(ctx):
 
 
 # ---------------------------------------------------------------------------
-# Behavior 4 (@scenario_hash:22f2a5bda5c29044): the poured workflow.fabro
-# model_stylesheet carries node-class INPUT PLACEHOLDERS (MODEL_CODING /
-# MODEL_REVIEW / MODEL_DEFAULT) and the launcher resolves the ACTIVE provider's
-# row of a fleet-wide provider-keyed model mapping table into three `-I MODEL_*`
-# inputs on the finite `fabro run` — OpenRouter-row literals on the openrouter
-# override, Anthropic-row literals with no override.
+# Behavior 5 (@scenario_hash:a3b2b6bebcee78f5 — supersedes the retired
+# 22f2a5bda5c29044): the dispatcher's per-child `fabro run` command line carries
+# run-wide `--model <literal> --provider <active>` flags, REPLACING the retired
+# per-node-class `-I MODEL_CODING/REVIEW/DEFAULT` inputs.  fabro >= v0.267.0 (the
+# FABRO_VERSION the openrouter base_url override depends on) makes
+# `{{ inputs.X }}` inside model_stylesheet a HARD PARSE ERROR (fabro commit
+# 911e080f3, "Limit DOT templates to prompt + goal"), so the poured def carries
+# NO model_stylesheet templating; per-node-class model differentiation is
+# DEPRIORITIZED (product authority) in favor of a single run-wide model.  The
+# fleet-wide provider-keyed model mapping table (ADR-063) STAYS as the lookup
+# structure; only what the launcher does with the resolved value changes — it
+# selects the run-wide literal (the coding tier) instead of three per-class inputs.
 #
-# FIDELITY: the placeholder assertion reads the ACTUAL poured def bundle (the
-# same bytes `_load_fabro_def_files` places in the container), and the `-I`
-# assertions read the REAL launcher's ACTUAL recorded fabro-run command over the
-# FakeDockerDriver on TWO real drives (openrouter vs no override) — never a model
-# and never a shallow string-match: the literals are compared to the mapping
-# table's own rows, and the two provider rows must genuinely differ.
+# FIDELITY: the flag assertions read the REAL launcher's ACTUAL recorded finite
+# `fabro run` command over the FakeDockerDriver on the openrouter override drive
+# (via _odd9_drive_fabro_launch) — never a model and never a shallow string-match:
+# the run-wide `--model` literal is compared to the mapping table's own openrouter
+# row, `--provider` to the pinned active value, and the absence of `-I MODEL_*` is
+# read off the same recorded command line.  The "every node resolves the SAME
+# run-wide model AT RUNTIME" leg needs a real `fabro run` against live OpenRouter
+# and is an honest SKIP (test_behavior5_runtime_single_model_resolution_honest_skip
+# in test_bc_container_llm_provider_override.py), never faked.
 # ---------------------------------------------------------------------------
 
 
@@ -854,150 +863,158 @@ def _model_run_inputs(script):
     return out
 
 
-@given('the poured "/workspace/.fabro/workflow.fabro" model_stylesheet carries '
-       'the node-class input placeholders "MODEL_CODING", "MODEL_REVIEW", and '
-       '"MODEL_DEFAULT"')
-def poured_stylesheet_carries_placeholders(ctx):
-    stylesheet, workflow = _poured_model_stylesheet()
-    assert stylesheet is not None, (
-        "the poured workflow.fabro must carry a model_stylesheet graph "
-        f"attribute; workflow head:\n{workflow[:400]}"
+def _fabro_run_command(script):
+    """The finite-child `fabro run` command line the run_finite function issues,
+    read out of the recorded engage script (the ACTUAL argv, never a model)."""
+    for line in script.splitlines():
+        if "fabro run" in line and "--server" in line:
+            return line
+    return None
+
+
+def _model_provider_flags(script):
+    """The run-wide `--model <id> --provider <name>` flags on the recorded finite
+    `fabro run` command line (read off the ACTUAL recorded argv)."""
+    cmd = _fabro_run_command(script) or ""
+    m = re.search(r"--model\s+(\S+)", cmd)
+    p = re.search(r"--provider\s+(\S+)", cmd)
+    return (
+        m.group(1).strip("'\"") if m else None,
+        p.group(1).strip("'\"") if p else None,
     )
-    # The stylesheet's per-tier `model:` values must be node-class INPUT
-    # PLACEHOLDERS resolved via fabro minijinja (`{{ inputs.NAME }}`), NOT baked
-    # literal model IDs — so a launch-time `-I MODEL_*` input selects the model.
-    for placeholder in ("MODEL_CODING", "MODEL_REVIEW", "MODEL_DEFAULT"):
-        assert re.search(
-            r"\{\{\s*inputs\." + placeholder + r"\s*\}\}", stylesheet
-        ), (
-            "the poured model_stylesheet must carry the node-class input "
-            f"placeholder {{{{ inputs.{placeholder} }}}}; got "
-            f"model_stylesheet={stylesheet!r}"
-        )
-    ctx["b4_poured_stylesheet"] = stylesheet
 
 
-@given('the fleet-wide provider-keyed model mapping table has an OpenRouter row '
-       'and an Anthropic row, each naming a literal model ID for the "coding", '
-       '"review", and "default" node-class tiers')
-def mapping_table_has_both_rows(ctx):
+@given('the fleet-wide provider-keyed model mapping table names a literal model '
+       'ID for the active provider')
+def mapping_table_names_literal_for_active_provider(ctx):
     from bc_launcher.fabro.llm_provider import (
         LLM_PROVIDER_ANTHROPIC,
         LLM_PROVIDER_OPENROUTER,
-        PROVIDER_MODEL_MAPPING,
         resolve_model_mapping,
     )
 
-    tiers = ("coding", "review", "default")
-    for provider in (LLM_PROVIDER_OPENROUTER, LLM_PROVIDER_ANTHROPIC):
-        assert provider in PROVIDER_MODEL_MAPPING, (
-            "the fleet-wide provider-keyed model mapping table must carry a "
-            f"{provider!r} row; got {sorted(PROVIDER_MODEL_MAPPING)!r}"
-        )
-        row = resolve_model_mapping(provider)
-        for tier in tiers:
-            assert tier in row and isinstance(row[tier], str) and row[tier].strip(), (
-                f"the {provider!r} row must name a literal model ID for the "
-                f"{tier!r} node-class tier; got {row!r}"
-            )
-    or_row = resolve_model_mapping(LLM_PROVIDER_OPENROUTER)
-    an_row = resolve_model_mapping(LLM_PROVIDER_ANTHROPIC)
-    # The two rows must genuinely differ, so the openrouter vs no-override drives
-    # are a real distinction rather than the same literals under two labels.
-    assert or_row != an_row, (
-        "the OpenRouter and Anthropic mapping rows must differ so the active "
-        f"provider genuinely selects the model set; both are {or_row!r}"
+    row = resolve_model_mapping(LLM_PROVIDER_OPENROUTER)
+    # The run-wide model is the mapping row's `coding` tier (the substantive-work
+    # tier); it must be a real literal so the launch can carry it as `--model`.
+    assert isinstance(row.get("coding"), str) and row["coding"].strip(), (
+        "the fleet-wide provider-keyed model mapping table must name a literal "
+        f"run-wide model ID for the openrouter active provider; got {row!r}"
     )
-    ctx["b4_openrouter_row"] = or_row
-    ctx["b4_anthropic_row"] = an_row
+    # Guard: the openrouter run-wide literal genuinely differs from the anthropic
+    # one, so the active provider really selects the model set (not a shared label).
+    an_row = resolve_model_mapping(LLM_PROVIDER_ANTHROPIC)
+    assert row["coding"] != an_row["coding"], (
+        "the OpenRouter and Anthropic run-wide model literals must differ so the "
+        f"active provider genuinely selects the model; both are {row['coding']!r}"
+    )
+    ctx["b5_openrouter_row"] = row
+    ctx["b5_anthropic_row"] = an_row
 
 
 @when(parsers.parse(
-    "bc-container launch runs the container's fabro workflow for BC name "
+    'bc-container launch\'s dispatcher spawns a child "fabro run" for BC name '
     '"{bc_name}" with the OpenRouter provider override'
 ))
-def launch_runs_fabro_workflow_with_override(
+def dispatcher_spawns_child_fabro_run_openrouter(
     bc_name, ctx, fake_driver, controller, tmp_path
 ):
     # Drive the REAL launcher on the fabro path with the openrouter override in
-    # effect (BCLAUNCHER_LLM_PROVIDER=openrouter set by the earlier Given).
+    # effect (BCLAUNCHER_LLM_PROVIDER=openrouter set by the earlier Given); the
+    # recorded engage's run_finite issues the per-child `fabro run` command whose
+    # run-wide flags this scenario pins.
     _odd9_drive_fabro_launch(
         bc_name, ctx, fake_driver, controller, tmp_path, work_id=None
     )
-    ctx["b4_openrouter_run_inputs"] = _model_run_inputs(_engage_script(ctx))
+    ctx["b5_engage_script"] = _engage_script(ctx)
 
 
-@then('the fabro run command line supplies three "-I" inputs — MODEL_CODING, '
-      "MODEL_REVIEW, and MODEL_DEFAULT — each set to the literal model ID "
-      "recorded in the mapping table's OpenRouter row for that node-class")
-def fabro_run_supplies_openrouter_model_inputs(ctx):
-    inputs = ctx.get("b4_openrouter_run_inputs") or _model_run_inputs(
-        _engage_script(ctx)
+@then('the child "fabro run" command line carries "--model <literal-model-id> '
+      '--provider openrouter", sourced from the mapping table for the active '
+      'provider')
+def child_fabro_run_carries_run_wide_model_provider(ctx):
+    script = ctx.get("b5_engage_script") or _engage_script(ctx)
+    cmd = _fabro_run_command(script)
+    assert cmd is not None, (
+        "the recorded engage must issue a finite `fabro run` child command whose "
+        f"run-wide flags this scenario pins; script:\n{script}"
     )
-    or_row = ctx["b4_openrouter_row"]
-    expected = {
-        "MODEL_CODING": or_row["coding"],
-        "MODEL_REVIEW": or_row["review"],
-        "MODEL_DEFAULT": or_row["default"],
-    }
-    for name, want in expected.items():
-        assert name in inputs, (
-            "the recorded fabro-run command line must supply a "
-            f"`-I {name}=<id>` input on the openrouter override path; got "
-            f"inputs {inputs!r}; script:\n{_engage_script(ctx)}"
-        )
-        assert inputs[name] == want, (
-            f"the fabro-run `-I {name}` input must be the OpenRouter-row literal "
-            f"model ID {want!r}, got {inputs[name]!r}"
-        )
-
-
-@then("when the same launch is run with no provider override, the same three "
-      "inputs instead carry the literal model IDs recorded in the mapping "
-      "table's Anthropic row")
-def same_launch_no_override_carries_anthropic_models(
-    ctx, tmp_path, monkeypatch
-):
-    from bc_launcher.controller import BcContainerController
-    from tests.fake_driver import FakeDockerDriver
-
-    # Clear the operator override so this is a plain launch (Anthropic default).
-    monkeypatch.delenv("BCLAUNCHER_LLM_PROVIDER", raising=False)
-
-    # A SECOND real drive over a FRESH FakeDockerDriver so its recorded engage is
-    # isolated from the openrouter drive above.
-    fresh_driver = FakeDockerDriver()
-    fresh_controller = BcContainerController(
-        fresh_driver, monotonic=fresh_driver.monotonic
+    model, provider = _model_provider_flags(script)
+    row = ctx["b5_openrouter_row"]
+    # --model is the run-wide literal SOURCED from the active provider's mapping
+    # row (the coding tier — the run-wide model that every node resolves to).
+    assert model == row["coding"], (
+        "the child `fabro run` must carry run-wide `--model "
+        f"{row['coding']}` (the openrouter mapping-row literal), got "
+        f"--model {model!r}; cmd:\n{cmd}"
     )
-    ctx2 = {"credential_home": ctx.get("credential_home")}
-    _odd9_drive_fabro_launch(
-        "shopsystem-messaging", ctx2, fresh_driver, fresh_controller,
-        tmp_path, work_id=None,
+    assert model in row.values(), (
+        "the run-wide `--model` must be SOURCED from the active provider's "
+        f"mapping row {row!r}; got {model!r}"
+    )
+    assert "/" in (model or ""), (
+        f"the openrouter run-wide model {model!r} must be a LITERAL OpenRouter "
+        "catalog slug (vendor/model), genuinely the openrouter row's value"
+    )
+    # --provider is the pinned active value (the scenario pins it verbatim).
+    assert provider == "openrouter", (
+        "the child `fabro run` must carry the pinned active `--provider "
+        f"openrouter`, got --provider {provider!r}; cmd:\n{cmd}"
     )
 
-    inputs = _model_run_inputs(_engage_script(ctx2))
-    an_row = ctx["b4_anthropic_row"]
-    expected = {
-        "MODEL_CODING": an_row["coding"],
-        "MODEL_REVIEW": an_row["review"],
-        "MODEL_DEFAULT": an_row["default"],
-    }
-    for name, want in expected.items():
-        assert name in inputs, (
-            "the no-override fabro-run command line must supply a "
-            f"`-I {name}=<id>` input; got inputs {inputs!r}; script:\n"
-            f"{_engage_script(ctx2)}"
+
+@then('the command line carries no "-I MODEL_CODING=", "-I MODEL_REVIEW=", or '
+      '"-I MODEL_DEFAULT=" input for this launch')
+def child_fabro_run_carries_no_model_inputs(ctx):
+    script = ctx.get("b5_engage_script") or _engage_script(ctx)
+    cmd = _fabro_run_command(script) or ""
+    for name in ("MODEL_CODING", "MODEL_REVIEW", "MODEL_DEFAULT"):
+        assert f"-I {name}=" not in cmd, (
+            f"the run-wide launch must carry NO `-I {name}=` input (the retired "
+            f"per-node-class mapping); cmd:\n{cmd}"
         )
-        assert inputs[name] == want, (
-            f"the no-override fabro-run `-I {name}` input must be the "
-            f"Anthropic-row literal model ID {want!r}, got {inputs[name]!r}"
-        )
-    # The two provider paths genuinely differ: the openrouter drive's inputs are
-    # NOT the anthropic ones.
-    assert inputs != ctx.get("b4_openrouter_run_inputs"), (
-        "the no-override (Anthropic) fabro-run inputs must differ from the "
-        f"openrouter-override inputs; both are {inputs!r}"
+    # Belt-and-braces: the recorded run-input reader finds NO `-I MODEL_*` at all.
+    remaining = _model_run_inputs(script)
+    assert remaining == {}, (
+        "no `-I MODEL_*` input may remain on the finite `fabro run` command; "
+        f"got {remaining!r}; script:\n{script}"
+    )
+
+
+@then('every node in the workflow, regardless of its ".coding"/".review"/"*" '
+      'node-class, resolves to that same single run-wide model — per-node-class '
+      'model differentiation is not supplied by this launch')
+def every_node_resolves_same_run_wide_model(ctx):
+    # LAUNCHER-FIDELITY half (provable now): the launch supplies a SINGLE run-wide
+    # `--model` and NO per-node-class differentiation — no `-I MODEL_*` inputs and
+    # a poured def whose model_stylesheet carries no per-class `{{ inputs.MODEL_* }}`
+    # templating (a fabro >= v0.267.0 HARD PARSE ERROR).  The "resolves to that
+    # same model AT RUNTIME across every node-class" leg needs a real `fabro run`
+    # against live OpenRouter and is an honest SKIP
+    # (test_behavior5_runtime_single_model_resolution_honest_skip), never faked.
+    script = ctx.get("b5_engage_script") or _engage_script(ctx)
+    model, _ = _model_provider_flags(script)
+    assert model is not None, (
+        "the launch must supply a SINGLE run-wide `--model` (not per node-class); "
+        f"script:\n{script}"
+    )
+    assert _model_run_inputs(script) == {}, (
+        "per-node-class `-I MODEL_*` differentiation must NOT be supplied by this "
+        f"launch; got {_model_run_inputs(script)!r}"
+    )
+    stylesheet, workflow = _poured_model_stylesheet()
+    # No per-node-class model differentiation baked in the poured def: the
+    # `{{ inputs.MODEL_* }}` templating is gone (fabro >= v0.267.0 parse error) —
+    # either no model_stylesheet at all, or one carrying no per-class placeholders.
+    if stylesheet is not None:
+        for placeholder in ("MODEL_CODING", "MODEL_REVIEW", "MODEL_DEFAULT"):
+            assert placeholder not in stylesheet, (
+                "the poured def must carry NO per-node-class model differentiation "
+                f"({{{{ inputs.{placeholder} }}}} templating is a fabro >= v0.267.0 "
+                f"parse error); got model_stylesheet={stylesheet!r}"
+            )
+    assert "{{ inputs.MODEL_" not in workflow, (
+        "the poured workflow.fabro must carry NO `{{ inputs.MODEL_* }}` model "
+        f"templating (a fabro >= v0.267.0 hard parse error); workflow:\n{workflow[:600]}"
     )
 
 
