@@ -31,14 +31,24 @@ def test_behavior5_runtime_single_model_resolution_honest_skip():
 
 
 def test_behavior6_live_end_to_end_completion_honest_skip():
-    """The TRUE live end-to-end completion leg of @scenario_hash:76badc67216f0d91
+    """The TRUE live end-to-end completion leg of @scenario_hash:5d49031bab379ba6
     — a real dispatch actually reaching a gated work_done — needs a real OpenRouter
     key + a live agent-vault broker + fabro>=0.267 executing the finite `fabro run`
     through the openrouter-shim to a real work_done.  That infrastructure is NOT
     present in-session.  Honest SKIP, never faked.  The achievable fidelity (the
     `.coding` run-wide model resolving to a literal OpenRouter model ID via the
     openrouter-shim base_url, and the gated-work_done terminal emit_r being
-    reachable) IS proven by the 76badc67216f0d91 BDD scenario."""
+    reachable) IS proven by the 5d49031bab379ba6 BDD scenario.
+
+    lead-ifye3.12: this docstring tracked the capstone through its retirement
+    lineage 76badc67216f0d91 -> 1cee6978cbf9ac53 -> 5d49031bab379ba6; it had gone
+    stale by two retirements, naming a hash no longer live in this register.
+
+    Note the live retry is additionally gated on TWO in-flight precondition fixes
+    the successor now names as Givens — lead-ifye3.6 (shop-templates' stale
+    model_stylesheet pour) and lead-ifye3.10 (this BC's provider-identity call
+    site).  The Architect initiates that retry once both land.
+    """
     pytest.skip(
         "real OpenRouter key + live agent-vault broker + fabro>=0.267 needed to "
         "observe a real dispatch reaching a gated work_done end-to-end through the "
