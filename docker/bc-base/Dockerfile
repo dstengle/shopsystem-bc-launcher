@@ -41,7 +41,7 @@ ARG SHOP_TEMPLATES_VERSION=v0.52.5
 # ${{ github.ref_name }}). The default below records a known-good value for a
 # plain (non-CI) build; the workflow overrides it with the pushed tag. Promoted
 # to a persisted ENV below so it surfaces in `docker inspect` (lead-5xnd).
-ARG SHOPSYSTEM_BC_LAUNCHER_VERSION=v0.3.77
+ARG SHOPSYSTEM_BC_LAUNCHER_VERSION=v0.3.78
 
 # Promote both version ARGs to PERSISTED ENV so the published image (and any
 # container started from it) surfaces the baked bc-launcher release version and
@@ -79,7 +79,7 @@ RUN pip install --no-cache-dir \
     "shopsystem-messaging @ git+https://github.com/dstengle/shopsystem-messaging.git@v0.4.6" \
     "scenarios @ git+https://github.com/dstengle/shopsystem-scenarios@v0.3.1" \
     "shop-templates @ git+https://github.com/dstengle/shopsystem-templates.git@${SHOP_TEMPLATES_VERSION}" \
-    "shopsystem-bc-launcher @ git+https://github.com/dstengle/shopsystem-bc-launcher.git@v0.3.77"
+    "shopsystem-bc-launcher @ git+https://github.com/dstengle/shopsystem-bc-launcher.git@v0.3.78"
 
 # agent-vault — the in-container broker client (bclaunch-9rr). The agent runs
 # wrapped as `agent-vault run -- claude`; agent-vault establishes the proxy
