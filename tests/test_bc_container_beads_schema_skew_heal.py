@@ -422,6 +422,67 @@ def test_provision_beads_tracker_runs_schema_skew_heal_on_4259():
     )
 
 
+class _AbortingHealFakeDriver(_SchemaSkewFakeDriver):
+    """As `_SchemaSkewFakeDriver`, but the heal exec ABORTS non-zero on the
+    lead-wpnv3 subset guard (the pre-heal export carried issues absent from the
+    committed jsonl)."""
+
+    _ABORT_STDERR = (
+        PRE_HEAL_SUBSET_ABORT_BANNER + "\n"
+        "26 issue(s) captured by the pre-heal export are ABSENT from the "
+        "committed .beads/issues.jsonl:\n"
+        "bclaunch-1f4n-1\nbclaunch-vipd-13\n"
+        "Reconcile manually per docs/runbooks/beads-schema-skew-recovery.md\n"
+    )
+
+    def exec_run(self, container, command, user=None, env=None):
+        result = super().exec_run(container, command, user=user, env=env)
+        joined = " ".join(command) if isinstance(command, list) else str(command)
+        if "bd init --from-jsonl" in joined:
+            return _CompletedLike(1, "", self._ABORT_STDERR)
+        return result
+
+
+def test_subset_guard_abort_evidence_reaches_the_operator():
+    """CHARACTERIZATION pin (passes on existing lead-5k8c warn-and-continue
+    wiring; added as a regression guard, NOT a TDD cycle).
+
+    The subset guard's abort is only actionable if its evidence SURVIVES the
+    launcher.  `_provision_beads_tracker` folds a non-zero heal's stderr into
+    err_lines, so the specific at-risk ids and the runbook pointer reach the
+    operator instead of being swallowed behind a bare "exit 1".  If that
+    wiring ever regresses, criterion 2's "directing manual reconciliation" is
+    silently void even though the guard itself still fires (lead-wpnv3)."""
+    from bc_launcher.controller import BcContainerController
+
+    driver = _AbortingHealFakeDriver()
+    controller = BcContainerController(driver)
+    out_lines, err_lines = [], []
+    controller._provision_beads_tracker(
+        "bc-shopsystem-bc-launcher", "shopsystem-bc-launcher",
+        out_lines, err_lines,
+    )
+    surfaced = "".join(err_lines)
+
+    assert PRE_HEAL_SUBSET_ABORT_BANNER in surfaced, (
+        "the subset-guard abort banner must reach the operator (lead-wpnv3); "
+        f"err_lines={err_lines!r}"
+    )
+    for at_risk in ("bclaunch-1f4n-1", "bclaunch-vipd-13"):
+        assert at_risk in surfaced, (
+            f"the specific at-risk id {at_risk!r} must reach the operator, not "
+            f"be swallowed behind a bare exit code (lead-wpnv3)"
+        )
+    assert "beads-schema-skew-recovery.md" in surfaced, (
+        "the runbook pointer directing manual reconciliation must survive"
+    )
+    # An abort must NOT be reported as a successful heal.
+    assert not any("rebuilt" in ln for ln in out_lines), (
+        "an aborted heal must never emit a success line (lead-wpnv3); "
+        f"out_lines={out_lines!r}"
+    )
+
+
 def test_provision_beads_tracker_4259_not_treated_as_empty_remote():
     """The #4259 refusal must NOT be misrouted through the empty-remote seed
     path (that path fires only when the remote carries NO Dolt data; here it
