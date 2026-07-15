@@ -143,6 +143,42 @@ Feature: a launch-time --llm-provider / BCLAUNCHER_LLM_PROVIDER override selects
   #     floating ":latest" tag and no per-BC override (ADR-021 D4, deferred), so
   #     baking docker-cli reaches EVERY BC container fleet-wide.
   #     work_id lead-6tu6o.1.
+  #
+  # RETIRED-SCENARIO PROVENANCE (work_id lead-ifye3.12):
+  #   1cee6978cbf9ac53  superseded-by  5d49031bab379ba6
+  #   reason: the retired capstone asserted that "no further software release was
+  #     required beyond the already-satisfied FABRO_VERSION and bc-base "docker-cli"
+  #     image preconditions".  That claim is FALSE — disproven a THIRD time in this
+  #     lineage by lead-lp4us's live end-to-end verification.  With BOTH of those
+  #     named preconditions genuinely satisfied for the FIRST time, a real nested
+  #     launch did reach the "openrouter-shim" and drove 11 real HTTP-200 OpenRouter
+  #     completions — and the dispatch STILL could not complete, because TWO further
+  #     software fixes remain, not zero:
+  #       (A) shopsystem-templates' poured "templates/fabro/workflow.fabro" still
+  #           ships the retired model_stylesheet "{{ inputs.X }}" placeholder shape,
+  #           which fabro >= v0.267.0-nightly.0 hard-parse-errors on.  Dispatched
+  #           separately as lead-ifye3.6, against shopsystem-templates — NOT this BC.
+  #       (B) this BC's OWN dispatcher passes the ACTIVE-provider NAME ("openrouter")
+  #           to "fabro run --provider" instead of the REGISTERED fabro provider
+  #           identity ("openai").  Dispatched separately as lead-ifye3.10, against
+  #           this BC.
+  #     The corrected scenario below (5d49031bab379ba6) keeps the acceptance bar and
+  #     the behavioral shape UNCHANGED (a real dispatch reaching a gated work_done on
+  #     a BC launched with the OpenRouter override, a non-trivial ".coding" node-class
+  #     model resolved to a literal OpenRouter model ID via the "openrouter-shim") and
+  #     corrects ONLY the precondition claim: it names BOTH remaining preconditions
+  #     (A) and (B) explicitly in its Given clauses, and its corrected "no further
+  #     release" Then-clause enumerates all FOUR preconditions — FABRO_VERSION,
+  #     bc-base "docker-cli", the shop-templates model_stylesheet pour-fix, and the
+  #     bc-launcher provider-identity call-site-fix.
+  #     Per this file's existing convention (the FABRO_VERSION and "docker-cli"
+  #     precedents) both (A) and (B) stay out-of-scope actions owned by their OWN
+  #     dispatches: only the EXISTENCE of each precondition is pinned here, never its
+  #     edit.  Neither (A) nor (B) had landed as of this retirement, so the live
+  #     end-to-end proof of 5d49031bab379ba6 is deliberately NOT re-attempted here;
+  #     the Architect initiates that retry once lead-ifye3.6 and lead-ifye3.10 both
+  #     report work_done.
+  #     work_id lead-ifye3.12.
 
   @scenario_hash:1d9d3777e3c3d8f5 @bc:shopsystem-bc-launcher
   Scenario: a plain launch with no operator-supplied provider override keeps the Anthropic-subscription path as the active LLM provider
@@ -199,14 +235,16 @@ Feature: a launch-time --llm-provider / BCLAUNCHER_LLM_PROVIDER override selects
     And the command line carries no "-I MODEL_CODING=", "-I MODEL_REVIEW=", or "-I MODEL_DEFAULT=" input for this launch
     And every node in the workflow, regardless of its ".coding"/".review"/"*" node-class, resolves to that same single run-wide model — per-node-class model differentiation is not supplied by this launch
 
-  @scenario_hash:1cee6978cbf9ac53 @bc:shopsystem-bc-launcher
-  Scenario: a real dispatch completes end-to-end on a BC launched with the OpenRouter override, given already-satisfied FABRO_VERSION and bc-base "docker-cli" image preconditions, with no further software release required
+  @scenario_hash:5d49031bab379ba6 @bc:shopsystem-bc-launcher
+  Scenario: a real dispatch completes end-to-end on a BC launched with the OpenRouter override, given already-satisfied FABRO_VERSION, bc-base "docker-cli", shop-templates model_stylesheet pour, and bc-launcher provider-identity call-site preconditions, with no further software release required
     Given the shopsystem-bc-launcher BC's container image was already built from a bc-base image pinned to a FABRO_VERSION carrying native "[llm.providers.openai]" support, satisfied once, prior to and independent of this launch
     And the "openrouter-shim" process is part of that same already-built image
     And that same bc-base image also bakes in the "docker-cli" apt package (the docker CLI client binary — not satisfied by "docker.io" alone, which on this image's Debian trixie base installs only the "dockerd" daemon, no client), satisfied once, prior to and independent of this launch, so the launched container can perform the nested "bc-container launch" its own dispatched work requires
     And the container is launched with the "--mount-docker-socket" operator flag, so the baked "docker-cli" client has a socket to reach
+    And shopsystem-templates' poured "templates/fabro/workflow.fabro" no longer carries the retired "model_stylesheet" "{{ inputs.X }}" placeholder shape, which fabro >= v0.267.0-nightly.0 hard-parse-errors on, satisfied once, prior to and independent of this launch
+    And the shopsystem-bc-launcher dispatcher's per-child "fabro run --provider" construction passes the REGISTERED fabro provider identity ("openai"), not the active-provider name ("openrouter"), satisfied once, prior to and independent of this launch
     And an agent-vault broker with a registered OpenRouter-host credential service is running on the shopsystem network and is reachable
     And the operator supplies a launch-time LLM provider override of "openrouter"
     When bc-container launch is run for a BC with the OpenRouter provider override and a substantive assign_scenarios dispatch is delivered to it
     Then the dispatched work reaches a gated work_done, having executed through at least one non-trivial node-class, such as ".coding", whose model resolved to a literal OpenRouter model ID via the "openrouter-shim"
-    And no further software release was required beyond the already-satisfied FABRO_VERSION and bc-base "docker-cli" image preconditions — only the launch-time provider override, the "--mount-docker-socket" flag, and a container relaunch
+    And no further software release was required beyond the already-satisfied FABRO_VERSION, bc-base "docker-cli", shop-templates model_stylesheet pour-fix, and bc-launcher provider-identity call-site-fix preconditions — only the launch-time provider override, the "--mount-docker-socket" flag, and a container relaunch
