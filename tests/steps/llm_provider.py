@@ -1069,6 +1069,354 @@ def launch_openrouter_with_substantive_dispatch(
         f"against the poured {FABRO_WORKFLOW_FILE_NAME}; script:\n{script}"
     )
 
+
+# The `.coding` node-class nodes on the SCENARIO path from classify to the gated
+# work_done emitter.  `impl` is the scenario-lane `.coding` node (bc-implementer);
+# `impl_f` also carries class="coding" but is on the FLAT (implementer-emitter)
+# lane, not the scenario/gated lane.  `emit_r` is the SOLE scenario-path
+# work_done(complete) emitter, reachable ONLY via review->wdg_r->emit_r->done.
+_CODING_SCENARIO_NODE = "impl"
+_GATED_COMPLETE_EMITTER = "emit_r"
+
+
+def _fabro_node_classes(workflow_text):
+    """Map node-id -> its `class="…"` attribute across the committed
+    workflow.fabro (agent nodes carry a class; native `script=` nodes do not).
+    Reads the REAL committed def, so the `.coding` node set is the graph's own,
+    not a hardcoded list."""
+    classes = {}
+    for m in re.finditer(r"(\w+)\s*\[([^\]]*)\]", workflow_text, re.DOTALL):
+        node_id, attrs = m.group(1), m.group(2)
+        cm = re.search(r'class="([^"]+)"', attrs)
+        if cm:
+            classes[node_id] = cm.group(1)
+    return classes
+
+
+def _is_openrouter_model_id(model_id):
+    """A literal OpenRouter model ID is a `vendor/model` catalog slug (contains a
+    `/`), contrasting the Anthropic-subscription row's bare `claude-*` IDs.  The
+    openrouter mapping row uses the `anthropic/claude-…` OpenRouter slugs."""
+    return isinstance(model_id, str) and "/" in model_id and bool(model_id.strip())
+
+
+@given(parsers.parse(
+    "the shopsystem-bc-launcher BC's container image was already built from a "
+    'bc-base image pinned to a FABRO_VERSION carrying native "{provider_block}" '
+    "support, satisfied once, prior to and independent of this launch"
+))
+def image_built_from_fabro_version_with_native_openai(provider_block, ctx):
+    # PRECONDITION (already-satisfied, out-of-scope Architect infra action — NOT
+    # this dispatch's acceptance bar): the bc-base Dockerfile pins a FABRO_VERSION
+    # and the launcher targets fabro's NATIVE "openai" provider identity (the
+    # "[llm.providers.openai]" the base_url override rides).  Bound to the REAL
+    # committed Dockerfile ARG pin + the launcher's native-identity constant — NO
+    # version-number gate (the bump itself is not pinned here, and this behavior
+    # does NOT bump FABRO_VERSION).
+    from tests.support.common import _find_bc_base_dockerfile
+
+    from bc_launcher.fabro.constants import FABRO_OPENROUTER_PROVIDER_IDENTITY
+
+    dockerfile = _find_bc_base_dockerfile()
+    assert dockerfile is not None, "no bc-base Dockerfile found under the repo tree"
+    df_text = dockerfile.read_text()
+    assert re.search(r"(?im)^\s*ARG\s+FABRO_VERSION\b", df_text), (
+        "the bc-base Dockerfile must pin the FABRO_VERSION the image is built from "
+        "(the already-satisfied precondition); no ARG FABRO_VERSION found"
+    )
+    # The "native [llm.providers.openai] support" the precondition carries is what
+    # the launcher's openrouter override rides — fabro's NATIVE openai identity.
+    assert provider_block == "[llm.providers.openai]", provider_block
+    assert FABRO_OPENROUTER_PROVIDER_IDENTITY == "openai", (
+        "the launcher must ride fabro's NATIVE 'openai' provider identity — the "
+        f"native-openai support this precondition carries; got "
+        f"{FABRO_OPENROUTER_PROVIDER_IDENTITY!r}"
+    )
+    ctx["b6_fabro_version_precondition_satisfied"] = True
+
+
+@given(parsers.parse(
+    'the "{shim_name}" process is part of that same already-built image'
+))
+def openrouter_shim_part_of_image(shim_name, ctx):
+    # ALREADY-BAKED (no rebuild needed): behavior 3's Dockerfile bake COPYs the
+    # committed openrouter-shim asset onto PATH in the bc-base image.  Bound to the
+    # REAL committed shim asset + the REAL bc-base Dockerfile COPY — proving the
+    # shim is part of the already-built image, not a fresh build artifact.
+    from tests.support.common import _find_bc_base_dockerfile
+
+    shim = _committed_openrouter_shim()
+    assert shim is not None and shim.is_file(), (
+        f"the committed {shim_name!r} asset must exist (baked into the already-"
+        "built image by behavior 3's Dockerfile COPY)"
+    )
+    dockerfile = _find_bc_base_dockerfile()
+    assert dockerfile is not None, "no bc-base Dockerfile found under the repo tree"
+    assert re.search(
+        r"(?im)^\s*COPY\s+\S+\s+\S*/" + re.escape(shim_name) + r"\b",
+        dockerfile.read_text(),
+    ), (
+        f"the bc-base Dockerfile must COPY the {shim_name!r} asset onto PATH so it "
+        "is part of the already-built image (behavior 3 bake); no COPY found"
+    )
+    ctx["b6_shim_in_image"] = True
+
+
+@then("the dispatched work reaches a gated work_done, having executed through "
+      "at least one non-trivial node-class, such as \".coding\", whose model "
+      "resolved to a literal OpenRouter model ID via the \"openrouter-shim\"")
+def dispatched_work_reaches_gated_workdone_via_shim_openrouter_model(ctx):
+    from urllib.parse import urlparse
+
+    from bc_launcher.fabro.constants import (
+        FABRO_OPENROUTER_BASE_URL,
+        FABRO_OPENROUTER_SHIM_PORT,
+        FABRO_SHIM_HOST,
+    )
+    from bc_launcher.fabro.llm_provider import (
+        LLM_PROVIDER_ANTHROPIC,
+        LLM_PROVIDER_OPENROUTER,
+        resolve_model_mapping,
+        resolve_run_wide_model,
+    )
+
+    script = ctx.get("b5_engage_script") or _engage_script(ctx)
+    workflow = _poured_workflow_fabro()
+
+    # --- (a) the `.coding` node's model resolves — via resolve_run_wide_model /
+    # the ADR-063 mapping table (NOT the removed model_stylesheet) — to a LITERAL
+    # OpenRouter model ID.  With per-node-class differentiation deprioritized
+    # (a3b2b6bebcee78f5), every node-class — INCLUDING `.coding` — resolves to the
+    # SAME single run-wide model, so the `.coding` node's model IS the run-wide
+    # openrouter literal.
+    run_wide = resolve_run_wide_model(LLM_PROVIDER_OPENROUTER)
+    or_row = resolve_model_mapping(LLM_PROVIDER_OPENROUTER)
+    an_row = resolve_model_mapping(LLM_PROVIDER_ANTHROPIC)
+    assert run_wide == or_row["coding"], (
+        "the run-wide model the `.coding` node resolves to must be the openrouter "
+        f"mapping row's coding-tier literal {or_row['coding']!r}, got {run_wide!r}"
+    )
+    assert _is_openrouter_model_id(run_wide), (
+        f"the resolved `.coding` model {run_wide!r} must be a LITERAL OpenRouter "
+        "model ID (a vendor/model catalog slug)"
+    )
+    assert not _is_openrouter_model_id(an_row["coding"]), (
+        "guard: the Anthropic-subscription row's `.coding` model "
+        f"{an_row['coding']!r} must NOT be an OpenRouter slug — the two provider "
+        "paths genuinely differ"
+    )
+
+    # --- (b) that model is carried on the REAL launcher's recorded finite
+    # `fabro run --model <run-wide>` (the run-wide flag replacing the retired
+    # per-node-class `-I MODEL_*`), so the launch actually resolves `.coding` to it.
+    model, provider = _model_provider_flags(script)
+    assert model == run_wide, (
+        "the recorded finite `fabro run` must carry the run-wide OpenRouter model "
+        f"as `--model {run_wide}`, got --model {model!r}; script:\n{script}"
+    )
+    assert provider == "openrouter", (
+        f"the finite `fabro run` must carry `--provider openrouter`, got {provider!r}"
+    )
+    assert _model_run_inputs(script) == {}, (
+        "the run-wide launch must carry NO retired per-node-class `-I MODEL_*` "
+        f"input; got {_model_run_inputs(script)!r}"
+    )
+
+    # --- (c) VIA THE "openrouter-shim": that resolved model is reached through the
+    # openrouter-shim loopback base_url the native openai provider registers — the
+    # node's LLM call goes to the shim, which forwards to OpenRouter.  Bound to the
+    # REAL registered base_url + the committed shim's OpenRouter upstream.
+    assert FABRO_OPENROUTER_BASE_URL in script, (
+        "the openrouter finite run must register the native openai base_url at the "
+        f"local openrouter-shim loopback {FABRO_OPENROUTER_BASE_URL!r}; "
+        f"script:\n{script}"
+    )
+    parsed = urlparse(FABRO_OPENROUTER_BASE_URL)
+    assert parsed.hostname == FABRO_SHIM_HOST and parsed.port == FABRO_OPENROUTER_SHIM_PORT, (
+        "the `.coding` model must resolve VIA the openrouter-shim loopback "
+        f"({FABRO_SHIM_HOST}:{FABRO_OPENROUTER_SHIM_PORT}), got "
+        f"{FABRO_OPENROUTER_BASE_URL!r}"
+    )
+    shim = _committed_openrouter_shim()
+    assert shim is not None, "the committed openrouter-shim asset must exist"
+    import importlib.machinery
+    import importlib.util
+
+    loader = importlib.machinery.SourceFileLoader("_or_shim_capstone", str(shim))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    shim_mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(shim_mod)
+    assert "openrouter.ai" in (getattr(shim_mod, "UPSTREAM", "") or ""), (
+        "the openrouter-shim the model resolves VIA must forward to the OpenRouter "
+        f"host; committed shim UPSTREAM={getattr(shim_mod, 'UPSTREAM', None)!r}"
+    )
+
+    # --- (d) `.coding` is a REAL non-trivial node-class of the committed graph,
+    # carried by JUDGMENT agent nodes on the scenario path (not a label-only class).
+    node_classes = _fabro_node_classes(workflow)
+    coding_nodes = {n for n, c in node_classes.items() if c == "coding"}
+    assert coding_nodes, (
+        "the committed workflow.fabro must carry `.coding` node-class agent nodes; "
+        f"node classes: {node_classes!r}"
+    )
+    assert _CODING_SCENARIO_NODE in coding_nodes, (
+        f"the scenario-path `.coding` node {_CODING_SCENARIO_NODE!r} (bc-"
+        f"implementer) must be a `.coding` node; coding nodes: {coding_nodes!r}"
+    )
+
+    # --- (e) the run-graph reaches its GATED work_done terminal `emit_r` — the SOLE
+    # scenario-path work_done(complete) emitter, reachable ONLY via
+    # review->wdg_r->emit_r->done; a FAILED gate diverts to emit_blk (blocked) and
+    # NEVER reaches the complete emit.  Bound to the REAL committed graph the
+    # openrouter finite run executes (the lead-6ev8 / lead-01jw.3 gated structure).
+    def _edge(src, dst):
+        return re.search(rf"\b{re.escape(src)}\s*->\s*{re.escape(dst)}\b", workflow)
+
+    assert _GATED_COMPLETE_EMITTER in workflow, (
+        "the committed graph must define the gated complete emitter emit_r"
+    )
+    assert re.search(
+        r'review\s*->\s*wdg_r\s*\[label="signoff"\]', workflow
+    ), "the reviewer signoff must route to the work-done gate wdg_r"
+    assert _edge("wdg_r", "emit_r"), (
+        "the work-done gate wdg_r must (on pass) reach the complete emitter emit_r"
+    )
+    assert re.search(
+        r'wdg_r\s*->\s*emit_blk\s*\[condition="outcome=failed"\]', workflow
+    ), "a FAILED work-done gate must divert to emit_blk (blocked), never complete"
+    assert _edge("emit_r", "done"), (
+        "the gated complete emit emit_r must reach the SUCCEEDED terminal done"
+    )
+    assert re.search(
+        r"emit_r\s*\[.*?bc-emit work-done.*?--status complete",
+        workflow,
+        re.DOTALL,
+    ), "emit_r must be the gated `bc-emit work-done --status complete` emitter"
+
+    # HONEST-FIDELITY NOTE: the TRUE live end-to-end completion (real OpenRouter key
+    # + a live agent-vault broker + fabro>=0.267 reaching a real work_done) is NOT
+    # achievable in-session — bound here at resolution + shim-routing + graph-
+    # reachability fidelity, and the live leg is an honest SKIP
+    # (test_behavior6_live_end_to_end_completion_honest_skip), never faked.
+    ctx["b6_gated_workdone_reachable"] = True
+
+
+@then("no further software release, BC-base image rebuild, or template re-pour "
+      "beyond the already-satisfied FABRO_VERSION image precondition was required "
+      "to reach this outcome — only the launch-time provider override and a "
+      "container relaunch")
+def no_further_release_beyond_fabro_version_precondition(ctx, tmp_path, monkeypatch):
+    from bc_launcher.controller import BcContainerController, _load_fabro_def_files
+    from bc_launcher.fabro.constants import (
+        FABRO_OPENROUTER_BASE_URL,
+        FABRO_OPENROUTER_PROVIDER_IDENTITY,
+    )
+    from tests.fake_driver import FakeDockerDriver
+
+    # --- (1) the poured def bundle (what shop-templates POURS) is provider-
+    # INVARIANT: `_load_fabro_def_files()` takes NO provider argument and returns
+    # byte-identical bytes, so selecting openrouter re-pours NOTHING.  The SAME
+    # already-poured def serves both providers.
+    files_a = _load_fabro_def_files()
+    files_b = _load_fabro_def_files()
+    assert files_a == files_b, (
+        "the poured fabro def bundle must be provider-invariant (no re-pour); "
+        "selecting openrouter must not change the poured def bytes"
+    )
+    # No provider model literal is BAKED into the poured workflow.fabro — with
+    # model_stylesheet templating removed (a3b2b6bebcee78f5), the run-wide model
+    # rides the launch-time `fabro run --model` flag, NOT a re-poured/rebaked def.
+    poured_workflow = files_a["workflow.fabro"].decode("utf-8")
+    assert "anthropic/claude" not in poured_workflow, (
+        "no OpenRouter (or any provider) literal model ID may be BAKED into the "
+        "poured workflow.fabro — the run-wide model rides the launch-time `--model` "
+        "flag, no re-pour"
+    )
+    assert "{{ inputs.MODEL_" not in poured_workflow, (
+        "the poured workflow.fabro must carry NO `{{ inputs.MODEL_* }}` templating "
+        "(a fabro >= v0.267.0 hard parse error) — the model rides launch-time "
+        "`--model`, not a re-poured def"
+    )
+
+    # --- (2) the openrouter override is realized PURELY at launch time: relaunch
+    # the SAME launcher with NO override (Anthropic default) over a fresh driver and
+    # compare the two recorded engages.  Both target the byte-identical poured
+    # workflow.fabro; the ONLY differences are launch-time env exports + the
+    # registered provider block + the run-wide `--model/--provider` flags — never a
+    # poured/baked artifact, no BC-base image rebuild, no software release.
+    or_script = ctx.get("b5_engage_script") or _engage_script(ctx)
+
+    monkeypatch.delenv("BCLAUNCHER_LLM_PROVIDER", raising=False)
+    fresh_driver = FakeDockerDriver()
+    fresh_controller = BcContainerController(
+        fresh_driver, monotonic=fresh_driver.monotonic
+    )
+    ctx2 = {"credential_home": ctx.get("credential_home")}
+    _odd9_drive_fabro_launch(
+        "shopsystem-messaging", ctx2, fresh_driver, fresh_controller,
+        tmp_path, work_id=None,
+    )
+    an_script = _engage_script(ctx2)
+
+    assert FABRO_WORKFLOW_FILE_NAME in or_script and FABRO_WORKFLOW_FILE_NAME in an_script, (
+        "both provider engages must target the poured "
+        f"{FABRO_WORKFLOW_FILE_NAME} finite-run graph — the openrouter path runs "
+        "the identical committed graph, no rebuilt/rebaked variant"
+    )
+    assert or_script != an_script, (
+        "the openrouter override must produce a genuinely different launch-time "
+        "engage than the anthropic default"
+    )
+    assert "BCLAUNCHER_LLM_PROVIDER=openrouter" in or_script, (
+        "the openrouter override must be realized as a launch-time env export"
+    )
+    _or_block = f"[llm.providers.{FABRO_OPENROUTER_PROVIDER_IDENTITY}]"
+    assert _or_block in or_script and FABRO_OPENROUTER_BASE_URL in or_script, (
+        "the openrouter override must register the native "
+        f"{_or_block} block with base_url {FABRO_OPENROUTER_BASE_URL!r} at launch "
+        "time"
+    )
+    assert FABRO_OPENROUTER_BASE_URL not in an_script and (
+        "[llm.providers.openrouter]" not in or_script
+    ), (
+        "the anthropic default path must NOT register the OpenRouter endpoint, and "
+        "no custom [llm.providers.openrouter] provider may be registered"
+    )
+    # With the launch-time-only positions normalized away (env exports, the
+    # provider block, and the run-wide `--model/--provider` flags), the two engages
+    # are IDENTICAL — proving NOTHING baked/poured/released changed between the two
+    # provider launches (only the launch-time override + relaunch).
+    def _strip_launch_time(script):
+        lines = []
+        for ln in script.splitlines():
+            if any(
+                tok in ln
+                for tok in (
+                    "BCLAUNCHER_LLM_PROVIDER=",
+                    "OPENROUTER_API_KEY",
+                    "OPENAI_API_KEY",
+                    "ANTHROPIC_API_KEY",
+                    "ANTHROPIC_BASE_URL",
+                    "llm.providers.",
+                    "adapter =",
+                    "base_url =",
+                )
+            ):
+                continue
+            ln = re.sub(r"--model\s+\S+", "", ln)
+            ln = re.sub(r"--provider\s+\S+", "", ln)
+            lines.append(ln)
+        return "\n".join(lines)
+
+    assert _strip_launch_time(or_script) == _strip_launch_time(an_script), (
+        "with the launch-time env exports + provider block + run-wide "
+        "`--model/--provider` flags normalized away, the openrouter and anthropic "
+        "engages must be IDENTICAL — proving the override rides launch-time config "
+        "+ relaunch alone, with NO further software release, BC-base image rebuild, "
+        "or template re-pour beyond the already-satisfied FABRO_VERSION precondition"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Behavior 3 (@scenario_hash:7f55b8ee9e092692): the "openrouter-shim" is an
 # unsandboxed, container-level reverse proxy that forwards the sandboxed node's
