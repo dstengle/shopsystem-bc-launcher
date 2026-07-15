@@ -115,6 +115,34 @@ Feature: a launch-time --llm-provider / BCLAUNCHER_LLM_PROVIDER override selects
   #     BC-base image rebuild, or template re-pour beyond that satisfied precondition,
   #     only the launch-time provider override + a container relaunch.
   #     work_id lead-ifye3.5.
+  #
+  # RETIRED-SCENARIO PROVENANCE (work_id lead-6tu6o.1):
+  #   76badc67216f0d91  superseded-by  1cee6978cbf9ac53
+  #   reason: the retired capstone asserted that "no further software release,
+  #     BC-base image rebuild, or template re-pour beyond the already-satisfied
+  #     FABRO_VERSION image precondition was required" to reach a gated work_done
+  #     for its OWN nested "bc-container launch" When-clause.  That claim is FALSE,
+  #     confirmed twice: (1) a live-proof attempt (lead-85s41) hit
+  #     "FileNotFoundError: 'docker'" inside the running container; (2) a router-run
+  #     Architect dispatch (lead-6tu6o) inspected the bc-base image directly against
+  #     its confirmed digest and found NO docker binary baked in at all.  On this
+  #     image's Debian trixie base the "docker.io" apt package installs only the
+  #     daemon (dockerd/docker-proxy/docker-init) and never the client; the separate
+  #     "docker-cli" package (client-only, same 26.1.5+dfsg1-9+b13 version) is what
+  #     produces a working /usr/bin/docker.  The corrected scenario below
+  #     (1cee6978cbf9ac53) keeps the acceptance bar UNCHANGED (a gated work_done, a
+  #     real OpenRouter model resolved via the "openrouter-shim") and corrects only
+  #     the precondition claim: it names ONE additional already-satisfied bc-base
+  #     image-build precondition — the "docker-cli" apt package baked into
+  #     docker/bc-base/Dockerfile, alongside the FABRO_VERSION pin — and names the
+  #     "--mount-docker-socket" operator launch flag as a precondition Given.  Per
+  #     this file's existing convention the Dockerfile apt-package edit itself stays
+  #     an Architect-level infra action rather than scenario content: only the
+  #     EXISTENCE of the precondition is pinned.  FLEET-WIDE BLAST RADIUS (ADR-021
+  #     D1/D3, accepted tradeoff): shopsystem-bc-base is a SINGLE image with one
+  #     floating ":latest" tag and no per-BC override (ADR-021 D4, deferred), so
+  #     baking docker-cli reaches EVERY BC container fleet-wide.
+  #     work_id lead-6tu6o.1.
 
   @scenario_hash:1d9d3777e3c3d8f5 @bc:shopsystem-bc-launcher
   Scenario: a plain launch with no operator-supplied provider override keeps the Anthropic-subscription path as the active LLM provider
@@ -171,12 +199,14 @@ Feature: a launch-time --llm-provider / BCLAUNCHER_LLM_PROVIDER override selects
     And the command line carries no "-I MODEL_CODING=", "-I MODEL_REVIEW=", or "-I MODEL_DEFAULT=" input for this launch
     And every node in the workflow, regardless of its ".coding"/".review"/"*" node-class, resolves to that same single run-wide model — per-node-class model differentiation is not supplied by this launch
 
-  @scenario_hash:76badc67216f0d91 @bc:shopsystem-bc-launcher
-  Scenario: a real dispatch completes end-to-end on a BC launched with the OpenRouter override, given an already-satisfied one-time FABRO_VERSION image precondition, with no further software release required
+  @scenario_hash:1cee6978cbf9ac53 @bc:shopsystem-bc-launcher
+  Scenario: a real dispatch completes end-to-end on a BC launched with the OpenRouter override, given already-satisfied FABRO_VERSION and bc-base "docker-cli" image preconditions, with no further software release required
     Given the shopsystem-bc-launcher BC's container image was already built from a bc-base image pinned to a FABRO_VERSION carrying native "[llm.providers.openai]" support, satisfied once, prior to and independent of this launch
     And the "openrouter-shim" process is part of that same already-built image
+    And that same bc-base image also bakes in the "docker-cli" apt package (the docker CLI client binary — not satisfied by "docker.io" alone, which on this image's Debian trixie base installs only the "dockerd" daemon, no client), satisfied once, prior to and independent of this launch, so the launched container can perform the nested "bc-container launch" its own dispatched work requires
+    And the container is launched with the "--mount-docker-socket" operator flag, so the baked "docker-cli" client has a socket to reach
     And an agent-vault broker with a registered OpenRouter-host credential service is running on the shopsystem network and is reachable
     And the operator supplies a launch-time LLM provider override of "openrouter"
     When bc-container launch is run for a BC with the OpenRouter provider override and a substantive assign_scenarios dispatch is delivered to it
     Then the dispatched work reaches a gated work_done, having executed through at least one non-trivial node-class, such as ".coding", whose model resolved to a literal OpenRouter model ID via the "openrouter-shim"
-    And no further software release, BC-base image rebuild, or template re-pour beyond the already-satisfied FABRO_VERSION image precondition was required to reach this outcome — only the launch-time provider override and a container relaunch
+    And no further software release was required beyond the already-satisfied FABRO_VERSION and bc-base "docker-cli" image preconditions — only the launch-time provider override, the "--mount-docker-socket" flag, and a container relaunch
