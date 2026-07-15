@@ -1230,25 +1230,21 @@ def container_launched_with_mount_docker_socket(flag, cli_pkg, ctx):
     # bind mount (driven over the FakeDockerDriver via the real controller) — never
     # a string match.  A baked docker-cli client with no socket to reach is inert,
     # so this Given is a genuine precondition of the nested launch, not decoration.
-    from bc_launcher.cli_parser import build_parser
+    from bc_launcher.cli import build_parser
     from bc_launcher.constants import DOCKER_SOCKET_PATH
 
     assert flag == "--mount-docker-socket", flag
     assert cli_pkg == "docker-cli", cli_pkg
 
     # (a) the operator flag is a REAL flag of the REAL launch CLI.
-    parsed = build_parser().parse_args(
-        ["launch", "--bc-name", "shopsystem-messaging", flag]
-    )
+    parsed = build_parser().parse_args(["launch", "shopsystem-messaging", flag])
     assert getattr(parsed, "mount_docker_socket", False) is True, (
         f"the {flag!r} operator flag must be a real bc-container launch flag that "
         "opts the launch into the host docker-socket mount"
     )
     # (b) OFF by default — the precondition is a genuine operator opt-in, not
     # something every launch already gets (guard against a vacuous Given).
-    default = build_parser().parse_args(
-        ["launch", "--bc-name", "shopsystem-messaging"]
-    )
+    default = build_parser().parse_args(["launch", "shopsystem-messaging"])
     assert getattr(default, "mount_docker_socket", False) is False, (
         f"{flag!r} must be OFF by default, so this Given pins a real operator opt-in"
     )
