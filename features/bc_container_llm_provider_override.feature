@@ -28,12 +28,25 @@ Feature: a launch-time --llm-provider / BCLAUNCHER_LLM_PROVIDER override selects
     Then the container's fabro run is launched with the active LLM provider set to "anthropic"
     And no OpenRouter agent-vault credential is requested for this launch
 
-  @scenario_hash:b3054f5439369fa8 @bc:shopsystem-bc-launcher
-  Scenario: an explicit launch-time provider override selects OpenRouter, winning over the Anthropic default
+  # RETIRED-SCENARIO PROVENANCE (work_id lead-83mh8):
+  #   b3054f5439369fa8  superseded-by  4c9f5b265c5098b7
+  #   reason: the retired scenario pinned only "active LLM provider = openrouter"
+  #     and let lead-ifye3.2 register a CUSTOM [llm.providers.openrouter] fabro
+  #     provider, a shape a REAL end-to-end scout proved never completes a
+  #     dispatch — fabro's catalog auto-routing resolves "anthropic/..."-prefixed
+  #     OpenRouter model strings to the BUILT-IN "anthropic" provider before the
+  #     custom "openrouter" provider is considered ("Provider 'anthropic' not
+  #     registered").  The corrected scenario below (4c9f5b265c5098b7) pins the
+  #     override under fabro's NATIVE "openai" provider identity with base_url
+  #     overridden to the OpenRouter endpoint, so catalog routing lands
+  #     unambiguously on a registered provider.
+  @scenario_hash:4c9f5b265c5098b7 @bc:shopsystem-bc-launcher
+  Scenario: an explicit launch-time provider override selects OpenRouter access via fabro's NATIVE "openai" provider identity, with its "base_url" overridden to the OpenRouter endpoint — not a new custom "openrouter" fabro provider
     Given the shopsystem-bc-launcher BC is installed
     And the operator supplies a launch-time LLM provider override of "openrouter" via "--llm-provider openrouter" (or "BCLAUNCHER_LLM_PROVIDER=openrouter")
     When bc-container launch is run for BC name "shopsystem-messaging" with the operator-supplied provider override
-    Then the container's fabro run is launched with the active LLM provider set to "openrouter"
+    Then the container's fabro settings register the override under fabro's NATIVE "openai" provider identity, with its "base_url" set to "https://openrouter.ai/api/v1" — no new custom "openrouter" fabro provider is registered
+    And fabro's catalog auto-routing for OpenRouter-catalog-qualified model strings such as "anthropic/claude-sonnet-4.5" resolves unambiguously to the "openai" provider, with no collision against fabro's built-in "anthropic" catalog entry
     And the Anthropic anthropic-oauth-shim path is not engaged for this launch
 
   @scenario_hash:14290420156c5ee0 @bc:shopsystem-bc-launcher

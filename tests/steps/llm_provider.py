@@ -159,6 +159,131 @@ def fabro_run_active_provider_openrouter(ctx):
     )
 
 
+# ---------------------------------------------------------------------------
+# Behavior (@scenario_hash:4c9f5b265c5098b7 — supersedes the retired
+# b3054f5439369fa8): the launch-time openrouter override registers under fabro's
+# NATIVE "openai" provider identity ([llm.providers.openai]) with base_url
+# overridden to the OpenRouter endpoint — NOT a new custom [llm.providers.
+# openrouter] fabro provider (the shape a real E2E scout proved never completes a
+# dispatch: fabro catalog auto-routing resolves "anthropic/..."-prefixed model
+# strings to the BUILT-IN "anthropic" provider before the custom "openrouter"
+# provider is considered -> "Provider 'anthropic' not registered").
+#
+# FIDELITY: every assertion binds to the REAL launcher's ACTUAL recorded
+# `--orchestrator fabro` engage over the FakeDockerDriver (driven via
+# _odd9_drive_fabro_launch on the openrouter override path) and the REAL
+# provider-keyed model mapping table — never a model and never a shallow string-
+# match: the registered provider block, its base_url, the supplied `-I MODEL_*`
+# inputs, and the mapping-table slugs are read out of the real launch wiring.
+# ---------------------------------------------------------------------------
+
+
+@then(parsers.parse(
+    'the container\'s fabro settings register the override under fabro\'s NATIVE '
+    '"{provider_identity}" provider identity, with its "base_url" set to '
+    '"{base_url}" — no new custom "{custom_name}" fabro provider is registered'
+))
+def openrouter_registered_under_native_openai(
+    provider_identity, base_url, custom_name, ctx
+):
+    from bc_launcher.fabro.constants import FABRO_OPENROUTER_BASE_URL
+
+    script = _engage_script(ctx)
+
+    # The override is registered at the server under fabro's NATIVE provider
+    # identity — [llm.providers.openai] — so fabro recognizes it as its built-in
+    # openai provider (contrast a custom [llm.providers.openrouter] name fabro's
+    # catalog routing never reaches).
+    assert f"[llm.providers.{provider_identity}]" in script, (
+        "the openrouter override must be registered under fabro's NATIVE "
+        f"'{provider_identity}' provider identity ([llm.providers."
+        f"{provider_identity}]); script:\n{script}"
+    )
+    # Its base_url is OVERRIDDEN to the OpenRouter endpoint, and the base_url line
+    # belongs to THAT provider block (not merely present somewhere in the script).
+    assert re.search(
+        r"\[llm\.providers\." + re.escape(provider_identity) + r"\]"
+        r"(?:\\n|[^\[])*?base_url = \"" + re.escape(base_url) + r"\"",
+        script,
+    ), (
+        f"the native '{provider_identity}' provider block must set base_url to "
+        f"the OpenRouter endpoint {base_url!r}; script:\n{script}"
+    )
+    # The endpoint is the real constant (guard against a stale literal).
+    assert base_url == FABRO_OPENROUTER_BASE_URL, (
+        f"scenario base_url {base_url!r} must equal the launcher's OpenRouter "
+        f"endpoint constant {FABRO_OPENROUTER_BASE_URL!r}"
+    )
+    # NO new custom "openrouter" fabro provider block is registered (the retired
+    # shape) — the correction is precisely to STOP registering a provider named
+    # after the model-catalog vendor.
+    assert f"[llm.providers.{custom_name}]" not in script, (
+        f"no new custom '[llm.providers.{custom_name}]' fabro provider may be "
+        f"registered — the override rides the native openai identity; "
+        f"script:\n{script}"
+    )
+
+
+@then(parsers.parse(
+    'fabro\'s catalog auto-routing for OpenRouter-catalog-qualified model strings '
+    'such as "{model_slug}" resolves unambiguously to the "{provider_identity}" '
+    'provider, with no collision against fabro\'s built-in "{builtin}" catalog '
+    'entry'
+))
+def openrouter_catalog_routing_resolves_to_openai(
+    model_slug, provider_identity, builtin, ctx
+):
+    from bc_launcher.fabro.llm_provider import (
+        LLM_PROVIDER_OPENROUTER,
+        resolve_model_mapping,
+    )
+
+    script = _engage_script(ctx)
+
+    # (a) the named slug is a REAL OpenRouter-row model ID the launcher actually
+    # supplies on this run — an "anthropic/..."-prefixed OpenRouter-catalog slug
+    # (exactly the string whose prefix collided with fabro's built-in anthropic
+    # provider under the retired custom-openrouter shape).
+    or_row = resolve_model_mapping(LLM_PROVIDER_OPENROUTER)
+    assert model_slug in or_row.values(), (
+        f"the example model string {model_slug!r} must be a real OpenRouter-row "
+        f"model ID from the mapping table; row={or_row!r}"
+    )
+    assert model_slug.startswith(f"{builtin}/"), (
+        f"the example model string {model_slug!r} must be an OpenRouter-catalog-"
+        f"qualified '{builtin}/...' slug (the prefix that collided with fabro's "
+        f"built-in '{builtin}' provider under the retired shape)"
+    )
+    run_inputs = _model_run_inputs(script)
+    assert model_slug in run_inputs.values(), (
+        f"the launcher must actually supply the OpenRouter-catalog slug "
+        f"{model_slug!r} as a `-I MODEL_*` input on the openrouter finite run; "
+        f"inputs={run_inputs!r}; script:\n{script}"
+    )
+
+    # (b) the SOLE provider registered on this launch is the native openai
+    # identity: there is NO custom "openrouter" provider AND NO built-in-named
+    # "anthropic" provider block registered here, so an "anthropic/..."-prefixed
+    # model string cannot route to a registered provider named for its catalog
+    # prefix — it resolves via the ONE registered provider (openai), whose
+    # base_url points at OpenRouter.  That is the collision the correction avoids.
+    assert f"[llm.providers.{provider_identity}]" in script, (
+        f"the openrouter slug must resolve via the registered native "
+        f"'{provider_identity}' provider; script:\n{script}"
+    )
+    assert "[llm.providers.openrouter]" not in script, (
+        "no custom '[llm.providers.openrouter]' provider may be registered — the "
+        f"'{builtin}/...' catalog prefix would then be considered against fabro's "
+        "built-in provider set first (the retired 'Provider not registered' "
+        f"collision); script:\n{script}"
+    )
+    assert f"[llm.providers.{builtin}]" not in script, (
+        f"the openrouter path must register NO '[llm.providers.{builtin}]' block, "
+        f"so the '{builtin}/...' slug cannot collide with a registered "
+        f"'{builtin}'-named provider; script:\n{script}"
+    )
+
+
 @then("the Anthropic anthropic-oauth-shim path is not engaged for this launch")
 def anthropic_oauth_shim_not_engaged(ctx):
     # The anthropic-oauth-shim path is engaged (on the default anthropic path) by
