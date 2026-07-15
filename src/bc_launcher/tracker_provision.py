@@ -16,6 +16,15 @@ from bc_launcher.constants import CONTAINER_WORKSPACE
 BEADS_REMOTE_ORG = "dstengle"
 
 
+# lead-wpnv3 / shopsystem_bc_launcher-1ttf — the banner the schema-skew heal
+# aborts under when it cannot PROVE the from-jsonl rebuild is lossless.  A
+# named constant so the heal script and its ordering pins agree on one string.
+PRE_HEAL_SUBSET_ABORT_BANNER = (
+    "schema-skew heal: ABORTED — committed .beads/issues.jsonl would SILENTLY "
+    "DROP issues present in the pre-heal export"
+)
+
+
 
 def _beads_dolt_remote_url(bc_name: str) -> str:
     """The `git+https://` Dolt remote URL for a BC's `<bc>-beads` registry.
