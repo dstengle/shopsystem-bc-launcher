@@ -55,6 +55,16 @@ Feature: bc-container standup heals a remote-backed beads schema-skew wall by re
     And the rebuild's authoritative data SOURCE OF TRUTH is the committed ".beads/issues.jsonl", not the pre-heal export, which is retained only as a forensic safety net
     And if the pre-heal export fails because the old database is unreadable, the heal still proceeds from the committed ".beads/issues.jsonl" rather than aborting
 
+  @scenario_hash:c1236f6f55c639f8 @bc:shopsystem-bc-launcher
+  Scenario: the schema-skew heal ABORTS before any destructive step when a readable pre-heal export is NOT a subset of the committed issues.jsonl, naming the specific at-risk issue ids
+    Given the standup's schema-skew heal has taken a full pre-heal export that is READABLE
+    And the pre-heal export's issue ID set is NOT a subset of the committed ".beads/issues.jsonl"'s issue ID set, so at least one issue present in the export is absent from the committed jsonl
+    When the heal evaluates whether to proceed with the rebuild
+    Then the heal ABORTS before any destructive step, performing NEITHER a rebuild from the committed jsonl NOR a rebuild from the pre-heal export
+    And the heal's abort output names the specific at-risk issue ids and their count that are present in the pre-heal export but absent from the committed jsonl
+    And the heal's abort output directs the operator to the recovery runbook "docs/runbooks/beads-schema-skew-recovery.md"
+    And the heal exits nonzero, leaving the live local dolt database and every issue intact and unmodified
+
   @scenario_hash:5765dd7d175901e3 @bc:shopsystem-bc-launcher
   Scenario Outline: the reseed heal refuses a lead-role beads because the sole-clone invariant holds only for BCs, and proceeds for a BC
     Given a beads database exhibiting the #4259 remote-backed schema-skew refusal whose shop type is "<shop_type>"
