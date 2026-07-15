@@ -72,6 +72,7 @@ from bc_launcher.fabro.llm_provider import (  # noqa: F401
 )
 from bc_launcher.fabro.engage import (  # noqa: F401
     _fabro_exec_env,
+    _openrouter_shim_exec_env,
     _fabro_server_start_argv,
     _fabro_server_install_argv,
     _fabro_run_argv,

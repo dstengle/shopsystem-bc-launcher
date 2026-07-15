@@ -484,6 +484,12 @@ class LaunchMixin:
                 out_lines,
                 err_lines,
                 active_provider=active_provider,
+                # The credential HOP (lead-ifye3.5 behavior 4): hand the real
+                # container-runtime HTTPS_PROXY (the agent-vault MITM proxy wired
+                # into the container env above) to the openrouter-shim start so its
+                # OWN outbound curl hop egresses through agent-vault for wire
+                # substitution — the sandboxed node carries only the placeholder.
+                runtime_proxy_url=env.get(AGENT_VAULT_PROXY_ENV),
             )
 
         # Agent-start sequence (shared with `start_agent`, lead-k4k7).  This is

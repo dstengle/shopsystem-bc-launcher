@@ -29,6 +29,7 @@ from bc_launcher.fabro import (
     LLM_PROVIDER_ANTHROPIC,
     LLM_PROVIDER_OPENROUTER,
     _fabro_exec_env,
+    _openrouter_shim_exec_env,
     _fabro_settings_install_script,
     _fabro_shim_start_script,
     _openrouter_shim_start_script,
@@ -250,6 +251,7 @@ class LaunchPrepMixin:
         out_lines: list[str],
         err_lines: list[str],
         active_provider: str | None = None,
+        runtime_proxy_url: str | None = None,
     ) -> None:
         """Place the fabro-orchestrator wiring (workflow.toml identity rewrite
         + shim start + effective settings) onto the POURED def in the launched
@@ -395,11 +397,23 @@ class LaunchPrepMixin:
             # where agent-vault substitutes the credential on the shim's OWN hop.
             # The Anthropic anthropic-oauth-shim is deliberately NOT started on
             # this path.
+            #
+            # THE CREDENTIAL HOP (lead-ifye3.5 behavior 4): the shim's OWN exec env
+            # carries the real container-runtime HTTPS_PROXY (the agent-vault MITM
+            # proxy) plus the MITM CA trust, so the UNSANDBOXED shim's outbound curl
+            # egresses through agent-vault, where the broker substitutes the real
+            # OpenRouter key onto the Authorization: Bearer header on the wire —
+            # scoped to the OpenRouter host.  The SANDBOXED node never carries a
+            # real credential (fabro clears/filters credential-shaped env vars and
+            # never routes the sandboxed LLM call through HTTPS_PROXY); its
+            # OPENAI_API_KEY stays the literal __PLACEHOLDER__ that rides the plain-
+            # loopback node->shim hop.  This mirrors how the container's agent
+            # processes and the brokered clone receive the derived HTTPS_PROXY.
             shim_result = self._driver.exec_run(
                 container,
                 ["/bin/sh", "-c", _openrouter_shim_start_script()],
                 user=AGENT_CONTAINER_USER,
-                env=_fabro_exec_env(),
+                env=_openrouter_shim_exec_env(runtime_proxy_url),
             )
             if shim_result.returncode != 0:
                 err_lines.append(

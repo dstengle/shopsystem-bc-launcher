@@ -483,3 +483,35 @@ def _fabro_exec_env() -> dict[str, str]:
     a login shell.
     """
     return {SSL_CERT_FILE_ENV: AGENT_VAULT_CONTAINER_CA_PATH}
+
+
+def _openrouter_shim_exec_env(proxy_url: str | None) -> dict[str, str]:
+    """The exec env the launcher pins on the openrouter-shim START exec
+    (lead-ifye3.5 behavior 4 — the credential HOP).
+
+    The whole point of the openrouter-shim is that the SANDBOXED fabro node never
+    carries a real credential (fabro clears + FilterSensitive-strips credential-
+    shaped env vars before spawning, and its LLM call never routes through
+    HTTPS_PROXY).  Instead the UNSANDBOXED shim's OWN outbound ``curl`` hop carries
+    the real ``HTTPS_PROXY`` so it egresses through the agent-vault MITM proxy,
+    where the broker substitutes the real OpenRouter key onto the ``Authorization:
+    Bearer`` header on the wire, scoped to the OpenRouter host.
+
+    Extends ``_fabro_exec_env`` (SSL_CERT_FILE, the lead-ze4w BUG#3 non-login-shell
+    CA trust) with the real container-runtime ``HTTPS_PROXY`` (plus the lowercase
+    ``https_proxy`` some libcurl builds honour, mirroring the brokered clone) and
+    ``CURL_CA_BUNDLE`` so the shim's curl trusts the agent-vault MITM CA over that
+    proxied HTTPS hop.  When no runtime proxy was derived (no operator broker /
+    incomplete agent-vault triple) the proxy keys are omitted rather than set to an
+    empty value, so the exec env carries a real proxy or none.
+    """
+    env = {
+        SSL_CERT_FILE_ENV: AGENT_VAULT_CONTAINER_CA_PATH,
+        # curl's canonical CA-bundle var (the shim's outbound hop is curl, not
+        # urllib), pointed at the SAME materialized broker CA as SSL_CERT_FILE.
+        "CURL_CA_BUNDLE": AGENT_VAULT_CONTAINER_CA_PATH,
+    }
+    if proxy_url:
+        env["HTTPS_PROXY"] = proxy_url
+        env["https_proxy"] = proxy_url
+    return env
