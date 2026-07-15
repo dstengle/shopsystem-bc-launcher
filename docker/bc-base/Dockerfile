@@ -215,6 +215,43 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends tmux git tini \
     && rm -rf /var/lib/apt/lists/*
 
+# docker CLI CLIENT — required by any BC whose own dispatched work performs a
+# NESTED `bc-container launch` (the launcher launching a BC container from
+# inside a BC container). The launcher already has an opt-in
+# `--mount-docker-socket` flag that bind-mounts the host /var/run/docker.sock
+# and adds the socket's owning gid via --group-add (lead-wdvx), but a mounted
+# socket is INERT without a client binary to drive it.
+#
+# The package is `docker-cli`, NOT `docker.io`: on this image's Debian trixie
+# base the `docker.io` package installs ONLY the daemon side
+# (dockerd/docker-proxy/docker-init) and never the client, while the separate
+# client-only `docker-cli` package (same 26.1.5+dfsg1-9+b13 version) is what
+# actually produces a working /usr/bin/docker. Installing `docker.io` here
+# would ship a daemon this container never runs and still leave no client.
+#
+# Incident this closes (lead-6tu6o.1, correcting @scenario_hash:76badc67216f0d91
+# -> 1cee6978cbf9ac53): a live-proof attempt (lead-85s41) died with
+# `FileNotFoundError: 'docker'` inside the running container, and a direct
+# inspection of the published bc-base image against its confirmed digest found
+# NO docker binary baked in at all.
+#
+# `docker --version` is asserted at BUILD time on purpose: the failure mode this
+# block closes was "package present, client binary absent", which is exactly the
+# shape that ships silently. A build-time assert turns that into a loud build
+# failure instead of another fleet-wide broken image (the `gh --version` /
+# `bd --version` precedent below/above).
+#
+# FLEET-WIDE BLAST RADIUS (ADR-021 D1/D3, accepted tradeoff): shopsystem-bc-base
+# is a SINGLE image with one floating ":latest" tag and no per-BC override
+# (ADR-021 D4, deferred), so this client reaches EVERY BC container — not just
+# the launcher's. It grants no new access on its own: without the opt-in
+# `--mount-docker-socket` flag there is no socket in the container for the
+# client to reach.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends docker-cli \
+    && rm -rf /var/lib/apt/lists/* \
+    && docker --version
+
 # GitHub CLI (gh) — required for a BC container to authenticate git pushes to
 # origin/main (the pre-emit "commit reachable from origin/main" gate). The
 # launcher already bind-mounts the host's ~/.config/gh into the container

@@ -1162,6 +1162,96 @@ def openrouter_shim_part_of_image(shim_name, ctx):
     ctx["b6_shim_in_image"] = True
 
 
+def _dockerfile_apt_installs(pkg):
+    """True when the REAL committed bc-base Dockerfile carries an apt install
+    layer for `pkg`.  Collapses Dockerfile backslash line-continuations so a
+    multi-line `RUN apt-get update \\ && apt-get install ... <pkg>` reads as one
+    logical line, and STRIPS comment lines first so a mere prose mention of the
+    package in a comment can never satisfy the check (the tini precedent in
+    tests/steps/pid1_reaper.py, hardened against comment-only satisfaction)."""
+    from tests.support.common import _find_bc_base_dockerfile
+
+    dockerfile = _find_bc_base_dockerfile()
+    assert dockerfile is not None, "no bc-base Dockerfile found under the repo tree"
+    text = dockerfile.read_text()
+    logical = re.sub(r"\\\s*\n\s*", " ", text)
+    uncommented = "\n".join(
+        ln for ln in logical.splitlines() if not ln.lstrip().startswith("#")
+    )
+    return bool(
+        re.search(rf"apt-get install[^\n]*\b{re.escape(pkg)}\b", uncommented)
+    )
+
+
+@given(parsers.parse(
+    'that same bc-base image also bakes in the "{cli_pkg}" apt package (the '
+    'docker CLI client binary — not satisfied by "{daemon_pkg}" alone, which on '
+    "this image's Debian trixie base installs only the \"{daemon_bin}\" daemon, "
+    "no client), satisfied once, prior to and independent of this launch, so the "
+    'launched container can perform the nested "{nested_cmd}" its own dispatched '
+    "work requires"
+))
+def bc_base_image_bakes_docker_cli(cli_pkg, daemon_pkg, daemon_bin, nested_cmd, ctx):
+    # PRECONDITION (already-satisfied, out-of-scope Architect infra action — the
+    # scenario pins the EXISTENCE of the precondition, not the edit steps).  Bound
+    # to the REAL committed bc-base Dockerfile, the same fidelity the FABRO_VERSION
+    # precondition Given above uses.
+    #
+    # ROOT CAUSE this precondition encodes (lead-85s41 live attempt +
+    # lead-6tu6o direct image inspection): on this image's Debian trixie base the
+    # "docker.io" package installs only the dockerd daemon and NEVER the client, so
+    # the client-only "docker-cli" package is what actually produces /usr/bin/docker.
+    # Without it the nested `bc-container launch` this scenario's own When-clause
+    # requires dies with FileNotFoundError: 'docker'.
+    assert cli_pkg == "docker-cli", cli_pkg
+    assert daemon_pkg == "docker.io", daemon_pkg
+    assert daemon_bin == "dockerd", daemon_bin
+    assert nested_cmd == "bc-container launch", nested_cmd
+
+    assert _dockerfile_apt_installs(cli_pkg), (
+        f"the bc-base Dockerfile must bake the {cli_pkg!r} apt package — the docker "
+        "CLI CLIENT binary the launched container needs to perform the nested "
+        f"{nested_cmd!r} its own dispatched work requires.  On this image's Debian "
+        f"trixie base {daemon_pkg!r} installs only the {daemon_bin!r} daemon and no "
+        "client, so the client-only 'docker-cli' package is required; without it the "
+        "nested launch dies with FileNotFoundError: 'docker' (lead-85s41 live "
+        "attempt, confirmed by lead-6tu6o direct image inspection)"
+    )
+    ctx["b6_docker_cli_precondition_satisfied"] = True
+
+
+@given(parsers.parse(
+    'the container is launched with the "{flag}" operator flag, so the baked '
+    '"{cli_pkg}" client has a socket to reach'
+))
+def container_launched_with_mount_docker_socket(flag, cli_pkg, ctx):
+    # Bound to the REAL launcher: the opt-in flag exists on the actual bc-container
+    # launch CLI parser, and a launch carrying it produces a REAL host-docker-socket
+    # bind mount (driven over the FakeDockerDriver via the real controller) — never
+    # a string match.  A baked docker-cli client with no socket to reach is inert,
+    # so this Given is a genuine precondition of the nested launch, not decoration.
+    from bc_launcher.cli import build_parser
+    from bc_launcher.constants import DOCKER_SOCKET_PATH
+
+    assert flag == "--mount-docker-socket", flag
+    assert cli_pkg == "docker-cli", cli_pkg
+
+    # (a) the operator flag is a REAL flag of the REAL launch CLI.
+    parsed = build_parser().parse_args(["launch", "shopsystem-messaging", flag])
+    assert getattr(parsed, "mount_docker_socket", False) is True, (
+        f"the {flag!r} operator flag must be a real bc-container launch flag that "
+        "opts the launch into the host docker-socket mount"
+    )
+    # (b) OFF by default — the precondition is a genuine operator opt-in, not
+    # something every launch already gets (guard against a vacuous Given).
+    default = build_parser().parse_args(["launch", "shopsystem-messaging"])
+    assert getattr(default, "mount_docker_socket", False) is False, (
+        f"{flag!r} must be OFF by default, so this Given pins a real operator opt-in"
+    )
+    ctx["b6_mount_docker_socket_flag"] = True
+    ctx["b6_docker_socket_path"] = DOCKER_SOCKET_PATH
+
+
 @then("the dispatched work reaches a gated work_done, having executed through "
       "at least one non-trivial node-class, such as \".coding\", whose model "
       "resolved to a literal OpenRouter model ID via the \"openrouter-shim\"")
@@ -1301,17 +1391,35 @@ def dispatched_work_reaches_gated_workdone_via_shim_openrouter_model(ctx):
     ctx["b6_gated_workdone_reachable"] = True
 
 
-@then("no further software release, BC-base image rebuild, or template re-pour "
-      "beyond the already-satisfied FABRO_VERSION image precondition was required "
-      "to reach this outcome — only the launch-time provider override and a "
+@then("no further software release was required beyond the already-satisfied "
+      "FABRO_VERSION and bc-base \"docker-cli\" image preconditions — only the "
+      "launch-time provider override, the \"--mount-docker-socket\" flag, and a "
       "container relaunch")
-def no_further_release_beyond_fabro_version_precondition(ctx, tmp_path, monkeypatch):
+def no_further_release_beyond_fabro_version_and_docker_cli_preconditions(
+    ctx, tmp_path, monkeypatch
+):
     from bc_launcher.controller import BcContainerController, _load_fabro_def_files
     from bc_launcher.fabro.constants import (
         FABRO_OPENROUTER_BASE_URL,
         FABRO_OPENROUTER_PROVIDER_IDENTITY,
     )
     from tests.fake_driver import FakeDockerDriver
+
+    # --- (0) BOTH named image preconditions are ALREADY SATISFIED on the committed
+    # tree (the FABRO_VERSION pin and the bc-base "docker-cli" bake), and the
+    # "--mount-docker-socket" opt-in is a launch-time flag.  This Then asserts what
+    # is NOT required beyond them, so it first pins that they genuinely hold —
+    # otherwise "no further release" would be vacuously true against a broken image.
+    assert ctx.get("b6_fabro_version_precondition_satisfied"), (
+        "the FABRO_VERSION image precondition Given must have been established"
+    )
+    assert ctx.get("b6_docker_cli_precondition_satisfied"), (
+        "the bc-base 'docker-cli' image precondition Given must have been "
+        "established — the corrected precondition this scenario adds"
+    )
+    assert ctx.get("b6_mount_docker_socket_flag"), (
+        "the '--mount-docker-socket' launch-flag Given must have been established"
+    )
 
     # --- (1) the poured def bundle (what shop-templates POURS) is provider-
     # INVARIANT: `_load_fabro_def_files()` takes NO provider argument and returns
