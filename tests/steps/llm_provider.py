@@ -502,20 +502,30 @@ def openai_extra_override_breaks_precondition(ctx):
 
 
 # ---------------------------------------------------------------------------
-# Behavior 3 (@scenario_hash:98b956adece2b7e0 — supersedes the retired
-# 14290420156c5ee0): the OpenRouter credential rides fabro's NATIVE
-# "OPENAI_API_KEY" env var with NO header-reshaping shim, matching the
-# GITHUB_TOKEN no-shim pattern (placeholder node-side, broker substitutes on the
-# wire scoped to the OpenRouter host) rather than the Anthropic oauth-shim
-# pattern. CORRECTION (lead-83mh8): the node-side credential env is fabro's
-# native OPENAI_API_KEY (what fabro's sandboxed-worker startup precondition check
-# recognizes), NOT the retired custom OPENROUTER_API_KEY that never reached that
-# check. The broker-side vault-lookup key stays OPENROUTER_API_KEY and is
-# DECOUPLED from the node-side env var name (matched by DESTINATION HOST).
+# Behavior 4 / the credential HOP (@scenario_hash:05638241a033ef0c — supersedes
+# the retired 98b956adece2b7e0): the real OpenRouter credential is substituted on
+# the openrouter-shim's OWN outbound hop by agent-vault, matching the GITHUB_TOKEN
+# no-shim pattern MOVED ONE HOP OUT — never present in the sandboxed node's
+# filesystem or process environment.
+#
+# WHY THE HOP MOVED (retirement of 98b956ad): the retired scenario placed the
+# agent-vault substitution on the SANDBOXED node's OWN wire hop (real key onto the
+# node's Authorization: Bearer header via the container HTTPS_PROXY).  fabro's
+# sandboxed execution path CLEARS + FilterSensitive-strips credential-shaped env
+# vars before spawning AND never routes the sandboxed LLM call through HTTPS_PROXY,
+# so agent-vault could never substitute from inside the sandbox.  The corrected
+# scenario moves the substitution ONE HOP OUT: node-side "OPENAI_API_KEY" stays the
+# literal "__PLACEHOLDER__" (carried unchanged onto the Authorization: Bearer
+# header the node sends over PLAIN LOOPBACK to the local openrouter-shim), and the
+# UNSANDBOXED openrouter-shim process's OWN environment carries the real
+# HTTPS_PROXY through which agent-vault substitutes the real OpenRouter key on the
+# shim's outbound wire hop, scoped to the OpenRouter host.
 #
 # FIDELITY: every assertion binds to the REAL launcher's ACTUAL recorded engage
-# exec + exec_calls over the FakeDockerDriver (driven via _odd9_drive_fabro_launch
-# on the openrouter override path), never a model and never a shallow match.
+# exec + the recorded openrouter-shim launch exec's OWN env + the container's
+# docker-run HTTPS_PROXY + the REAL committed openrouter-shim asset over the
+# FakeDockerDriver (driven via _odd9_drive_fabro_launch on the openrouter override
+# path), never a model and never a shallow string-match.
 # ---------------------------------------------------------------------------
 
 
@@ -579,118 +589,160 @@ def _node_side_openai_api_key_assignments(ctx):
 
 
 @then(parsers.parse(
-    'the node-side "{env_name}" value is the literal placeholder '
-    '"{placeholder}", with no header-reshaping shim process launched for the '
-    'OpenRouter path'
+    'the sandboxed node\'s "{env_name}" value is the literal placeholder '
+    '"{placeholder}", carried unchanged onto the "{header}" header the node '
+    'sends to the "{shim_name}"'
 ))
-def openrouter_node_side_placeholder_no_shim(env_name, placeholder, ctx):
-    script = _engage_script(ctx)
-
-    # The launcher THREADS the OpenRouter credential in node-side as a literal
-    # placeholder under fabro's NATIVE credential env (OPENAI_API_KEY — what the
-    # sandboxed-worker startup precondition check recognizes): the engage exports
-    # it so the finite `fabro run` children (provider=local, inheriting the
-    # engage env) carry it, and its value is the literal placeholder — the
-    # agent-vault broker substitutes the real key on the wire (mirrors
-    # GITHUB_TOKEN). (lead-83mh8: NOT the retired custom OPENROUTER_API_KEY.)
-    m = re.search(rf"export {re.escape(env_name)}=(\S+)", script)
-    assert m is not None, (
-        f"the openrouter override engage must export {env_name} node-side so "
-        f"the finite `fabro run` children inherit the OpenRouter credential; "
-        f"script:\n{script}"
-    )
-    value = m.group(1).strip("'\"")
-    assert value == placeholder, (
-        f"the node-side {env_name} must be the literal placeholder "
-        f"{placeholder!r} (no real key in the container — the broker rides the "
-        f"wire), got {value!r}; script:\n{script}"
-    )
-
-    # NO header-reshaping shim process launched for the OpenRouter path: the
-    # anthropic-oauth-shim is the header-reshaping shim (contrast the anthropic
-    # path, which starts it); the openrouter no-shim path must launch NONE.
-    shim_starts = _anthropic_oauth_shim_start_calls(ctx)
-    assert shim_starts == [], (
-        "the openrouter no-shim path must launch NO header-reshaping shim "
-        f"process, but {len(shim_starts)} shim-start exec(s) were recorded: "
-        f"{[c.command[:3] for c in shim_starts]!r}"
-    )
-
-
-@then(parsers.parse(
-    'the agent-vault broker\'s MITM proxy substitutes the real OpenRouter API '
-    'key onto the outbound "{header}" header only on the wire, scoped to '
-    'requests directed at the OpenRouter host'
-))
-def openrouter_mitm_substitutes_bearer_on_wire(header, ctx):
+def openrouter_node_side_placeholder_onto_bearer(
+    env_name, placeholder, header, shim_name, ctx
+):
     from urllib.parse import urlparse
 
     from bc_launcher.fabro.constants import (
         FABRO_OPENROUTER_BASE_URL,
-        FABRO_OPENROUTER_PROVIDER_IDENTITY,
+        FABRO_OPENROUTER_SHIM_PORT,
+        FABRO_SHIM_HOST,
     )
 
     script = _engage_script(ctx)
 
-    # The launcher wiring that MAKES the on-the-wire substitution possible: the
-    # override is REGISTERED at the server under fabro's NATIVE "openai" provider
-    # identity (lead-83mh8 correction — NOT a custom [llm.providers.openrouter]
-    # provider) pointing at OpenRouter's REAL API — the OpenAI-compatible endpoint
-    # that authenticates via `Authorization: Bearer <key>`.  So the finite run's
-    # LLM request is sent with the placeholder Bearer token and forwarded through
-    # HTTPS_PROXY, where the agent-vault broker's MITM proxy substitutes the REAL
-    # OpenRouter key onto the `Authorization: Bearer` header on the wire (mirrors
-    # GITHUB_TOKEN; NOT the anthropic-oauth-shim header-reshaping path).
-    assert f"[llm.providers.{FABRO_OPENROUTER_PROVIDER_IDENTITY}]" in script, (
-        "the openrouter override must be REGISTERED at the server under the "
-        f"native '[llm.providers.{FABRO_OPENROUTER_PROVIDER_IDENTITY}]' identity "
-        "so the finite run's request rides HTTPS_PROXY to the broker for wire "
-        f"substitution; script:\n{script}"
+    # NODE-SIDE PLACEHOLDER: the engage exports the OpenRouter credential env under
+    # fabro's NATIVE OPENAI_API_KEY as the literal placeholder, so the sandboxed
+    # finite `fabro run` children (provider=local, inheriting the engage env) carry
+    # only the placeholder — never a real key.
+    m = re.search(rf"export {re.escape(env_name)}=(\S+)", script)
+    assert m is not None, (
+        f"the openrouter override engage must export {env_name} node-side so the "
+        f"sandboxed finite `fabro run` children inherit the credential env; "
+        f"script:\n{script}"
     )
-    assert FABRO_OPENROUTER_BASE_URL in script, (
-        "the registered openrouter provider must point at OpenRouter's REAL API "
-        f"base_url {FABRO_OPENROUTER_BASE_URL!r} (the request that goes out on "
-        f"the wire for the broker to substitute); script:\n{script}"
+    value = m.group(1).strip("'\"")
+    assert value == placeholder, (
+        f"the sandboxed node's {env_name} must be the literal placeholder "
+        f"{placeholder!r} (no real key node-side), got {value!r}; script:\n{script}"
     )
-    # OpenRouter's OpenAI-compatible API authenticates via `Authorization:
-    # Bearer` — the header the broker substitutes on.  That Bearer-auth behavior
-    # comes from the built-in "openai" catalog adapter default, which the native
-    # "openai" provider identity ([llm.providers.openai], asserted above) already
-    # supplies.  (behavior 2, @scenario_hash:a28018af66182e33: the override entry
-    # must carry NO explicit "adapter" key — an explicit adapter/auth key breaks
-    # fabro's sandboxed-worker startup precondition; the openai catalog supplies
-    # it.)  So the override block must NOT emit an explicit adapter override.
+
+    # CARRIED ONTO THE Authorization: Bearer HEADER THE NODE SENDS TO THE SHIM: the
+    # override registers the native "openai" provider with base_url pointed at the
+    # LOCAL openrouter-shim loopback, and the built-in openai catalog adapter
+    # (NO explicit adapter override — behavior 2) authenticates via
+    # `Authorization: Bearer <OPENAI_API_KEY>`.  So the finite run sends its
+    # request — carrying that placeholder Bearer token UNCHANGED — to the shim.
     or_block = _openai_provider_block(script)
     assert or_block is not None and "adapter" not in or_block, (
-        "the openrouter override registers the native openai identity, whose "
-        "built-in catalog adapter default supplies Authorization: Bearer auth — "
-        "the override block must NOT emit an explicit 'adapter' key (which would "
-        f"break fabro's startup precondition); script:\n{script}"
+        "the native openai override block must carry NO explicit 'adapter' key so "
+        "its built-in catalog default supplies Authorization: Bearer auth; "
+        f"block:\n{or_block}"
     )
-    # SCOPED TO THE OpenRouter HOST: the broker's MITM substitution matches by
-    # DESTINATION HOST (openrouter.ai), not by env var name — so the wiring that
-    # scopes it is the registered provider's base_url host. Assert the outbound
-    # request is directed at the OpenRouter host (the node-side placeholder
-    # OPENAI_API_KEY value is DECOUPLED from the broker-side OPENROUTER_API_KEY
-    # vault-lookup key by design; only the destination host gates substitution).
-    openrouter_host = urlparse(FABRO_OPENROUTER_BASE_URL).hostname
-    assert openrouter_host and openrouter_host in script, (
-        "the registered openrouter provider's base_url must direct the outbound "
-        f"request at the OpenRouter host {openrouter_host!r} — the DESTINATION "
-        "HOST the broker's MITM substitution is scoped to (not the env var "
-        f"name); script:\n{script}"
+    parsed = urlparse(FABRO_OPENROUTER_BASE_URL)
+    assert parsed.hostname == FABRO_SHIM_HOST and parsed.port == FABRO_OPENROUTER_SHIM_PORT, (
+        f"the node's request must be directed at the local {shim_name!r} loopback "
+        f"({FABRO_SHIM_HOST}:{FABRO_OPENROUTER_SHIM_PORT}) — the base_url the "
+        f"Bearer-carrying request is sent to; got {FABRO_OPENROUTER_BASE_URL!r}"
+    )
+    assert FABRO_OPENROUTER_BASE_URL in script, (
+        f"the registered openai provider base_url must be the local {shim_name!r} "
+        f"loopback {FABRO_OPENROUTER_BASE_URL!r}; script:\n{script}"
     )
 
 
-@then(
-    "the real OpenRouter API key is not present in the container's filesystem "
-    "or process environment"
-)
-def openrouter_real_key_absent(ctx):
-    # Node-side, the ONLY OpenRouter credential env is fabro's NATIVE
+@then(parsers.parse(
+    'the "{shim_name}" process\'s own environment (not the sandboxed node\'s) '
+    'carries the real "{proxy_env}", through which the agent-vault broker\'s MITM '
+    'proxy substitutes the real OpenRouter API key onto that same "{header}" '
+    'header only on the shim\'s outbound wire hop, scoped to requests directed at '
+    'the OpenRouter host'
+))
+def openrouter_shim_own_env_carries_real_proxy(
+    shim_name, proxy_env, header, ctx
+):
+    from bc_launcher.constants import SSL_CERT_FILE_ENV
+    from bc_launcher.fabro.constants import OPENROUTER_SHIM_BIN
+
+    # EXACTLY ONE recorded openrouter-shim launch exec; read its OWN exec env (the
+    # per-exec `docker exec -e KEY=VALUE` env the FakeDockerDriver records).
+    starts = _openrouter_shim_start_calls(ctx)
+    assert len(starts) == 1, (
+        f"the openrouter override path must launch EXACTLY ONE {shim_name!r} "
+        f"process, but {len(starts)} were recorded: "
+        f"{[c.command[:3] for c in starts]!r}"
+    )
+    shim_env = starts[0].env or {}
+
+    # THE SHIM'S OWN ENVIRONMENT CARRIES THE REAL HTTPS_PROXY: its unsandboxed
+    # outbound `curl` hop routes through the agent-vault MITM proxy, where the real
+    # OpenRouter key is substituted on the wire.  (RED fails here: the openrouter-
+    # shim launch exec's env carries only SSL_CERT_FILE, no HTTPS_PROXY.)
+    assert proxy_env in shim_env, (
+        f"the {shim_name!r} launch exec's OWN environment must carry {proxy_env!r} "
+        "so its outbound OpenRouter curl routes through the agent-vault MITM proxy "
+        f"for wire substitution; recorded shim exec env: {shim_env!r}"
+    )
+    proxy_value = shim_env[proxy_env]
+    assert proxy_value, (
+        f"the {shim_name!r} exec's {proxy_env} must be non-empty (a real proxy "
+        f"address); got {proxy_value!r}"
+    )
+
+    # IT IS THE REAL container-runtime proxy the launch wired — identical to the
+    # container's docker-run HTTPS_PROXY (the agent-vault MITM proxy), never a
+    # fabricated value.  Read from the REAL recorded `docker run` env.
+    container_proxy = ctx["cadr_driver"].container_proxy_env(ctx["container_name"])
+    assert container_proxy and proxy_value == container_proxy, (
+        f"the {shim_name!r} exec's {proxy_env} must equal the container's real "
+        f"docker-run HTTPS_PROXY {container_proxy!r} (the agent-vault MITM proxy), "
+        f"got {proxy_value!r}"
+    )
+
+    # + the MITM CA trust var so the shim's curl trusts the agent-vault MITM cert
+    # over that HTTPS_PROXY hop (the lead-ze4w BUG#3 non-login-shell reason).
+    assert shim_env.get(SSL_CERT_FILE_ENV), (
+        f"the {shim_name!r} exec env must pin {SSL_CERT_FILE_ENV} to the "
+        f"materialized broker CA so its outbound HTTPS over {proxy_env} trusts the "
+        f"agent-vault MITM CA; recorded shim exec env: {shim_env!r}"
+    )
+
+    # NOT THE SANDBOXED NODE'S ENV: the node -> shim hop is PLAIN LOOPBACK; the
+    # engage's node-side env must NOT export HTTPS_PROXY for the finite run (the
+    # real HTTPS_PROXY belongs to the UNSANDBOXED shim's OWN outbound hop only).
+    script = _engage_script(ctx)
+    assert not re.search(rf"export\s+{re.escape(proxy_env)}=", script), (
+        f"the sandboxed node's engage env must NOT export {proxy_env} — the "
+        f"node->shim hop is plain loopback; the real {proxy_env} belongs to the "
+        f"UNSANDBOXED {shim_name!r} process's OWN outbound hop; script:\n{script}"
+    )
+
+    # SCOPED TO THE OpenRouter HOST: agent-vault's MITM substitution matches by
+    # DESTINATION HOST, and the shim forwards its outbound hop to the REAL
+    # OpenRouter API host — bound to the committed openrouter-shim asset's own
+    # UPSTREAM default (never a re-derivation).
+    launch_script = starts[0].command[2]
+    assert OPENROUTER_SHIM_BIN in launch_script, (
+        f"the recorded {shim_name!r} launch must exec the openrouter-shim binary "
+        f"{OPENROUTER_SHIM_BIN!r}; script:\n{launch_script}"
+    )
+    from tests.test_lead_ifye3_5_openrouter_shim import _load_openrouter_shim_module
+
+    shim_mod = _load_openrouter_shim_module()
+    upstream = getattr(shim_mod, "UPSTREAM", "") or ""
+    assert "openrouter.ai" in upstream, (
+        f"the {shim_name!r} outbound hop must forward to the OpenRouter host "
+        f"(openrouter.ai) — the DESTINATION HOST the broker's MITM substitution is "
+        f"scoped to; committed shim UPSTREAM={upstream!r}"
+    )
+
+
+@then(parsers.parse(
+    'the real OpenRouter API key is not present in the sandboxed node\'s '
+    'filesystem or process environment at any point, including via '
+    '"{overlay}" overlays, because fabro\'s sandboxed execution path clears and '
+    'filters credential-shaped environment variables before spawning'
+))
+def openrouter_real_key_absent_node_side(overlay, ctx):
+    # NODE-SIDE: the ONLY OpenRouter credential env is fabro's NATIVE
     # OPENAI_API_KEY, and across EVERY recorded launch exec the ONLY value it is
     # assigned is the literal placeholder — the real key lives ONLY at the broker
-    # and rides the wire, never the container fs/env.
+    # and rides the shim's wire hop, never the sandboxed node's fs/env.
     assignments = _node_side_openai_api_key_assignments(ctx)
     assert assignments, (
         "expected at least one node-side OPENAI_API_KEY assignment in the "
@@ -699,24 +751,37 @@ def openrouter_real_key_absent(ctx):
     )
     for call, value in assignments:
         assert value == "__PLACEHOLDER__", (
-            "every node-side OPENAI_API_KEY in the recorded launch wiring must "
-            f"be the literal placeholder, got {value!r} in exec "
-            f"{call.command[:3]!r}"
+            "every node-side OPENAI_API_KEY in the recorded launch wiring must be "
+            f"the literal placeholder, got {value!r} in exec {call.command[:3]!r}"
         )
-    # The RETIRED custom OPENROUTER_API_KEY node-side env must NOT be exported on
-    # the engage path: fabro's sandboxed-worker startup precondition check only
-    # recognizes ANTHROPIC_API_KEY / OPENAI_API_KEY, so a node-side
-    # OPENROUTER_API_KEY never reaches it (the exact defect lead-83mh8 corrects).
-    # The broker-side OPENROUTER_API_KEY vault-lookup key is DECOUPLED and lives
-    # at the broker, never node-side.
+
     script = _engage_script(ctx)
+    # No retired custom node-side OPENROUTER_API_KEY export.
     assert not re.search(r"export\s+OPENROUTER_API_KEY=", script), (
-        "the openrouter override must NOT export the retired custom node-side "
-        "OPENROUTER_API_KEY; the node-side credential env is fabro's native "
-        f"OPENAI_API_KEY. script:\n{script}"
+        "the openrouter override must NOT export a node-side OPENROUTER_API_KEY; "
+        f"the node-side credential env is fabro's native OPENAI_API_KEY. "
+        f"script:\n{script}"
     )
-    # Defensive: no real OpenRouter-key-shaped literal (sk-or-...) may appear
-    # anywhere in the recorded launch execs (command or stdin).
+
+    # INCLUDING VIA [run.environment.env] OVERLAYS: the engage's materialize_child
+    # heredoc [run.environment.env] overlay (the ONE overlay `fabro run` applies to
+    # the sandboxed child that `-I` does NOT reach) must carry NO real credential —
+    # it holds only the BC_NAME/WORK_ID identity, never a real OpenRouter key.
+    for overlay_block in re.findall(
+        r"\[run\.environment\.env\](.*?)(?:\[run\.|EOF)", script, re.DOTALL
+    ):
+        assert "OPENROUTER_API_KEY" not in overlay_block, (
+            f"the {overlay} overlay must not carry an OpenRouter credential; "
+            f"overlay:\n{overlay_block}"
+        )
+        assert "sk-or-" not in overlay_block and "sk-ant-" not in overlay_block, (
+            f"the {overlay} overlay must carry NO real key-shaped literal; "
+            f"overlay:\n{overlay_block}"
+        )
+
+    # DEFENSIVE: no real OpenRouter-key-shaped literal (sk-or-...) may appear
+    # anywhere in the recorded launch execs (command or stdin) — the sandboxed
+    # node never sees the real key on its fs or in its process env at any point.
     for c in _cadr_exec_calls(ctx):
         blob = " ".join(c.command)
         if getattr(c, "input", None):

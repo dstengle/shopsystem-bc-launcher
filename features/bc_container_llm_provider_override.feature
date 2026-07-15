@@ -60,6 +60,22 @@ Feature: a launch-time --llm-provider / BCLAUNCHER_LLM_PROVIDER override selects
   #     with the same launch-lifecycle shape as the existing anthropic-oauth-shim),
   #     moving the real outbound egress — where agent-vault substitutes the
   #     credential — onto the shim's OWN hop instead of the sandboxed node's.
+  #
+  #   98b956adece2b7e0  superseded-by  05638241a033ef0c
+  #   reason: the retired scenario placed the agent-vault substitution on the
+  #     SANDBOXED node's OWN outbound wire hop (real key onto the node's
+  #     Authorization: Bearer header via the container HTTPS_PROXY).  fabro's
+  #     sandboxed execution path CLEARS + FilterSensitive-strips credential-shaped
+  #     env vars before spawning AND never routes the sandboxed LLM call through
+  #     HTTPS_PROXY, so agent-vault could never substitute the real key from inside
+  #     the sandbox.  The corrected scenario below (05638241a033ef0c) moves the
+  #     substitution ONE HOP OUT: the node-side "OPENAI_API_KEY" stays the literal
+  #     "__PLACEHOLDER__" (carried unchanged onto the "Authorization: Bearer"
+  #     header the node sends to the local "openrouter-shim"), and the UNSANDBOXED
+  #     "openrouter-shim" process's OWN environment carries the real "HTTPS_PROXY"
+  #     through which agent-vault substitutes the real OpenRouter key on the shim's
+  #     outbound wire hop, scoped to the OpenRouter host — the GITHUB_TOKEN no-shim
+  #     pattern moved one hop out.  work_id lead-ifye3.5.
 
   @scenario_hash:1d9d3777e3c3d8f5 @bc:shopsystem-bc-launcher
   Scenario: a plain launch with no operator-supplied provider override keeps the Anthropic-subscription path as the active LLM provider
@@ -96,15 +112,15 @@ Feature: a launch-time --llm-provider / BCLAUNCHER_LLM_PROVIDER override selects
     And the shim forwards the request to "https://openrouter.ai/api" plus the incoming request path, unchanged, with no header reshaping — unlike the "anthropic-oauth-shim", which does reshape headers
     And the shim streams the upstream response back to the sandboxed node unchanged
 
-  @scenario_hash:98b956adece2b7e0 @bc:shopsystem-bc-launcher
-  Scenario: the OpenRouter credential rides fabro's native "OPENAI_API_KEY" env var with no header-reshaping shim, matching the GITHUB_TOKEN no-shim pattern — not the retired custom "OPENROUTER_API_KEY" shape
+  @scenario_hash:05638241a033ef0c @bc:shopsystem-bc-launcher
+  Scenario: the real OpenRouter credential is substituted on the shim's own outbound hop by agent-vault, matching the GITHUB_TOKEN no-shim pattern moved one hop out — never present in the sandboxed node's filesystem or process environment
     Given the shopsystem-bc-launcher BC is installed
     And the operator supplies a launch-time LLM provider override of "openrouter"
     And an agent-vault broker with a registered OpenRouter-host credential service is running on the shopsystem network and is reachable
     When bc-container launch starts the agent for BC name "shopsystem-messaging" with the OpenRouter provider override
-    Then the node-side "OPENAI_API_KEY" value is the literal placeholder "__PLACEHOLDER__", with no header-reshaping shim process launched for the OpenRouter path
-    And the agent-vault broker's MITM proxy substitutes the real OpenRouter API key onto the outbound "Authorization: Bearer" header only on the wire, scoped to requests directed at the OpenRouter host
-    And the real OpenRouter API key is not present in the container's filesystem or process environment
+    Then the sandboxed node's "OPENAI_API_KEY" value is the literal placeholder "__PLACEHOLDER__", carried unchanged onto the "Authorization: Bearer" header the node sends to the "openrouter-shim"
+    And the "openrouter-shim" process's own environment (not the sandboxed node's) carries the real "HTTPS_PROXY", through which the agent-vault broker's MITM proxy substitutes the real OpenRouter API key onto that same "Authorization: Bearer" header only on the shim's outbound wire hop, scoped to requests directed at the OpenRouter host
+    And the real OpenRouter API key is not present in the sandboxed node's filesystem or process environment at any point, including via "[run.environment.env]" overlays, because fabro's sandboxed execution path clears and filters credential-shaped environment variables before spawning
 
   @scenario_hash:22f2a5bda5c29044 @bc:shopsystem-bc-launcher
   Scenario: bc-launcher resolves each poured node-class placeholder to a literal model ID via fabro run "-I" inputs, sourced from the provider-keyed mapping table for the active provider
