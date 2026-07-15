@@ -239,18 +239,31 @@ def _fabro_engage_script(bc_name: str, provider: str | None = None) -> str:
     if active_provider == LLM_PROVIDER_OPENROUTER:
         # OPENROUTER no-shim agent-vault-brokered credential (behavior 3),
         # mirroring the GITHUB_TOKEN no-shim pattern (NOT the anthropic-oauth-
-        # shim header-reshaping pattern): OPENROUTER_API_KEY is the literal
-        # __PLACEHOLDER__ node-side (the finite `fabro run` children inherit it),
-        # the openrouter provider points DIRECTLY at OpenRouter's OpenAI-
-        # compatible API (Authorization: Bearer auth, NO local shim), and the
-        # agent-vault broker's MITM proxy substitutes the REAL key onto the
-        # outbound Bearer header on the wire via the container HTTPS_PROXY.
+        # shim header-reshaping pattern): fabro's NATIVE OPENAI_API_KEY (lead-83mh8
+        # correction — the retired custom OPENROUTER_API_KEY never reached fabro's
+        # sandboxed-worker startup precondition check, which recognizes only
+        # ANTHROPIC_API_KEY / OPENAI_API_KEY) is the literal __PLACEHOLDER__
+        # node-side (the finite `fabro run` children inherit it),
+        # the provider points DIRECTLY at OpenRouter's OpenAI-compatible API
+        # (Authorization: Bearer auth, NO local shim), and the agent-vault
+        # broker's MITM proxy substitutes the REAL key onto the outbound Bearer
+        # header on the wire via the container HTTPS_PROXY.
+        #
+        # PROVIDER-IDENTITY CORRECTION (lead-83mh8): register under fabro's NATIVE
+        # "openai" provider identity ([llm.providers.openai]) with base_url
+        # OVERRIDDEN to the OpenRouter endpoint — NOT a custom
+        # [llm.providers.openrouter] provider.  fabro's catalog auto-routing
+        # resolves "anthropic/..."-prefixed OpenRouter model strings to the
+        # built-in "anthropic" provider BEFORE a custom "openrouter" provider is
+        # considered ("Provider 'anthropic' not registered"), so the custom shape
+        # never completed a real dispatch; the native "openai" identity makes the
+        # OpenRouter-catalog slugs resolve to a registered provider.
         or_placeholder = shlex.quote(AGENT_VAULT_PLACEHOLDER_TOKEN)
         credential_exports = (
-            f"export {OPENROUTER_API_KEY_ENV}={or_placeholder} && "
+            f"export {OPENROUTER_NODE_CREDENTIAL_ENV}={or_placeholder} && "
         )
         provider_block = (
-            "\\n[llm.providers.openrouter]\\n"
+            f"\\n[llm.providers.{FABRO_OPENROUTER_PROVIDER_IDENTITY}]\\n"
             f'adapter = "{FABRO_OPENROUTER_ADAPTER}"\\n'
             f'base_url = "{FABRO_OPENROUTER_BASE_URL}"\\n'
         )

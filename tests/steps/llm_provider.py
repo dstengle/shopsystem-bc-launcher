@@ -159,6 +159,131 @@ def fabro_run_active_provider_openrouter(ctx):
     )
 
 
+# ---------------------------------------------------------------------------
+# Behavior (@scenario_hash:4c9f5b265c5098b7 — supersedes the retired
+# b3054f5439369fa8): the launch-time openrouter override registers under fabro's
+# NATIVE "openai" provider identity ([llm.providers.openai]) with base_url
+# overridden to the OpenRouter endpoint — NOT a new custom [llm.providers.
+# openrouter] fabro provider (the shape a real E2E scout proved never completes a
+# dispatch: fabro catalog auto-routing resolves "anthropic/..."-prefixed model
+# strings to the BUILT-IN "anthropic" provider before the custom "openrouter"
+# provider is considered -> "Provider 'anthropic' not registered").
+#
+# FIDELITY: every assertion binds to the REAL launcher's ACTUAL recorded
+# `--orchestrator fabro` engage over the FakeDockerDriver (driven via
+# _odd9_drive_fabro_launch on the openrouter override path) and the REAL
+# provider-keyed model mapping table — never a model and never a shallow string-
+# match: the registered provider block, its base_url, the supplied `-I MODEL_*`
+# inputs, and the mapping-table slugs are read out of the real launch wiring.
+# ---------------------------------------------------------------------------
+
+
+@then(parsers.parse(
+    'the container\'s fabro settings register the override under fabro\'s NATIVE '
+    '"{provider_identity}" provider identity, with its "base_url" set to '
+    '"{base_url}" — no new custom "{custom_name}" fabro provider is registered'
+))
+def openrouter_registered_under_native_openai(
+    provider_identity, base_url, custom_name, ctx
+):
+    from bc_launcher.fabro.constants import FABRO_OPENROUTER_BASE_URL
+
+    script = _engage_script(ctx)
+
+    # The override is registered at the server under fabro's NATIVE provider
+    # identity — [llm.providers.openai] — so fabro recognizes it as its built-in
+    # openai provider (contrast a custom [llm.providers.openrouter] name fabro's
+    # catalog routing never reaches).
+    assert f"[llm.providers.{provider_identity}]" in script, (
+        "the openrouter override must be registered under fabro's NATIVE "
+        f"'{provider_identity}' provider identity ([llm.providers."
+        f"{provider_identity}]); script:\n{script}"
+    )
+    # Its base_url is OVERRIDDEN to the OpenRouter endpoint, and the base_url line
+    # belongs to THAT provider block (not merely present somewhere in the script).
+    assert re.search(
+        r"\[llm\.providers\." + re.escape(provider_identity) + r"\]"
+        r"(?:\\n|[^\[])*?base_url = \"" + re.escape(base_url) + r"\"",
+        script,
+    ), (
+        f"the native '{provider_identity}' provider block must set base_url to "
+        f"the OpenRouter endpoint {base_url!r}; script:\n{script}"
+    )
+    # The endpoint is the real constant (guard against a stale literal).
+    assert base_url == FABRO_OPENROUTER_BASE_URL, (
+        f"scenario base_url {base_url!r} must equal the launcher's OpenRouter "
+        f"endpoint constant {FABRO_OPENROUTER_BASE_URL!r}"
+    )
+    # NO new custom "openrouter" fabro provider block is registered (the retired
+    # shape) — the correction is precisely to STOP registering a provider named
+    # after the model-catalog vendor.
+    assert f"[llm.providers.{custom_name}]" not in script, (
+        f"no new custom '[llm.providers.{custom_name}]' fabro provider may be "
+        f"registered — the override rides the native openai identity; "
+        f"script:\n{script}"
+    )
+
+
+@then(parsers.parse(
+    'fabro\'s catalog auto-routing for OpenRouter-catalog-qualified model strings '
+    'such as "{model_slug}" resolves unambiguously to the "{provider_identity}" '
+    'provider, with no collision against fabro\'s built-in "{builtin}" catalog '
+    'entry'
+))
+def openrouter_catalog_routing_resolves_to_openai(
+    model_slug, provider_identity, builtin, ctx
+):
+    from bc_launcher.fabro.llm_provider import (
+        LLM_PROVIDER_OPENROUTER,
+        resolve_model_mapping,
+    )
+
+    script = _engage_script(ctx)
+
+    # (a) the named slug is a REAL OpenRouter-row model ID the launcher actually
+    # supplies on this run — an "anthropic/..."-prefixed OpenRouter-catalog slug
+    # (exactly the string whose prefix collided with fabro's built-in anthropic
+    # provider under the retired custom-openrouter shape).
+    or_row = resolve_model_mapping(LLM_PROVIDER_OPENROUTER)
+    assert model_slug in or_row.values(), (
+        f"the example model string {model_slug!r} must be a real OpenRouter-row "
+        f"model ID from the mapping table; row={or_row!r}"
+    )
+    assert model_slug.startswith(f"{builtin}/"), (
+        f"the example model string {model_slug!r} must be an OpenRouter-catalog-"
+        f"qualified '{builtin}/...' slug (the prefix that collided with fabro's "
+        f"built-in '{builtin}' provider under the retired shape)"
+    )
+    run_inputs = _model_run_inputs(script)
+    assert model_slug in run_inputs.values(), (
+        f"the launcher must actually supply the OpenRouter-catalog slug "
+        f"{model_slug!r} as a `-I MODEL_*` input on the openrouter finite run; "
+        f"inputs={run_inputs!r}; script:\n{script}"
+    )
+
+    # (b) the SOLE provider registered on this launch is the native openai
+    # identity: there is NO custom "openrouter" provider AND NO built-in-named
+    # "anthropic" provider block registered here, so an "anthropic/..."-prefixed
+    # model string cannot route to a registered provider named for its catalog
+    # prefix — it resolves via the ONE registered provider (openai), whose
+    # base_url points at OpenRouter.  That is the collision the correction avoids.
+    assert f"[llm.providers.{provider_identity}]" in script, (
+        f"the openrouter slug must resolve via the registered native "
+        f"'{provider_identity}' provider; script:\n{script}"
+    )
+    assert "[llm.providers.openrouter]" not in script, (
+        "no custom '[llm.providers.openrouter]' provider may be registered — the "
+        f"'{builtin}/...' catalog prefix would then be considered against fabro's "
+        "built-in provider set first (the retired 'Provider not registered' "
+        f"collision); script:\n{script}"
+    )
+    assert f"[llm.providers.{builtin}]" not in script, (
+        f"the openrouter path must register NO '[llm.providers.{builtin}]' block, "
+        f"so the '{builtin}/...' slug cannot collide with a registered "
+        f"'{builtin}'-named provider; script:\n{script}"
+    )
+
+
 @then("the Anthropic anthropic-oauth-shim path is not engaged for this launch")
 def anthropic_oauth_shim_not_engaged(ctx):
     # The anthropic-oauth-shim path is engaged (on the default anthropic path) by
@@ -175,10 +300,16 @@ def anthropic_oauth_shim_not_engaged(ctx):
 
 
 # ---------------------------------------------------------------------------
-# Behavior 3 (@scenario_hash:14290420156c5ee0): the OpenRouter credential rides
-# a NEW agent-vault-brokered credential with NO header-reshaping shim, matching
-# the GITHUB_TOKEN no-shim pattern (placeholder node-side, broker substitutes on
-# the wire) rather than the Anthropic oauth-shim pattern.
+# Behavior 3 (@scenario_hash:98b956adece2b7e0 — supersedes the retired
+# 14290420156c5ee0): the OpenRouter credential rides fabro's NATIVE
+# "OPENAI_API_KEY" env var with NO header-reshaping shim, matching the
+# GITHUB_TOKEN no-shim pattern (placeholder node-side, broker substitutes on the
+# wire scoped to the OpenRouter host) rather than the Anthropic oauth-shim
+# pattern. CORRECTION (lead-83mh8): the node-side credential env is fabro's
+# native OPENAI_API_KEY (what fabro's sandboxed-worker startup precondition check
+# recognizes), NOT the retired custom OPENROUTER_API_KEY that never reached that
+# check. The broker-side vault-lookup key stays OPENROUTER_API_KEY and is
+# DECOUPLED from the node-side env var name (matched by DESTINATION HOST).
 #
 # FIDELITY: every assertion binds to the REAL launcher's ACTUAL recorded engage
 # exec + exec_calls over the FakeDockerDriver (driven via _odd9_drive_fabro_launch
@@ -197,6 +328,10 @@ def operator_supplies_short_provider_override(provider, ctx, monkeypatch):
     monkeypatch.setenv("BCLAUNCHER_LLM_PROVIDER", provider)
 
 
+@given(parsers.parse(
+    'an agent-vault broker with a registered OpenRouter-host credential service '
+    'is running on the shopsystem network and is reachable'
+))
 @given(parsers.parse(
     'an agent-vault broker with a registered OpenRouter credential service is '
     'running on the shopsystem network and is reachable'
@@ -225,16 +360,18 @@ def launch_agent_with_openrouter_override(
     )
 
 
-def _openrouter_api_key_assignments(ctx):
-    """Every OPENROUTER_API_KEY=<value> assignment across the launcher's ACTUAL
-    recorded launch execs (command tokens + any stdin input), so the assertions
-    read the REAL wiring rather than a re-derivation."""
+def _node_side_openai_api_key_assignments(ctx):
+    """Every OPENAI_API_KEY=<value> assignment across the launcher's ACTUAL
+    recorded launch execs (command tokens + any stdin input) — the node-side
+    credential env fabro's NATIVE openai provider reads (lead-83mh8 correction;
+    the retired custom OPENROUTER_API_KEY never reached fabro's precondition
+    check). Reads the REAL wiring rather than a re-derivation."""
     out = []
     for c in _cadr_exec_calls(ctx):
         blob = " ".join(c.command)
         if getattr(c, "input", None):
             blob += " " + c.input
-        for m in re.finditer(r"OPENROUTER_API_KEY=(\S+)", blob):
+        for m in re.finditer(r"OPENAI_API_KEY=(\S+)", blob):
             out.append((c, m.group(1).strip("'\"")))
     return out
 
@@ -248,10 +385,12 @@ def openrouter_node_side_placeholder_no_shim(env_name, placeholder, ctx):
     script = _engage_script(ctx)
 
     # The launcher THREADS the OpenRouter credential in node-side as a literal
-    # placeholder: the engage exports OPENROUTER_API_KEY so the finite `fabro
-    # run` children (provider=local, inheriting the engage env) carry it, and
-    # its value is the literal placeholder — the agent-vault broker substitutes
-    # the real key on the wire (mirrors GITHUB_TOKEN).
+    # placeholder under fabro's NATIVE credential env (OPENAI_API_KEY — what the
+    # sandboxed-worker startup precondition check recognizes): the engage exports
+    # it so the finite `fabro run` children (provider=local, inheriting the
+    # engage env) carry it, and its value is the literal placeholder — the
+    # agent-vault broker substitutes the real key on the wire (mirrors
+    # GITHUB_TOKEN). (lead-83mh8: NOT the retired custom OPENROUTER_API_KEY.)
     m = re.search(rf"export {re.escape(env_name)}=(\S+)", script)
     assert m is not None, (
         f"the openrouter override engage must export {env_name} node-side so "
@@ -278,28 +417,34 @@ def openrouter_node_side_placeholder_no_shim(env_name, placeholder, ctx):
 
 @then(parsers.parse(
     'the agent-vault broker\'s MITM proxy substitutes the real OpenRouter API '
-    'key onto the outbound "{header}" header only on the wire'
+    'key onto the outbound "{header}" header only on the wire, scoped to '
+    'requests directed at the OpenRouter host'
 ))
 def openrouter_mitm_substitutes_bearer_on_wire(header, ctx):
+    from urllib.parse import urlparse
+
     from bc_launcher.fabro.constants import (
         FABRO_OPENROUTER_ADAPTER,
         FABRO_OPENROUTER_BASE_URL,
+        FABRO_OPENROUTER_PROVIDER_IDENTITY,
     )
 
     script = _engage_script(ctx)
 
     # The launcher wiring that MAKES the on-the-wire substitution possible: the
-    # openrouter provider is REGISTERED at the server pointing at OpenRouter's
-    # REAL API — the OpenAI-compatible endpoint that authenticates via
-    # `Authorization: Bearer <key>`.  So the finite run's LLM request is sent
-    # with the placeholder Bearer token and forwarded through HTTPS_PROXY, where
-    # the agent-vault broker's MITM proxy substitutes the REAL OpenRouter key
-    # onto the `Authorization: Bearer` header on the wire (mirrors GITHUB_TOKEN;
-    # NOT the anthropic-oauth-shim header-reshaping path).
-    assert "[llm.providers.openrouter]" in script, (
-        "the openrouter provider must be REGISTERED at the server "
-        "([llm.providers.openrouter]) so the finite run's request rides "
-        f"HTTPS_PROXY to the broker for wire substitution; script:\n{script}"
+    # override is REGISTERED at the server under fabro's NATIVE "openai" provider
+    # identity (lead-83mh8 correction — NOT a custom [llm.providers.openrouter]
+    # provider) pointing at OpenRouter's REAL API — the OpenAI-compatible endpoint
+    # that authenticates via `Authorization: Bearer <key>`.  So the finite run's
+    # LLM request is sent with the placeholder Bearer token and forwarded through
+    # HTTPS_PROXY, where the agent-vault broker's MITM proxy substitutes the REAL
+    # OpenRouter key onto the `Authorization: Bearer` header on the wire (mirrors
+    # GITHUB_TOKEN; NOT the anthropic-oauth-shim header-reshaping path).
+    assert f"[llm.providers.{FABRO_OPENROUTER_PROVIDER_IDENTITY}]" in script, (
+        "the openrouter override must be REGISTERED at the server under the "
+        f"native '[llm.providers.{FABRO_OPENROUTER_PROVIDER_IDENTITY}]' identity "
+        "so the finite run's request rides HTTPS_PROXY to the broker for wire "
+        f"substitution; script:\n{script}"
     )
     assert FABRO_OPENROUTER_BASE_URL in script, (
         "the registered openrouter provider must point at OpenRouter's REAL API "
@@ -314,6 +459,19 @@ def openrouter_mitm_substitutes_bearer_on_wire(header, ctx):
         f"adapter (Authorization: Bearer auth — the {header!r} header the "
         f"broker substitutes on the wire); script:\n{script}"
     )
+    # SCOPED TO THE OpenRouter HOST: the broker's MITM substitution matches by
+    # DESTINATION HOST (openrouter.ai), not by env var name — so the wiring that
+    # scopes it is the registered provider's base_url host. Assert the outbound
+    # request is directed at the OpenRouter host (the node-side placeholder
+    # OPENAI_API_KEY value is DECOUPLED from the broker-side OPENROUTER_API_KEY
+    # vault-lookup key by design; only the destination host gates substitution).
+    openrouter_host = urlparse(FABRO_OPENROUTER_BASE_URL).hostname
+    assert openrouter_host and openrouter_host in script, (
+        "the registered openrouter provider's base_url must direct the outbound "
+        f"request at the OpenRouter host {openrouter_host!r} — the DESTINATION "
+        "HOST the broker's MITM substitution is scoped to (not the env var "
+        f"name); script:\n{script}"
+    )
 
 
 @then(
@@ -321,19 +479,34 @@ def openrouter_mitm_substitutes_bearer_on_wire(header, ctx):
     "or process environment"
 )
 def openrouter_real_key_absent(ctx):
-    # Across EVERY recorded launch exec, the ONLY value OPENROUTER_API_KEY is
-    # ever assigned is the literal placeholder — the real key lives ONLY at the
-    # broker and rides the wire, never the container fs/env.
-    assignments = _openrouter_api_key_assignments(ctx)
+    # Node-side, the ONLY OpenRouter credential env is fabro's NATIVE
+    # OPENAI_API_KEY, and across EVERY recorded launch exec the ONLY value it is
+    # assigned is the literal placeholder — the real key lives ONLY at the broker
+    # and rides the wire, never the container fs/env.
+    assignments = _node_side_openai_api_key_assignments(ctx)
     assert assignments, (
-        "expected at least one OPENROUTER_API_KEY assignment in the recorded "
-        "launch wiring on the openrouter path"
+        "expected at least one node-side OPENAI_API_KEY assignment in the "
+        "recorded launch wiring on the openrouter path (fabro's native openai "
+        "credential env)"
     )
     for call, value in assignments:
         assert value == "__PLACEHOLDER__", (
-            "every OPENROUTER_API_KEY in the recorded launch wiring must be the "
-            f"literal placeholder, got {value!r} in exec {call.command[:3]!r}"
+            "every node-side OPENAI_API_KEY in the recorded launch wiring must "
+            f"be the literal placeholder, got {value!r} in exec "
+            f"{call.command[:3]!r}"
         )
+    # The RETIRED custom OPENROUTER_API_KEY node-side env must NOT be exported on
+    # the engage path: fabro's sandboxed-worker startup precondition check only
+    # recognizes ANTHROPIC_API_KEY / OPENAI_API_KEY, so a node-side
+    # OPENROUTER_API_KEY never reaches it (the exact defect lead-83mh8 corrects).
+    # The broker-side OPENROUTER_API_KEY vault-lookup key is DECOUPLED and lives
+    # at the broker, never node-side.
+    script = _engage_script(ctx)
+    assert not re.search(r"export\s+OPENROUTER_API_KEY=", script), (
+        "the openrouter override must NOT export the retired custom node-side "
+        "OPENROUTER_API_KEY; the node-side credential env is fabro's native "
+        f"OPENAI_API_KEY. script:\n{script}"
+    )
     # Defensive: no real OpenRouter-key-shaped literal (sk-or-...) may appear
     # anywhere in the recorded launch execs (command or stdin).
     for c in _cadr_exec_calls(ctx):
@@ -930,9 +1103,29 @@ def no_release_rebuild_or_repour_required(ctx, tmp_path, monkeypatch):
     assert "BCLAUNCHER_LLM_PROVIDER=openrouter" in or_script, (
         "the openrouter override must be realized as a launch-time env export"
     )
-    assert "[llm.providers.openrouter]" in or_script and (
-        "[llm.providers.openrouter]" not in an_script
-    ), "the openrouter provider block must be registered at launch time only"
+    # lead-83mh8 correction: the override registers under fabro's NATIVE "openai"
+    # provider identity (base_url overridden to OpenRouter) at launch time only —
+    # NOT a custom [llm.providers.openrouter] provider; the anthropic default path
+    # registers no such openai-with-openrouter-base_url block.
+    from bc_launcher.fabro.constants import (
+        FABRO_OPENROUTER_BASE_URL,
+        FABRO_OPENROUTER_PROVIDER_IDENTITY,
+    )
+
+    _or_block = f"[llm.providers.{FABRO_OPENROUTER_PROVIDER_IDENTITY}]"
+    assert (
+        _or_block in or_script and FABRO_OPENROUTER_BASE_URL in or_script
+    ), (
+        "the openrouter override must register the native "
+        f"{_or_block} block with base_url {FABRO_OPENROUTER_BASE_URL!r} at "
+        "launch time"
+    )
+    assert FABRO_OPENROUTER_BASE_URL not in an_script and (
+        "[llm.providers.openrouter]" not in or_script
+    ), (
+        "the anthropic default path must NOT register the OpenRouter endpoint, "
+        "and no custom [llm.providers.openrouter] provider may be registered"
+    )
     # ... BUT the difference is confined to launch-time exports + `-I` inputs:
     # with those launch-time lines normalized away, the two engages are identical
     # — proving NOTHING baked/poured changed between the two provider launches
