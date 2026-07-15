@@ -175,12 +175,28 @@ def _fabro_engage_script(bc_name: str, provider: str | None = None) -> str:
     # resolved value changes: the run-wide model is the ACTIVE provider's row's
     # `coding` tier (the substantive-work tier), the OpenRouter-row literal on the
     # openrouter override and the Anthropic row (claude-haiku-4-5) with no override.
-    # `--provider` carries the ACTIVE provider value (the scenario pins the
-    # openrouter override as `--provider openrouter`).
+    # `--provider` carries the fabro-REGISTERED provider IDENTITY, NOT the
+    # operator-facing ACTIVE provider name (Defect B, work_id lead-ifye3.10).
+    # fabro resolves `--provider` by LITERAL lookup against its configured
+    # providers, and on the openrouter override the launcher registers the NATIVE
+    # `[llm.providers.openai]` entry with base_url pointed at the openrouter-shim
+    # (af07c326a031fafe: "no new custom 'openrouter' fabro provider is
+    # registered") — so `--provider openrouter` names a provider that, by that
+    # same pin, cannot exist, and the run dies before its first node with
+    # 'Precondition failed: Provider "openrouter" is not configured'.  The
+    # identity is sourced from the SAME constant the provider_block writer below
+    # uses, so the registered block name and the flag cannot drift.  On the
+    # anthropic default the registered block IS `[llm.providers.anthropic]`, so
+    # the identity and the active name coincide.
     run_wide_model = resolve_run_wide_model(active_provider)
+    fabro_provider_identity = (
+        FABRO_OPENROUTER_PROVIDER_IDENTITY
+        if active_provider == LLM_PROVIDER_OPENROUTER
+        else active_provider
+    )
     model_flags = (
         f"--model {shlex.quote(run_wide_model)} "
-        f"--provider {shlex.quote(active_provider)}"
+        f"--provider {shlex.quote(fabro_provider_identity)}"
     )
     gh_token = shlex.quote(FABRO_SERVER_INSTALL_GH_TOKEN)
     server_settings = shlex.quote(FABRO_SERVER_SETTINGS_CONTAINER_PATH)
