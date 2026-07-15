@@ -12,7 +12,9 @@ engage exec and compared to the resolution's default.
 from __future__ import annotations
 
 import re
+from pathlib import Path
 
+import pytest
 from pytest_bdd import given, when, then, parsers  # noqa: F401
 
 from bc_launcher.fabro.constants import (
@@ -1252,6 +1254,134 @@ def container_launched_with_mount_docker_socket(flag, cli_pkg, ctx):
     ctx["b6_docker_socket_path"] = DOCKER_SOCKET_PATH
 
 
+def _shop_templates_poured_workflow_fabro():
+    """The REAL `templates/fabro/workflow.fabro` the INSTALLED shopsystem-templates
+    package pours.  This is a shopsystem-templates artifact, NOT this BC's own
+    packaged def bundle (`_load_fabro_def_files()`), and the two have genuinely
+    diverged — this BC's asset already carries no model_stylesheet, while the
+    poured template still does.  Returns None when the package is absent."""
+    try:
+        import shop_templates
+    except ImportError:
+        return None
+    p = Path(shop_templates.__file__).resolve().parent / "templates" / "fabro" / "workflow.fabro"
+    return p if p.is_file() else None
+
+
+def _stale_model_stylesheet_placeholders(text):
+    """The retired `model_stylesheet="… {{ inputs.X }} …"` placeholder shape, which
+    fabro >= v0.267.0-nightly.0 hard-parse-errors on (fabro 911e080f3 limited DOT
+    templating to prompt + goal).  Matches ONLY a real `model_stylesheet=` ASSIGNMENT
+    carrying `{{ inputs.… }}` — a mere prose mention of "model_stylesheet" in a
+    comment can never satisfy (or trip) this check, the same comment-stripping
+    fidelity `_dockerfile_apt_installs` uses.  `{{ inputs.X }}` elsewhere (a `goal=`
+    or `prompt=`) is LEGAL and must not match."""
+    uncommented = "\n".join(
+        ln for ln in text.splitlines() if not ln.lstrip().startswith("//")
+    )
+    return [
+        m.group(0)
+        for m in re.finditer(r'model_stylesheet\s*=\s*"[^"]*\{\{\s*inputs\.', uncommented)
+    ]
+
+
+@given(parsers.parse(
+    "shopsystem-templates' poured \"{template_path}\" no longer carries the "
+    "retired \"model_stylesheet\" \"{placeholder}\" placeholder shape, which "
+    "fabro >= {fabro_version} hard-parse-errors on, satisfied once, prior to and "
+    "independent of this launch"
+))
+def shop_templates_pour_has_no_stale_model_stylesheet(
+    template_path, placeholder, fabro_version, ctx
+):
+    # PRECONDITION (already-satisfied, OUT-OF-SCOPE — owned by shopsystem-templates,
+    # dispatched separately as lead-ifye3.6).  Per this file's convention for an
+    # out-of-scope precondition (the FABRO_VERSION and "docker-cli" precedents) the
+    # scenario pins the EXISTENCE of the precondition, never its edit — this BC does
+    # not own, and must not fix, the shopsystem-templates template.
+    #
+    # Bound to the REAL poured template of the INSTALLED shopsystem-templates
+    # package — the artifact the precondition actually names.  NOT to this BC's own
+    # `_load_fabro_def_files()` def bundle, which is a DIFFERENT artifact that has
+    # already dropped model_stylesheet; binding there would make this Given
+    # vacuously true and conceal Defect A entirely.
+    assert template_path == "templates/fabro/workflow.fabro", template_path
+    assert placeholder == "{{ inputs.X }}", placeholder
+    assert fabro_version == "v0.267.0-nightly.0", fabro_version
+
+    poured = _shop_templates_poured_workflow_fabro()
+    if poured is None:
+        pytest.skip(
+            "the shopsystem-templates package (or its poured "
+            f"{template_path!r}) is not present in this environment, so the "
+            "precondition it owns cannot be observed (honest SKIP, never faked)"
+        )
+    stale = _stale_model_stylesheet_placeholders(poured.read_text())
+    if stale:
+        # NOT a failure of THIS BC's behavior: the precondition this capstone
+        # declares already-satisfied is genuinely NOT yet satisfied, and the fix is
+        # owned by another BC's in-flight dispatch.  Failing here would attribute
+        # lead-ifye3.6's unlanded work to this scenario; faking a pass would assert
+        # a falsehood.  Honest SKIP naming the owner — and it self-activates the
+        # moment lead-ifye3.6 lands, with no one needing to remember to re-enable it.
+        pytest.skip(
+            f"PRECONDITION NOT YET SATISFIED (lead-ifye3.6, in flight against "
+            f"shopsystem-templates): the poured {template_path!r} at {poured} still "
+            f"carries the retired model_stylesheet {placeholder!r} shape that fabro "
+            f">= {fabro_version} hard-parse-errors on: {stale!r}.  The live "
+            "end-to-end proof of this capstone is deliberately not re-attempted "
+            "until lead-ifye3.6 and lead-ifye3.10 both land (honest SKIP, never "
+            "faked)"
+        )
+    ctx["b6_shop_templates_pour_precondition_satisfied"] = True
+
+
+@given(parsers.parse(
+    "the shopsystem-bc-launcher dispatcher's per-child \"{run_flag}\" "
+    "construction passes the REGISTERED fabro provider identity "
+    "(\"{registered}\"), not the active-provider name (\"{active}\"), satisfied "
+    "once, prior to and independent of this launch"
+))
+def dispatcher_passes_registered_provider_identity(
+    run_flag, registered, active, ctx, tmp_path
+):
+    # PRECONDITION (already-satisfied, OUT-OF-SCOPE for THIS dispatch — this BC's own
+    # engage.py call site, dispatched separately as lead-ifye3.10).  Pins the
+    # EXISTENCE of the precondition only; the call-site edit itself belongs to
+    # lead-ifye3.10, whose fix is complete but deliberately not on main pending the
+    # lead's decision on amending a3b2b6bebcee78f5.
+    #
+    # Bound to the REAL launcher's ACTUAL recorded engage exec (driven over the
+    # FakeDockerDriver by the earlier Givens), never a string match on source.
+    from bc_launcher.fabro.constants import FABRO_OPENROUTER_PROVIDER_IDENTITY
+
+    assert run_flag == "fabro run --provider", run_flag
+    assert registered == "openai", registered
+    assert active == "openrouter", active
+    # The REGISTERED identity this precondition names is fabro's native "openai" —
+    # the same constant the FABRO_VERSION Given pins the override as riding.
+    assert FABRO_OPENROUTER_PROVIDER_IDENTITY == registered, (
+        "the launcher must ride fabro's NATIVE provider identity "
+        f"{registered!r}; got {FABRO_OPENROUTER_PROVIDER_IDENTITY!r}"
+    )
+
+    script = ctx.get("b5_engage_script") or _engage_script(ctx)
+    _, provider = _model_provider_flags(script)
+    if provider != registered:
+        # Same honest-SKIP rationale as the shop-templates pour Given above: the
+        # precondition is genuinely unsatisfied and its fix is another dispatch's.
+        pytest.skip(
+            f"PRECONDITION NOT YET SATISFIED (lead-ifye3.10, in flight in this BC): "
+            f"the dispatcher's per-child {run_flag!r} still passes the "
+            f"active-provider NAME {provider!r} rather than the REGISTERED fabro "
+            f"provider identity {registered!r} (engage.py's `--provider "
+            "{shlex.quote(active_provider)}` construction).  The live end-to-end "
+            "proof of this capstone is deliberately not re-attempted until "
+            "lead-ifye3.6 and lead-ifye3.10 both land (honest SKIP, never faked)"
+        )
+    ctx["b6_provider_identity_precondition_satisfied"] = True
+
+
 @then("the dispatched work reaches a gated work_done, having executed through "
       "at least one non-trivial node-class, such as \".coding\", whose model "
       "resolved to a literal OpenRouter model ID via the \"openrouter-shim\"")
@@ -1299,14 +1429,23 @@ def dispatched_work_reaches_gated_workdone_via_shim_openrouter_model(ctx):
     # --- (b) that model is carried on the REAL launcher's recorded finite
     # `fabro run --model <run-wide>` (the run-wide flag replacing the retired
     # per-node-class `-I MODEL_*`), so the launch actually resolves `.coding` to it.
-    model, provider = _model_provider_flags(script)
+    model, _ = _model_provider_flags(script)
     assert model == run_wide, (
         "the recorded finite `fabro run` must carry the run-wide OpenRouter model "
         f"as `--model {run_wide}`, got --model {model!r}; script:\n{script}"
     )
-    assert provider == "openrouter", (
-        f"the finite `fabro run` must carry `--provider openrouter`, got {provider!r}"
-    )
+    # NOTE (lead-ifye3.12): this step def deliberately does NOT assert a
+    # `--provider` VALUE.  Its scenario text pins only that a non-trivial
+    # node-class's MODEL resolves to a literal OpenRouter model ID via the
+    # "openrouter-shim" — it says nothing about the `--provider` flag, so the
+    # prior `assert provider == "openrouter"` here OVER-asserted beyond the
+    # scenario it binds (found by lead-ifye3.10).  It is removed with the
+    # retirement of 1cee6978cbf9ac53 rather than left to rot: the successor
+    # 5d49031bab379ba6 carries a Given pinning the REGISTERED identity
+    # ("openai"), which the removed line would have flatly contradicted INSIDE
+    # its own scenario.  The `--provider` VALUE remains pinned by
+    # a3b2b6bebcee78f5's own step def (which is contested but LIVE, and is not
+    # this dispatch's to amend — that decision sits with the lead).
     assert _model_run_inputs(script) == {}, (
         "the run-wide launch must carry NO retired per-node-class `-I MODEL_*` "
         f"input; got {_model_run_inputs(script)!r}"
@@ -1392,10 +1531,11 @@ def dispatched_work_reaches_gated_workdone_via_shim_openrouter_model(ctx):
 
 
 @then("no further software release was required beyond the already-satisfied "
-      "FABRO_VERSION and bc-base \"docker-cli\" image preconditions — only the "
-      "launch-time provider override, the \"--mount-docker-socket\" flag, and a "
-      "container relaunch")
-def no_further_release_beyond_fabro_version_and_docker_cli_preconditions(
+      "FABRO_VERSION, bc-base \"docker-cli\", shop-templates model_stylesheet "
+      "pour-fix, and bc-launcher provider-identity call-site-fix preconditions "
+      "— only the launch-time provider override, the \"--mount-docker-socket\" "
+      "flag, and a container relaunch")
+def no_further_release_beyond_the_four_satisfied_preconditions(
     ctx, tmp_path, monkeypatch
 ):
     from bc_launcher.controller import BcContainerController, _load_fabro_def_files
@@ -1405,17 +1545,35 @@ def no_further_release_beyond_fabro_version_and_docker_cli_preconditions(
     )
     from tests.fake_driver import FakeDockerDriver
 
-    # --- (0) BOTH named image preconditions are ALREADY SATISFIED on the committed
-    # tree (the FABRO_VERSION pin and the bc-base "docker-cli" bake), and the
+    # --- (0) ALL FOUR named preconditions are ALREADY SATISFIED, and the
     # "--mount-docker-socket" opt-in is a launch-time flag.  This Then asserts what
-    # is NOT required beyond them, so it first pins that they genuinely hold —
+    # is NOT required BEYOND them, so it first pins that they genuinely hold —
     # otherwise "no further release" would be vacuously true against a broken image.
+    #
+    # lead-ifye3.12: the retired 1cee6978cbf9ac53 named only TWO preconditions here
+    # and its "no further release" claim was disproven a THIRD time (lead-lp4us live
+    # verification: both named preconditions genuinely satisfied, 11 real HTTP-200
+    # OpenRouter completions, and the dispatch STILL could not complete).  The two
+    # preconditions it OMITTED — the shop-templates model_stylesheet pour-fix
+    # (lead-ifye3.6) and the bc-launcher provider-identity call-site-fix
+    # (lead-ifye3.10) — are now named Givens, and are guarded here so this Then can
+    # never again vacuously certify "no further release" while a real one is pending.
     assert ctx.get("b6_fabro_version_precondition_satisfied"), (
         "the FABRO_VERSION image precondition Given must have been established"
     )
     assert ctx.get("b6_docker_cli_precondition_satisfied"), (
         "the bc-base 'docker-cli' image precondition Given must have been "
-        "established — the corrected precondition this scenario adds"
+        "established"
+    )
+    assert ctx.get("b6_shop_templates_pour_precondition_satisfied"), (
+        "the shop-templates model_stylesheet pour-fix precondition Given must have "
+        "been established — one of the two corrected preconditions this scenario "
+        "adds (lead-ifye3.6)"
+    )
+    assert ctx.get("b6_provider_identity_precondition_satisfied"), (
+        "the bc-launcher provider-identity call-site-fix precondition Given must "
+        "have been established — one of the two corrected preconditions this "
+        "scenario adds (lead-ifye3.10)"
     )
     assert ctx.get("b6_mount_docker_socket_flag"), (
         "the '--mount-docker-socket' launch-flag Given must have been established"
