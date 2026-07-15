@@ -86,6 +86,16 @@ Feature: a launch-time --llm-provider / BCLAUNCHER_LLM_PROVIDER override selects
     Then the sandboxed worker's startup precondition check passes cleanly and the run proceeds to its first node
     But when an explicit "adapter" or "auth" override is added on top of "base_url" — even a value that would logically merge with the built-in catalog default — the same precondition check instead fails immediately with "No LLM providers configured, set ANTHROPIC_API_KEY or OPENAI_API_KEY", before any node runs
 
+  @scenario_hash:7f55b8ee9e092692 @bc:shopsystem-bc-launcher
+  Scenario: the "openrouter-shim" is an unsandboxed, container-level reverse proxy that forwards the sandboxed node's request unchanged to OpenRouter's real API host, with no header reshaping
+    Given the shopsystem-bc-launcher BC is installed
+    And the operator supplies a launch-time LLM provider override of "openrouter"
+    And the "openrouter-shim" process is running, listening on a loopback address only
+    When the sandboxed fabro node issues its LLM call to the "openai"-identified provider's configured "base_url"
+    Then the request reaches the "openrouter-shim" process over plain loopback, with no "HTTPS_PROXY" needed for that hop
+    And the shim forwards the request to "https://openrouter.ai/api" plus the incoming request path, unchanged, with no header reshaping — unlike the "anthropic-oauth-shim", which does reshape headers
+    And the shim streams the upstream response back to the sandboxed node unchanged
+
   @scenario_hash:98b956adece2b7e0 @bc:shopsystem-bc-launcher
   Scenario: the OpenRouter credential rides fabro's native "OPENAI_API_KEY" env var with no header-reshaping shim, matching the GITHUB_TOKEN no-shim pattern — not the retired custom "OPENROUTER_API_KEY" shape
     Given the shopsystem-bc-launcher BC is installed

@@ -1366,3 +1366,292 @@ def no_release_rebuild_or_repour_required(ctx, tmp_path, monkeypatch):
         "override rides launch-time config + relaunch alone, with no software "
         "release, BC-base image rebuild, or template re-pour"
     )
+
+
+# ---------------------------------------------------------------------------
+# Behavior 3 (@scenario_hash:7f55b8ee9e092692): the "openrouter-shim" is an
+# unsandboxed, container-level reverse proxy that forwards the sandboxed node's
+# request UNCHANGED to OpenRouter's real API host, with NO header reshaping.
+#
+# FIDELITY: the forwarding is exercised FUNCTIONALLY against a mock loopback
+# upstream by running the REAL committed docker/bc-base/openrouter-shim as a
+# subprocess listener (`python3 <shim> --host 127.0.0.1 --port <p> --upstream
+# http://127.0.0.1:<mock>/api`) and issuing a real loopback HTTP request through
+# it — the mock upstream RECORDS the exact forwarded path + headers, so the
+# "/api"+incoming-path concatenation, the UNCHANGED Authorization header (no
+# reshaping), and the streamed-back response body are read out of a real
+# request/response round-trip, never a model.  The live openrouter.ai leg (the
+# real Cloudflare-sensitive outbound hop) needs a real key + network absent
+# in-session and is honest-deferred; the DEFAULT upstream constant + the
+# no-bare-urllib client choice are pinned structurally in
+# tests/test_lead_ifye3_5_openrouter_shim.py.
+# ---------------------------------------------------------------------------
+
+
+def _committed_openrouter_shim():
+    """The committed docker/bc-base/openrouter-shim the bc-base Dockerfile COPYs
+    onto PATH (the REAL artifact this scenario exercises)."""
+    import re as _re
+
+    from tests.support.common import _find_bc_base_dockerfile
+
+    dockerfile = _find_bc_base_dockerfile()
+    assert dockerfile is not None, "no bc-base Dockerfile found under the repo tree"
+    ctx_dir = dockerfile.parent
+    m = _re.search(
+        r"(?im)^\s*COPY\s+(\S+)\s+\S*/openrouter-shim\b", dockerfile.read_text()
+    )
+    if m:
+        cand = ctx_dir / m.group(1)
+        if cand.is_file():
+            return cand
+    cand = ctx_dir / "openrouter-shim"
+    return cand if cand.is_file() else None
+
+
+class _RecordingUpstream:
+    """A mock OpenRouter upstream on 127.0.0.1 that RECORDS the exact request the
+    shim forwards (path + headers + body) and streams back a fixed response body,
+    so the forwarding fidelity is read from a real round-trip."""
+
+    RESP_BODY = b"data: {\"choice\":\"chunk-1\"}\n\ndata: {\"choice\":\"chunk-2\"}\n\ndata: [DONE]\n\n"
+
+    def __init__(self):
+        import http.server
+        import socketserver
+        import threading
+
+        records = {}
+        resp_body = self.RESP_BODY
+
+        class _H(http.server.BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def log_message(self, *a):  # quiet
+                pass
+
+            def do_POST(self):
+                length = int(self.headers.get("content-length") or 0)
+                body = self.rfile.read(length) if length else b""
+                records["path"] = self.path
+                records["headers"] = {k.lower(): v for k, v in self.headers.items()}
+                records["body"] = body
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Content-Length", str(len(resp_body)))
+                self.end_headers()
+                self.wfile.write(resp_body)
+
+        self.records = records
+        self.server = socketserver.TCPServer(("127.0.0.1", 0), _H)
+        self.port = self.server.server_address[1]
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+
+    def close(self):
+        try:
+            self.server.shutdown()
+            self.server.server_close()
+        except Exception:
+            pass
+
+
+@given('the "openrouter-shim" process is running, listening on a loopback '
+       'address only')
+def openrouter_shim_process_running(ctx, request):
+    import os
+    import socket
+    import subprocess
+    import sys
+    import time
+
+    shim = _committed_openrouter_shim()
+    assert shim is not None, (
+        "the committed docker/bc-base/openrouter-shim asset does not exist yet — "
+        "behavior 3 must create it (the launcher points base_url at its loopback "
+        "endpoint)"
+    )
+
+    # A mock OpenRouter upstream the shim forwards to (records the real forwarded
+    # request); its base carries the '/api' suffix so the concatenation is
+    # verifiable exactly as the real 'https://openrouter.ai/api' does.
+    upstream = _RecordingUpstream()
+    request.addfinalizer(upstream.close)
+    ctx["or_upstream"] = upstream
+    upstream_base = f"http://127.0.0.1:{upstream.port}/api"
+    ctx["or_upstream_base"] = upstream_base
+
+    # Grab a free loopback port for the shim's own listener.
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.bind(("127.0.0.1", 0))
+    shim_port = s.getsockname()[1]
+    s.close()
+    ctx["or_shim_host"] = "127.0.0.1"
+    ctx["or_shim_port"] = shim_port
+
+    # The shim makes its OUTBOUND hop via curl to the (http) mock upstream; strip
+    # any proxy env so curl reaches the loopback mock directly (the real path
+    # rides HTTPS_PROXY, exercised live off-session — honest-deferred).
+    env = dict(os.environ)
+    for k in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
+        env.pop(k, None)
+    env["NO_PROXY"] = "127.0.0.1,localhost"
+    env["no_proxy"] = "127.0.0.1,localhost"
+
+    proc = subprocess.Popen(
+        [sys.executable, str(shim),
+         "--host", "127.0.0.1", "--port", str(shim_port),
+         "--upstream", upstream_base],
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env, text=True,
+    )
+    request.addfinalizer(proc.kill)
+    ctx["or_shim_proc"] = proc
+
+    # Wait for the LOOPBACK listener to accept (proves it is listening on the
+    # loopback address).
+    deadline = time.time() + 10
+    listening = False
+    while time.time() < deadline:
+        if proc.poll() is not None:
+            out = proc.stdout.read() if proc.stdout else ""
+            raise AssertionError(
+                f"the openrouter-shim exited before listening (rc={proc.returncode}); "
+                f"output:\n{out}"
+            )
+        try:
+            c = socket.create_connection(("127.0.0.1", shim_port), timeout=0.5)
+            c.close()
+            listening = True
+            break
+        except OSError:
+            time.sleep(0.1)
+    assert listening, (
+        "the openrouter-shim did not start listening on its loopback port "
+        f"127.0.0.1:{shim_port} within the timeout"
+    )
+    # LOOPBACK-ONLY: the shim's argparse default host is the loopback address
+    # (the launcher passes --host 127.0.0.1); it does not bind a public interface.
+    ctx["or_shim_listening"] = True
+
+
+@when('the sandboxed fabro node issues its LLM call to the "openai"-identified '
+      'provider\'s configured "base_url"')
+def sandboxed_node_issues_llm_call(ctx):
+    import json
+    import urllib.request
+
+    host = ctx["or_shim_host"]
+    port = ctx["or_shim_port"]
+    path = "/v1/chat/completions"
+    ctx["or_request_path"] = path
+    # The sandboxed node holds the literal placeholder Bearer token (agent-vault
+    # substitutes the real key on the shim's OWN outbound hop).  The node reaches
+    # the shim over PLAIN loopback — no proxy on this hop.
+    bearer = "Bearer __PLACEHOLDER__"
+    ctx["or_request_authorization"] = bearer
+    body = json.dumps({"model": "anthropic/claude-sonnet-4.5",
+                       "messages": [{"role": "user", "content": "hi"}]}).encode()
+
+    req = urllib.request.Request(
+        f"http://{host}:{port}{path}",
+        data=body,
+        method="POST",
+        headers={
+            "Authorization": bearer,
+            "Content-Type": "application/json",
+            "X-Trace": "node-hop",
+        },
+    )
+    # No-proxy opener: the node->shim hop is plain loopback with NO HTTPS_PROXY.
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    resp = opener.open(req, timeout=30)
+    ctx["or_response_status"] = resp.status
+    ctx["or_response_body"] = resp.read()
+
+
+@then('the request reaches the "openrouter-shim" process over plain loopback, '
+      'with no "HTTPS_PROXY" needed for that hop')
+def request_reaches_shim_over_loopback(ctx):
+    # The node->shim hop succeeded over plain loopback (no proxy opener was used),
+    # and the shim forwarded it: the mock upstream RECORDED a request, proving the
+    # request reached the shim process.
+    assert ctx.get("or_shim_host") == "127.0.0.1", (
+        "the shim listener must be a loopback address (127.0.0.1) — the node "
+        f"reaches it over plain loopback; got {ctx.get('or_shim_host')!r}"
+    )
+    assert ctx.get("or_response_status") == 200, (
+        "the node's plain-loopback LLM call to the shim base_url must succeed "
+        f"(no HTTPS_PROXY needed for that hop); got status "
+        f"{ctx.get('or_response_status')!r}"
+    )
+    records = ctx["or_upstream"].records
+    assert records, (
+        "the request must reach the openrouter-shim process and be forwarded "
+        "upstream — the mock upstream recorded no forwarded request"
+    )
+
+
+@then('the shim forwards the request to "https://openrouter.ai/api" plus the '
+      'incoming request path, unchanged, with no header reshaping — unlike the '
+      '"anthropic-oauth-shim", which does reshape headers')
+def shim_forwards_to_openrouter_api_unchanged(ctx):
+    import importlib.util
+
+    shim = _committed_openrouter_shim()
+    assert shim is not None, "the committed openrouter-shim asset must exist"
+
+    # The DEFAULT upstream is OpenRouter's REAL API host WITH the load-bearing
+    # '/api' suffix (bare 'https://openrouter.ai' hits the website 404, not the
+    # API).  Read from the REAL committed shim module.
+    spec = importlib.util.spec_from_file_location("_or_shim_fwd", shim)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    assert getattr(mod, "UPSTREAM", None) == "https://openrouter.ai/api", (
+        "the openrouter-shim's default UPSTREAM must be "
+        "'https://openrouter.ai/api' (the '/api' suffix is REQUIRED); got "
+        f"{getattr(mod, 'UPSTREAM', None)!r}"
+    )
+
+    # FUNCTIONAL: the shim forwarded to <upstream base> + the INCOMING request
+    # path, unchanged.  Against the mock the base carries '/api', so the recorded
+    # forwarded path is '/api' + the node's incoming path — exactly the shape the
+    # real 'https://openrouter.ai/api' + incoming path produces.
+    records = ctx["or_upstream"].records
+    incoming = ctx["or_request_path"]
+    assert records.get("path") == "/api" + incoming, (
+        "the shim must forward to the upstream base + the INCOMING request path "
+        f"unchanged; expected {'/api' + incoming!r}, upstream recorded "
+        f"{records.get('path')!r}"
+    )
+
+    # NO HEADER RESHAPING: the incoming 'Authorization: Bearer' header is
+    # forwarded UNCHANGED (agent-vault substitutes the real key on the outbound
+    # hop; the shim itself rewrites nothing) — UNLIKE the anthropic-oauth-shim,
+    # which strips x-api-key and REWRITES Authorization to a fixed dummy Bearer.
+    fwd_headers = records.get("headers", {})
+    assert fwd_headers.get("authorization") == ctx["or_request_authorization"], (
+        "the shim must forward the incoming Authorization header UNCHANGED (no "
+        f"reshaping); sent {ctx['or_request_authorization']!r}, upstream saw "
+        f"{fwd_headers.get('authorization')!r}"
+    )
+    # A non-auth request header the node set is forwarded through as-is too.
+    assert fwd_headers.get("x-trace") == "node-hop", (
+        "the shim must forward the node's request headers through unchanged; the "
+        f"X-Trace header did not survive: {fwd_headers.get('x-trace')!r}"
+    )
+    # The shim did NOT inject the anthropic-oauth-shim's reshaping headers.
+    assert "anthropic-beta" not in fwd_headers, (
+        "the openrouter-shim must NOT reshape headers — it must not add the "
+        "anthropic-oauth-shim's 'anthropic-beta' header"
+    )
+
+
+@then('the shim streams the upstream response back to the sandboxed node '
+      'unchanged')
+def shim_streams_response_back_unchanged(ctx):
+    got = ctx.get("or_response_body")
+    assert got == _RecordingUpstream.RESP_BODY, (
+        "the shim must stream the upstream response body back to the node "
+        f"UNCHANGED; upstream sent {_RecordingUpstream.RESP_BODY!r}, node got "
+        f"{got!r}"
+    )
