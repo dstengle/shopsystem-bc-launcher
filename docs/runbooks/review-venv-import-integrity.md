@@ -2,9 +2,9 @@
 
 Applies to **any** shop that verifies a commit by provisioning a throwaway venv
 and running the test suite in it. Nothing here is specific to one package — the
-traps are structural properties of editable installs, shared containers, and
-`.pth` path configuration, so the same walls are waiting in every BC that does
-differential verification.
+traps are structural properties of editable installs, shared containers, `.pth`
+path configuration, and inherited global `site-packages`, so the same walls are
+waiting in every BC that does differential verification.
 
 The failure mode this runbook exists to prevent is the worst one a review can
 have: **a confidently-reported ruling that is false**, because the tests never
@@ -27,7 +27,13 @@ resolution in one process does not constrain resolution in the *next* process
 says nothing about the other arm.
 
 Treat the assert as a **detector**, not a guarantee. The guarantee comes from
-purging path config and asserting in-process, per trap 4's mitigation.
+controlling path config and asserting in-process, per trap 4's mitigation.
+
+Note the sharp edge: **purging path config is itself one of the traps.** On a
+venv built with `--system-site-packages`, trap 4's blanket purge removes your
+own pointer along with the foreign one and unmasks a stale global underneath it
+(trap 5). Purging is necessary and not safe on its own — purge, re-point, then
+assert.
 
 ## Trap 1 — the stale global editable install (shared environment skew)
 
@@ -159,6 +165,80 @@ trap: with the purge + in-process assert + per-arm resolution printing in place,
 `pre + mutation` ran 23 passed GREEN and `post + mutation` produced 1 failure —
 the correct, non-collapsed contrast.
 
+## Trap 5 — the blanket purge unmasks a stale non-editable global
+
+This is trap 4's mitigation turning into a trap of its own: you follow the
+purge prescription **literally and correctly**, and it is the purge that
+poisons you.
+
+**Symptom.** In a venv provisioned with `--system-site-packages`, trap 4's
+blanket
+
+```bash
+rm -f <venv>/lib/python*/site-packages/__editable__*.pth
+```
+
+deletes your **own** editable pointer along with the foreign one — the glob
+cannot tell them apart. Import of `<pkg>` then still **succeeds**, silently
+resolving to a stale copy in the global `site-packages` that the venv
+inherits. No error, no warning, no missing module; `import <pkg>` just quietly
+binds to old code.
+
+**Why traps 1 and 4 do not reach it.** The stale global is a plain
+**non-editable** install (e.g. a `<pkg>-<ver>.dist-info` under the
+interpreter's global `site-packages`, typically root-owned and not removable
+without sudo). It is **not a `.pth`** — so **no purge can remove it**. The
+blanket purge *unmasks* it rather than clearing it. Trap 1 frames the hazard
+as a sibling or deleted *worktree*, i.e. bad path config pointing somewhere
+wrong; this is a stale *global package* sitting exactly where it belongs, and
+that framing does not cover it. Trap 4's purge is the trigger here, not the
+cure.
+
+**Why it matters — the poisoned arm is the one claiming a fix is ABSENT.** A
+stale global is, by construction, **pre-fix code**. So the arm it poisons is
+the arm asserting a fix is **absent** — and that reading presents as a
+*finding* rather than as a failure, which is exactly the reading a reviewer is
+least likely to distrust. Observed in this shop: immediately post-purge,
+`<pkg>.__file__` resolved to the global install, and a defect **genuinely
+fixed** on the checkout under test measured as **UNFIXED**, because the global
+still carried the pre-fix line while the checkout carried the fix. A confident
+false ruling, on the precise claim the review existed to settle.
+
+**Mitigation — either shape works; pick one deliberately.**
+
+1. **Provision the venv WITHOUT `--system-site-packages`.** With no inherited
+   global `site-packages` on the path there is nothing to fall back to, and a
+   missing pointer fails **loudly** instead of resolving silently. Prefer this
+   whenever the suite's dependencies can all be installed into the venv — the
+   cost is that they must be.
+
+2. **If the suite genuinely needs `--system-site-packages`** (e.g. for
+   shop-level packages not published to any index), point at the checkout with
+   a **uniquely-named, non-`__editable__` `.pth`** that the blanket purge's
+   glob does not match:
+
+   ```bash
+   echo '<repo>/src' > <venv>/lib/python*/site-packages/zz-<work-id>-src.pth
+   ```
+
+   The load-bearing property is the **name**: it must not match
+   `__editable__*`, so it survives the purge that removes foreign pointers.
+   Work-id-scoping it keeps it unique per dispatch, per trap 2.
+
+   Note what the name does **not** buy you: precedence. The venv's own
+   `site-packages` is processed ahead of the inherited global one, so a `.pth`
+   there out-ranks the stale global **regardless of what it is called** — a
+   `zz-` prefix is a naming convention for surviving the glob, not a sort-order
+   trick. (Verified: `sys.path` places the `.pth`'s entry immediately before
+   the global `site-packages`; an `aaa-`-prefixed file resolves identically.)
+
+**Keep trap 4's in-process assert — it is what caught this.** The assert is the
+detector for this trap too, and it worked: it flagged the skew immediately
+instead of letting the false ruling ship. That is evidence the assert should
+stay **mandatory**, not evidence to weaken it or to drop the purge. On a
+`--system-site-packages` venv the full sequence is **purge, re-point, assert** —
+dropping any one of the three re-opens either trap 4 or trap 5.
+
 ## Attribution — who clobbers the venv
 
 Do not assume an external agent. In a shared container the likeliest cause is
@@ -200,7 +280,12 @@ Before trusting any review venv result:
 
 - [ ] Venv provisioned at a **unique**, work-id-scoped path (not a fixed one).
 - [ ] `__editable__*.pth` purged after provisioning **and** before each run.
+- [ ] Venv provisioned **without** `--system-site-packages` — or, if it needs
+      them, the checkout is re-pointed after the purge by a uniquely-named
+      non-`__editable__` `.pth` that survives the glob.
 - [ ] Import resolution asserted **in the same process** that runs the tests.
 - [ ] Every arm of a differential experiment asserts **and prints** its resolved
       path.
 - [ ] The printed paths were actually **read**, not just emitted.
+- [ ] A resolution into the **global** `site-packages` was ruled out explicitly
+      — no purge removes a stale non-editable global; the purge only unmasks it.
