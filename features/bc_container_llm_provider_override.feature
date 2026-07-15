@@ -45,6 +45,21 @@ Feature: a launch-time --llm-provider / BCLAUNCHER_LLM_PROVIDER override selects
   #     scoped to the OpenRouter host — the broker-side vault lookup key stays
   #     OPENROUTER_API_KEY and is DECOUPLED from the node-side env var name (the
   #     substitution matches by DESTINATION HOST, not by env var name).
+  #
+  # RETIRED-SCENARIO PROVENANCE (work_id lead-ifye3.5):
+  #   4c9f5b265c5098b7  superseded-by  af07c326a031fafe
+  #   reason: the retired scenario pointed the native "openai" provider's base_url
+  #     DIRECTLY at "https://openrouter.ai/api/v1", a shape a this-session
+  #     root-cause dive proved never completes a real dispatch — fabro's SANDBOXED
+  #     node execution clears + FilterSensitive-strips credential-shaped env vars
+  #     (*_api_key/*_token/…) AND the sandboxed LLM call never routes through
+  #     HTTPS_PROXY, so agent-vault can never substitute the real credential from
+  #     inside the sandbox.  The corrected scenario below (af07c326a031fafe) points
+  #     the native "openai" provider's base_url at the LOCAL "openrouter-shim"
+  #     loopback endpoint (an unsandboxed, container-level reverse proxy launched
+  #     with the same launch-lifecycle shape as the existing anthropic-oauth-shim),
+  #     moving the real outbound egress — where agent-vault substitutes the
+  #     credential — onto the shim's OWN hop instead of the sandboxed node's.
 
   @scenario_hash:1d9d3777e3c3d8f5 @bc:shopsystem-bc-launcher
   Scenario: a plain launch with no operator-supplied provider override keeps the Anthropic-subscription path as the active LLM provider
@@ -54,13 +69,13 @@ Feature: a launch-time --llm-provider / BCLAUNCHER_LLM_PROVIDER override selects
     Then the container's fabro run is launched with the active LLM provider set to "anthropic"
     And no OpenRouter agent-vault credential is requested for this launch
 
-  @scenario_hash:4c9f5b265c5098b7 @bc:shopsystem-bc-launcher
-  Scenario: an explicit launch-time provider override selects OpenRouter access via fabro's NATIVE "openai" provider identity, with its "base_url" overridden to the OpenRouter endpoint — not a new custom "openrouter" fabro provider
+  @scenario_hash:af07c326a031fafe @bc:shopsystem-bc-launcher
+  Scenario: an explicit launch-time provider override registers fabro's NATIVE "openai" provider identity with its "base_url" pointed at the LOCAL "openrouter-shim" loopback endpoint, not directly at OpenRouter's own host
     Given the shopsystem-bc-launcher BC is installed
     And the operator supplies a launch-time LLM provider override of "openrouter" via "--llm-provider openrouter" (or "BCLAUNCHER_LLM_PROVIDER=openrouter")
     When bc-container launch is run for BC name "shopsystem-messaging" with the operator-supplied provider override
-    Then the container's fabro settings register the override under fabro's NATIVE "openai" provider identity, with its "base_url" set to "https://openrouter.ai/api/v1" — no new custom "openrouter" fabro provider is registered
-    And fabro's catalog auto-routing for OpenRouter-catalog-qualified model strings such as "anthropic/claude-sonnet-4.5" resolves unambiguously to the "openai" provider, with no collision against fabro's built-in "anthropic" catalog entry
+    Then the container's fabro settings register the override under fabro's NATIVE "openai" provider identity, with its "base_url" set to the local "openrouter-shim" process's loopback address — not "https://openrouter.ai" directly and no new custom "openrouter" fabro provider is registered
+    And the "openrouter-shim" process is launched as an unsandboxed, container-level process alongside the fabro sandboxed run, the same launch-lifecycle shape the existing "anthropic-oauth-shim" already uses
     And the Anthropic anthropic-oauth-shim path is not engaged for this launch
 
   @scenario_hash:98b956adece2b7e0 @bc:shopsystem-bc-launcher

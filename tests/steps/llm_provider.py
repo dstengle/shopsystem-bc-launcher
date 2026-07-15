@@ -17,6 +17,7 @@ from pytest_bdd import given, when, then, parsers  # noqa: F401
 
 from bc_launcher.fabro.constants import (
     ANTHROPIC_OAUTH_SHIM_BIN,
+    FABRO_SHIM_HOST,
     FABRO_SHIM_PORT,
     FABRO_WORKFLOW_FILE as FABRO_WORKFLOW_FILE_NAME,
 )
@@ -160,33 +161,64 @@ def fabro_run_active_provider_openrouter(ctx):
 
 
 # ---------------------------------------------------------------------------
-# Behavior (@scenario_hash:4c9f5b265c5098b7 — supersedes the retired
-# b3054f5439369fa8): the launch-time openrouter override registers under fabro's
+# Behavior 1 (@scenario_hash:af07c326a031fafe — supersedes the retired
+# 4c9f5b265c5098b7): the launch-time openrouter override registers under fabro's
 # NATIVE "openai" provider identity ([llm.providers.openai]) with base_url
-# overridden to the OpenRouter endpoint — NOT a new custom [llm.providers.
-# openrouter] fabro provider (the shape a real E2E scout proved never completes a
-# dispatch: fabro catalog auto-routing resolves "anthropic/..."-prefixed model
-# strings to the BUILT-IN "anthropic" provider before the custom "openrouter"
-# provider is considered -> "Provider 'anthropic' not registered").
+# pointed at the LOCAL "openrouter-shim" loopback endpoint — NOT directly at
+# OpenRouter's own host, and NOT a custom [llm.providers.openrouter] provider.
+# The retired scenario's direct-to-openrouter base_url never completes a real
+# dispatch: fabro's SANDBOXED node clears + FilterSensitive-strips credential-
+# shaped env vars AND the sandboxed LLM call never routes through HTTPS_PROXY, so
+# agent-vault can never substitute the real credential from inside the sandbox.
+# The fix moves egress to an UNSANDBOXED, container-level "openrouter-shim"
+# reverse proxy launched with the SAME launch-lifecycle shape as the existing
+# anthropic-oauth-shim.
 #
 # FIDELITY: every assertion binds to the REAL launcher's ACTUAL recorded
-# `--orchestrator fabro` engage over the FakeDockerDriver (driven via
-# _odd9_drive_fabro_launch on the openrouter override path) and the REAL
-# provider-keyed model mapping table — never a model and never a shallow string-
-# match: the registered provider block, its base_url, the supplied `-I MODEL_*`
-# inputs, and the mapping-table slugs are read out of the real launch wiring.
+# `--orchestrator fabro` engage AND recorded container execs over the
+# FakeDockerDriver (driven via _odd9_drive_fabro_launch on the openrouter
+# override path) — never a model and never a shallow string-match: the
+# registered provider block, its loopback base_url, and the recorded
+# openrouter-shim launch exec are read out of the real launch wiring.
 # ---------------------------------------------------------------------------
+
+
+def _openrouter_shim_start_calls(ctx):
+    """The recorded launch execs that START the in-container openrouter-shim
+    listener (the `_place_fabro_def_and_wiring` openrouter-path shim start).
+    Bound to the launcher's ACTUAL recorded exec so the assertion reads the real
+    launch, not a model: on the openrouter override path exactly one such exec is
+    recorded; on the default (anthropic) path there must be NONE."""
+    from bc_launcher.fabro.constants import (
+        FABRO_OPENROUTER_SHIM_PORT,
+        OPENROUTER_SHIM_BIN,
+    )
+
+    return [
+        c
+        for c in _cadr_exec_calls(ctx)
+        if c.command[:2] == ["/bin/sh", "-c"]
+        and len(c.command) >= 3
+        and OPENROUTER_SHIM_BIN in c.command[2]
+        and f"--port {FABRO_OPENROUTER_SHIM_PORT}" in c.command[2]
+    ]
 
 
 @then(parsers.parse(
     'the container\'s fabro settings register the override under fabro\'s NATIVE '
-    '"{provider_identity}" provider identity, with its "base_url" set to '
-    '"{base_url}" — no new custom "{custom_name}" fabro provider is registered'
+    '"{provider_identity}" provider identity, with its "base_url" set to the '
+    'local "{shim_name}" process\'s loopback address — not "{not_host}" directly '
+    'and no new custom "{custom_name}" fabro provider is registered'
 ))
-def openrouter_registered_under_native_openai(
-    provider_identity, base_url, custom_name, ctx
+def openrouter_registered_at_shim_loopback(
+    provider_identity, shim_name, not_host, custom_name, ctx
 ):
-    from bc_launcher.fabro.constants import FABRO_OPENROUTER_BASE_URL
+    from urllib.parse import urlparse
+
+    from bc_launcher.fabro.constants import (
+        FABRO_OPENROUTER_BASE_URL,
+        FABRO_SHIM_HOST,
+    )
 
     script = _engage_script(ctx)
 
@@ -199,24 +231,44 @@ def openrouter_registered_under_native_openai(
         f"'{provider_identity}' provider identity ([llm.providers."
         f"{provider_identity}]); script:\n{script}"
     )
-    # Its base_url is OVERRIDDEN to the OpenRouter endpoint, and the base_url line
-    # belongs to THAT provider block (not merely present somewhere in the script).
+    # Its base_url points at the LOCAL openrouter-shim loopback endpoint, and the
+    # base_url line belongs to THAT provider block (not merely present somewhere).
     assert re.search(
         r"\[llm\.providers\." + re.escape(provider_identity) + r"\]"
-        r"(?:\\n|[^\[])*?base_url = \"" + re.escape(base_url) + r"\"",
+        r"(?:\\n|[^\[])*?base_url = \"" + re.escape(FABRO_OPENROUTER_BASE_URL)
+        + r"\"",
         script,
     ), (
         f"the native '{provider_identity}' provider block must set base_url to "
-        f"the OpenRouter endpoint {base_url!r}; script:\n{script}"
+        f"the local openrouter-shim loopback {FABRO_OPENROUTER_BASE_URL!r}; "
+        f"script:\n{script}"
     )
-    # The endpoint is the real constant (guard against a stale literal).
-    assert base_url == FABRO_OPENROUTER_BASE_URL, (
-        f"scenario base_url {base_url!r} must equal the launcher's OpenRouter "
-        f"endpoint constant {FABRO_OPENROUTER_BASE_URL!r}"
+    # That base_url is a LOOPBACK address on the openrouter-shim's distinct port —
+    # NOT a direct-to-OpenRouter host (the retired shape that never completes a
+    # dispatch from inside fabro's sandbox).
+    parsed = urlparse(FABRO_OPENROUTER_BASE_URL)
+    assert parsed.hostname == FABRO_SHIM_HOST, (
+        f"the openrouter override base_url must point at the loopback host "
+        f"{FABRO_SHIM_HOST!r}, got {parsed.hostname!r} "
+        f"({FABRO_OPENROUTER_BASE_URL!r})"
+    )
+    from bc_launcher.fabro.constants import FABRO_OPENROUTER_SHIM_PORT
+
+    assert parsed.port == FABRO_OPENROUTER_SHIM_PORT, (
+        f"the openrouter override base_url must point at the openrouter-shim's "
+        f"port {FABRO_OPENROUTER_SHIM_PORT}, got {parsed.port!r} "
+        f"({FABRO_OPENROUTER_BASE_URL!r})"
+    )
+    # NOT directly at OpenRouter's own host: neither the scenario's named host nor
+    # OpenRouter's domain may appear as the registered base_url / in the engage.
+    or_host = urlparse(not_host).hostname or not_host
+    assert or_host not in script and "openrouter.ai" not in script, (
+        f"the openrouter override must NOT point base_url directly at OpenRouter "
+        f"({not_host!r} / openrouter.ai) — egress rides the local "
+        f"{shim_name!r}; script:\n{script}"
     )
     # NO new custom "openrouter" fabro provider block is registered (the retired
-    # shape) — the correction is precisely to STOP registering a provider named
-    # after the model-catalog vendor.
+    # custom-provider shape) — the override rides the native openai identity.
     assert f"[llm.providers.{custom_name}]" not in script, (
         f"no new custom '[llm.providers.{custom_name}]' fabro provider may be "
         f"registered — the override rides the native openai identity; "
@@ -225,62 +277,76 @@ def openrouter_registered_under_native_openai(
 
 
 @then(parsers.parse(
-    'fabro\'s catalog auto-routing for OpenRouter-catalog-qualified model strings '
-    'such as "{model_slug}" resolves unambiguously to the "{provider_identity}" '
-    'provider, with no collision against fabro\'s built-in "{builtin}" catalog '
-    'entry'
+    'the "{shim_name}" process is launched as an unsandboxed, container-level '
+    'process alongside the fabro sandboxed run, the same launch-lifecycle shape '
+    'the existing "{ref_shim}" already uses'
 ))
-def openrouter_catalog_routing_resolves_to_openai(
-    model_slug, provider_identity, builtin, ctx
-):
-    from bc_launcher.fabro.llm_provider import (
-        LLM_PROVIDER_OPENROUTER,
-        resolve_model_mapping,
+def openrouter_shim_launched_unsandboxed(shim_name, ref_shim, ctx):
+    from bc_launcher.fabro.constants import (
+        FABRO_OPENROUTER_SHIM_PORT,
+        FABRO_SHIM_HOST,
+        FABRO_SHIM_PORT,
+        OPENROUTER_SHIM_BIN,
+    )
+    from bc_launcher.fabro.provider import (
+        _fabro_shim_start_script,
+        _openrouter_shim_start_script,
     )
 
-    script = _engage_script(ctx)
+    # EXACTLY ONE openrouter-shim launch exec is recorded on this path — the
+    # launcher STARTS the unsandboxed, container-level listener (read out of the
+    # REAL recorded container execs, never a model).
+    starts = _openrouter_shim_start_calls(ctx)
+    assert len(starts) == 1, (
+        f"the openrouter override path must launch EXACTLY ONE {shim_name!r} "
+        f"listener process, but {len(starts)} were recorded: "
+        f"{[c.command[:3] for c in starts]!r}"
+    )
+    call = starts[0]
 
-    # (a) the named slug is a REAL OpenRouter-row model ID the launcher actually
-    # supplies on this run — an "anthropic/..."-prefixed OpenRouter-catalog slug
-    # (exactly the string whose prefix collided with fabro's built-in anthropic
-    # provider under the retired custom-openrouter shape).
-    or_row = resolve_model_mapping(LLM_PROVIDER_OPENROUTER)
-    assert model_slug in or_row.values(), (
-        f"the example model string {model_slug!r} must be a real OpenRouter-row "
-        f"model ID from the mapping table; row={or_row!r}"
+    # UNSANDBOXED, CONTAINER-LEVEL: it is a direct container exec (`/bin/sh -c`),
+    # the SAME exec shape the anthropic-oauth-shim launch uses — NOT a fabro
+    # sandboxed node.
+    assert call.command[:2] == ["/bin/sh", "-c"], (
+        f"the {shim_name!r} launch must be a direct container exec "
+        f"(`/bin/sh -c`), like the {ref_shim!r}; got {call.command[:2]!r}"
     )
-    assert model_slug.startswith(f"{builtin}/"), (
-        f"the example model string {model_slug!r} must be an OpenRouter-catalog-"
-        f"qualified '{builtin}/...' slug (the prefix that collided with fabro's "
-        f"built-in '{builtin}' provider under the retired shape)"
-    )
-    run_inputs = _model_run_inputs(script)
-    assert model_slug in run_inputs.values(), (
-        f"the launcher must actually supply the OpenRouter-catalog slug "
-        f"{model_slug!r} as a `-I MODEL_*` input on the openrouter finite run; "
-        f"inputs={run_inputs!r}; script:\n{script}"
-    )
+    launch_script = call.command[2]
 
-    # (b) the SOLE provider registered on this launch is the native openai
-    # identity: there is NO custom "openrouter" provider AND NO built-in-named
-    # "anthropic" provider block registered here, so an "anthropic/..."-prefixed
-    # model string cannot route to a registered provider named for its catalog
-    # prefix — it resolves via the ONE registered provider (openai), whose
-    # base_url points at OpenRouter.  That is the collision the correction avoids.
-    assert f"[llm.providers.{provider_identity}]" in script, (
-        f"the openrouter slug must resolve via the registered native "
-        f"'{provider_identity}' provider; script:\n{script}"
+    # SAME launch-lifecycle SHAPE the anthropic-oauth-shim uses: a backgrounded
+    # (`nohup … &`) long-lived listener on the loopback host + the shim's own
+    # `--host`/`--port` serve args.  Bound structurally to the reference shim's
+    # OWN start script rather than a re-derivation.
+    ref_script = _fabro_shim_start_script()
+    for token in ("nohup", "&", "--host", FABRO_SHIM_HOST, "--port"):
+        assert token in ref_script, (
+            f"reference shim {ref_shim!r} start script must use {token!r} "
+            f"(the lifecycle shape being mirrored); ref:\n{ref_script}"
+        )
+        assert token in launch_script, (
+            f"the {shim_name!r} launch must mirror the {ref_shim!r} lifecycle "
+            f"shape token {token!r}; script:\n{launch_script}"
+        )
+    # It launches the openrouter-shim binary on its OWN distinct loopback port
+    # (not the anthropic shim's port), so the two shims coexist.
+    assert OPENROUTER_SHIM_BIN in launch_script, (
+        f"the {shim_name!r} launch must exec the openrouter-shim binary "
+        f"{OPENROUTER_SHIM_BIN!r}; script:\n{launch_script}"
     )
-    assert "[llm.providers.openrouter]" not in script, (
-        "no custom '[llm.providers.openrouter]' provider may be registered — the "
-        f"'{builtin}/...' catalog prefix would then be considered against fabro's "
-        "built-in provider set first (the retired 'Provider not registered' "
-        f"collision); script:\n{script}"
+    assert f"--port {FABRO_OPENROUTER_SHIM_PORT}" in launch_script, (
+        f"the {shim_name!r} listener must bind its OWN loopback port "
+        f"{FABRO_OPENROUTER_SHIM_PORT}; script:\n{launch_script}"
     )
-    assert f"[llm.providers.{builtin}]" not in script, (
-        f"the openrouter path must register NO '[llm.providers.{builtin}]' block, "
-        f"so the '{builtin}/...' slug cannot collide with a registered "
-        f"'{builtin}'-named provider; script:\n{script}"
+    assert FABRO_OPENROUTER_SHIM_PORT != FABRO_SHIM_PORT, (
+        "the openrouter-shim must use a port DISTINCT from the anthropic-oauth-"
+        f"shim's ({FABRO_SHIM_PORT}) so both shims can coexist"
+    )
+    # The launcher's own openrouter-shim start script is what was executed
+    # (fidelity: the recorded exec carries the real start-script bytes).
+    assert launch_script == _openrouter_shim_start_script(), (
+        "the recorded openrouter-shim launch exec must carry the launcher's "
+        f"ACTUAL start script; recorded:\n{launch_script}\n"
+        f"expected:\n{_openrouter_shim_start_script()}"
     )
 
 
