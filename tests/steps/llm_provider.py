@@ -812,9 +812,10 @@ def no_openrouter_credential_requested(ctx):
 
 
 # ---------------------------------------------------------------------------
-# Behavior 5 (@scenario_hash:a3b2b6bebcee78f5 — supersedes the retired
-# 22f2a5bda5c29044): the dispatcher's per-child `fabro run` command line carries
-# run-wide `--model <literal> --provider <active>` flags, REPLACING the retired
+# Behavior 5 (@scenario_hash:bb4f75cea78091c0 — supersedes the retired
+# a3b2b6bebcee78f5, which itself superseded 22f2a5bda5c29044): the dispatcher's
+# per-child `fabro run` command line carries run-wide
+# `--model <literal> --provider <REGISTERED-identity>` flags, REPLACING the retired
 # per-node-class `-I MODEL_CODING/REVIEW/DEFAULT` inputs.  fabro >= v0.267.0 (the
 # FABRO_VERSION the openrouter base_url override depends on) makes
 # `{{ inputs.X }}` inside model_stylesheet a HARD PARSE ERROR (fabro commit
@@ -931,8 +932,11 @@ def dispatcher_spawns_child_fabro_run_openrouter(
 
 
 @then('the child "fabro run" command line carries "--model <literal-model-id> '
-      '--provider openrouter", sourced from the mapping table for the active '
-      'provider')
+      '--provider openai", the model sourced from the mapping table for the '
+      'active provider and the provider naming fabro\'s REGISTERED native '
+      'identity — the "[llm.providers.openai]" entry the override registers — '
+      'never the operator-facing "openrouter" provider name, which fabro\'s '
+      'literal provider lookup cannot resolve')
 def child_fabro_run_carries_run_wide_model_provider(ctx):
     script = ctx.get("b5_engage_script") or _engage_script(ctx)
     cmd = _fabro_run_command(script)
@@ -957,10 +961,42 @@ def child_fabro_run_carries_run_wide_model_provider(ctx):
         f"the openrouter run-wide model {model!r} must be a LITERAL OpenRouter "
         "catalog slug (vendor/model), genuinely the openrouter row's value"
     )
-    # --provider is the pinned active value (the scenario pins it verbatim).
-    assert provider == "openrouter", (
-        "the child `fabro run` must carry the pinned active `--provider "
-        f"openrouter`, got --provider {provider!r}; cmd:\n{cmd}"
+    # --provider names fabro's REGISTERED NATIVE IDENTITY, never the
+    # operator-facing ACTIVE-provider NAME (bb4f75cea78091c0, superseding
+    # a3b2b6bebcee78f5, which pinned the broken "openrouter" value verbatim).
+    # fabro resolves --provider by LITERAL provider lookup, and af07c326a031fafe
+    # pins that NO custom "openrouter" provider is ever registered — so the
+    # operator-facing name is unresolvable by construction.
+    from bc_launcher.fabro.constants import FABRO_OPENROUTER_PROVIDER_IDENTITY
+
+    # (a) the literal identity the scenario pins verbatim ("openai") ...
+    assert provider == "openai", (
+        "the child `fabro run` must carry fabro's REGISTERED native provider "
+        f"identity `--provider openai`, got --provider {provider!r}; cmd:\n{cmd}"
+    )
+    # (b) ... which is NOT the operator-facing active-provider name.  Pinned
+    # explicitly by the scenario ("never the operator-facing \"openrouter\"
+    # provider name"), and the exact defect lead-ifye3.10 fixed.
+    assert provider != "openrouter", (
+        "the child `fabro run` must NOT carry the operator-facing "
+        "active-provider name `--provider openrouter`; fabro's literal provider "
+        f"lookup cannot resolve it (af07c326a031fafe); cmd:\n{cmd}"
+    )
+    # (c) FIDELITY: the flag must name the SAME identity the override actually
+    # REGISTERS — the scenario pins it as "the \"[llm.providers.openai]\" entry
+    # the override registers".  Bound to the REAL recorded engage's registered
+    # block AND to the same constant engage.py sources the flag from, so the
+    # registered block name and the flag cannot silently drift apart (the
+    # one-hop indirection that closes this defect class, not just this defect).
+    assert provider == FABRO_OPENROUTER_PROVIDER_IDENTITY, (
+        "the `--provider` flag must be sourced from the SAME registered-identity "
+        f"constant the provider_block writer uses ({FABRO_OPENROUTER_PROVIDER_IDENTITY!r}), "
+        f"got --provider {provider!r}; cmd:\n{cmd}"
+    )
+    assert f"[llm.providers.{provider}]" in script, (
+        f"the `--provider {provider}` flag must name a provider entry the "
+        f"override GENUINELY registers; no `[llm.providers.{provider}]` block is "
+        f"present in the recorded engage; script:\n{script}"
     )
 
 
