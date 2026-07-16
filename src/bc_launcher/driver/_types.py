@@ -14,6 +14,24 @@ from dataclasses import dataclass, field
 # Errors
 # ---------------------------------------------------------------------------
 
+class DigestResolutionError(Exception):
+    """Raised when a tag's current registry digest cannot be resolved.
+
+    bd shopsystem_bc_launcher-7pmt.  Resolution used to degrade SILENTLY: on
+    any failure it returned the bare tag (``return digest or image_ref``), so
+    launch ran on from an unpinned "latest" while reporting success.  That is
+    how the missing buildx plugin stayed invisible -- and it silently voided
+    the guarantee scenario af2f03d3ac519cb5 exists to pin.
+
+    Failing loud here is deliberate.  The blast radius is bounded: the launch
+    path pulls the resolved digest immediately after resolving it
+    (controller/_launch_prep.py), so a launch already cannot proceed when the
+    registry is unreachable.  Raising therefore surfaces a failure that was
+    going to happen anyway -- with a diagnostic naming the ref and the
+    underlying docker stderr -- instead of quietly launching stale code.
+    """
+
+
 class DockerSocketUnreachableError(Exception):
     """Raised when the Docker socket / daemon cannot be reached.
 
