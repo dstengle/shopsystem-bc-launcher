@@ -11,7 +11,7 @@ import sys
 from pathlib import Path
 
 from bc_launcher.controller import BcContainerController, _resolve_shop_network
-from bc_launcher.driver import RealDockerDriver
+from bc_launcher.driver import RealDockerDriver, RealRegistryDriver
 from bc_launcher.liveness import PRESENCE_HEARTBEAT_WATCH_VERB
 from bc_launcher.manifest import ManifestController, RealGitDriver, RealGitHubDriver
 
@@ -169,6 +169,22 @@ def _run_manifest(args: argparse.Namespace) -> int:
     return 0
 
 
+def build_controller() -> BcContainerController:
+    """Construct the controller the real (production) launch path runs on.
+
+    This is the single construction site for real runs, and it MUST inject a
+    RealRegistryDriver alongside the RealDockerDriver.  controller/core.py
+    defaults ``registry_driver`` to None, and controller/_launch_prep.py skips
+    its digest-resolution + pull block entirely when the registry driver is
+    absent -- so a controller built without one silently launches whatever
+    stale digest the local Docker cache happens to hold under "latest".  That
+    omission is exactly bd shopsystem_bc_launcher-7pmt: scenario
+    af2f03d3ac519cb5 was green in tests (which inject a fake registry driver)
+    while every real launch skipped resolution altogether.
+    """
+    return BcContainerController(RealDockerDriver(), RealRegistryDriver())
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -176,7 +192,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.subcommand == "manifest":
         return _run_manifest(args)
 
-    controller = BcContainerController(RealDockerDriver())
+    controller = build_controller()
 
     if args.subcommand == "launch":
         # Resolve --startup-prompt: explicit value is a total override;
