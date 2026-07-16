@@ -9,6 +9,7 @@ from __future__ import annotations
 from bc_launcher.driver._types import (  # noqa: F401
     ContainerInfo,
     ContainerMount,
+    DigestResolutionError,
     DockerSocketUnreachableError,
 )
 from bc_launcher.driver.interfaces import DockerDriver, RegistryDriver  # noqa: F401

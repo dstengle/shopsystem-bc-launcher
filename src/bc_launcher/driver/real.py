@@ -12,6 +12,7 @@ import time
 from bc_launcher.driver._types import (
     ContainerInfo,
     ContainerMount,
+    DigestResolutionError,
     DockerSocketUnreachableError,
 )
 from bc_launcher.driver._util import _is_docker_socket_unreachable, _parse_host_port
@@ -515,10 +516,24 @@ class RealRegistryDriver:
     def resolve_digest(self, image_ref: str) -> str:
         cmd = ["docker", "manifest", "inspect", "--verbose", image_ref]
         result = self._run(cmd, capture_output=True, text=True, check=False)
-        payload = json.loads(result.stdout)
-        # --verbose yields a dict for a single-platform ref, or a list of
-        # per-platform entries for a multi-arch index.
-        if isinstance(payload, list):
-            payload = payload[0]
-        return payload["Descriptor"]["digest"]
+
+        if result.returncode != 0:
+            raise DigestResolutionError(
+                f"could not resolve the current registry digest for {image_ref!r}: "
+                f"{' '.join(cmd)} exited {result.returncode}. "
+                f"stderr: {(result.stderr or '').strip()}"
+            )
+
+        try:
+            payload = json.loads(result.stdout)
+            # --verbose yields a dict for a single-platform ref, or a list of
+            # per-platform entries for a multi-arch index.
+            if isinstance(payload, list):
+                payload = payload[0]
+            return payload["Descriptor"]["digest"]
+        except (ValueError, KeyError, IndexError, TypeError) as exc:
+            raise DigestResolutionError(
+                f"could not read a manifest digest for {image_ref!r} from "
+                f"{' '.join(cmd)}: {exc}. stdout: {(result.stdout or '').strip()[:200]!r}"
+            ) from exc
 
