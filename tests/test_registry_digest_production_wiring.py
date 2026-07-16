@@ -144,3 +144,41 @@ def test_resolve_digest_returns_the_pullable_manifest_digest_not_the_config_dige
     assert "--verbose" in calls[0], (
         "the manifest digest is only exposed under --verbose (.Descriptor.digest)"
     )
+
+
+def test_resolve_digest_fails_loudly_when_resolution_cannot_produce_a_digest():
+    """Resolution failure must raise, not silently degrade to the bare tag.
+
+    The old `return digest or image_ref` fallback is precisely what let fault 2
+    hide: buildx was absent, the subprocess exited non-zero with empty stdout,
+    and launch carried on from the unpinned tag reporting success.  Blast
+    radius of raising is bounded: _launch_prep.py pulls the resolved digest
+    immediately afterwards, so the launch path already requires the registry to
+    be reachable at this point.
+    """
+    from bc_launcher.driver import DigestResolutionError
+
+    runner, _calls = _runner_returning(
+        "", returncode=1, stderr="docker: 'buildx' is not a docker command."
+    )
+    driver = RealRegistryDriver(runner=runner)
+
+    with pytest.raises(DigestResolutionError) as excinfo:
+        driver.resolve_digest("ghcr.io/dstengle/shopsystem-bc-base:latest")
+
+    message = str(excinfo.value)
+    assert "ghcr.io/dstengle/shopsystem-bc-base:latest" in message
+    assert "is not a docker command" in message, (
+        "the underlying docker stderr must reach the operator, not be swallowed"
+    )
+
+
+def test_resolve_digest_fails_loudly_when_the_payload_carries_no_descriptor():
+    """A well-formed-but-digestless payload must also raise, not fall back."""
+    from bc_launcher.driver import DigestResolutionError
+
+    runner, _calls = _runner_returning(json.dumps({"Ref": "x", "SchemaV2Manifest": {}}))
+    driver = RealRegistryDriver(runner=runner)
+
+    with pytest.raises(DigestResolutionError):
+        driver.resolve_digest("ghcr.io/dstengle/shopsystem-bc-base:latest")
