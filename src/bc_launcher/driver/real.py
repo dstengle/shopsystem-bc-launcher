@@ -5,6 +5,7 @@ bc_launcher.driver package __init__ for import-path compatibility.
 """
 from __future__ import annotations
 
+import json
 import subprocess
 import time
 
@@ -479,24 +480,45 @@ class RealDockerDriver:
 
 
 # ---------------------------------------------------------------------------
-# Real registry driver (shells out to docker buildx imagetools)
+# Real registry driver (shells out to docker manifest inspect)
 # ---------------------------------------------------------------------------
 
 class RealRegistryDriver:
     """Production RegistryDriver that resolves a tag's current registry digest.
 
-    Uses ``docker buildx imagetools inspect --format '{{.Manifest.Digest}}'``
-    to read the registry-current digest for the given image reference.  Falls
-    back to the original reference if resolution fails (so launch is not made
-    strictly dependent on registry reachability at run time).
+    Uses ``docker manifest inspect --verbose <ref>`` and reads
+    ``.Descriptor.digest`` -- the MANIFEST digest, which is the digest a
+    ``repo@sha256:...`` pull resolves and the digest Docker reports in
+    ``RepoDigests``.
+
+    Two deliberate choices here, both learned the hard way (bd
+    shopsystem_bc_launcher-7pmt):
+
+    * **Not buildx.**  The previous implementation shelled out to ``docker
+      buildx imagetools inspect``, but bc-base's baked docker-cli apt package
+      ships no buildx plugin -- in-container that command fails outright with
+      "docker: 'buildx' is not a docker command."
+
+    * **--verbose, not the plain form.**  Plain ``docker manifest inspect``
+      prints the manifest body, whose ``.config.digest`` is the CONFIG blob
+      digest (equal to the local image Id).  That digest is *not* pullable:
+      ``docker pull repo@<config-digest>`` fails with "manifest unknown".  Only
+      ``--verbose`` exposes ``.Descriptor.digest``, the manifest digest.
     """
 
+    def __init__(self, runner=None) -> None:
+        # Injectable subprocess seam so the resolution contract (which argv is
+        # issued, which digest field is read, and how failure surfaces) is
+        # testable without a live registry.  Production passes nothing.
+        self._run = runner if runner is not None else subprocess.run
+
     def resolve_digest(self, image_ref: str) -> str:
-        result = subprocess.run(
-            ["docker", "buildx", "imagetools", "inspect",
-             "--format", "{{.Manifest.Digest}}", image_ref],
-            capture_output=True, text=True, check=False,
-        )
-        digest = result.stdout.strip()
-        return digest or image_ref
+        cmd = ["docker", "manifest", "inspect", "--verbose", image_ref]
+        result = self._run(cmd, capture_output=True, text=True, check=False)
+        payload = json.loads(result.stdout)
+        # --verbose yields a dict for a single-platform ref, or a list of
+        # per-platform entries for a multi-arch index.
+        if isinstance(payload, list):
+            payload = payload[0]
+        return payload["Descriptor"]["digest"]
 
