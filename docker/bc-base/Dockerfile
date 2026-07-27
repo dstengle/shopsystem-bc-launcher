@@ -197,7 +197,7 @@ RUN set -e && \
         aarch64) BD_ARCH="arm64" ;; \
         *)       echo "Unsupported architecture: $ARCH" && exit 1 ;; \
     esac && \
-    BD_VERSION=1.1.0 && \
+    BD_VERSION=1.1.2 && \
     BD_URL="https://github.com/steveyegge/beads/releases/download/v${BD_VERSION}/beads_${BD_VERSION}_linux_${BD_ARCH}.tar.gz" && \
     curl -fsSL "$BD_URL" | tar -xz -C /tmp && \
     install -m 0755 /tmp/bd /usr/local/bin/bd && \
